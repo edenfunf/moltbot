@@ -1,0 +1,73 @@
+name: QA mention proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_sha:
+        description: Exact product commit to prove (full SHA)
+        required: true
+
+permissions: {}
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact product SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.product_sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Focused unit suite on the exact head
+        run: pnpm exec vitest run --config test/vitest/vitest.full-core-unit-fast.config.ts src/auto-reply/reply/mentions.test.ts
+
+      - name: Mock-gateway harness proof (both scenarios)
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+        run: |
+          node scripts/run-node.mjs qa suite \
+            --scenario channel-mention-decorated-identity \
+            --scenario channel-mention-separator-literal \
+            --provider-mode mock-openai --runner host \
+            --output-dir .artifacts/qa-e2e/proof
+
+      - name: Assemble proof package
+        run: |
+          set -euo pipefail
+          mkdir -p proof-package
+          cp .artifacts/qa-e2e/proof/qa-suite-report.md proof-package/
+          cp .artifacts/qa-e2e/proof/qa-suite-summary.json proof-package/
+          cp .artifacts/qa-e2e/proof/qa-evidence.json proof-package/
+          cat > proof-package/PROOF.json <<EOF
+          {
+            "product_sha": "${{ inputs.product_sha }}",
+            "harness_workflow_sha": "${{ github.workflow_sha }}",
+            "run_id": "${{ github.run_id }}",
+            "runner": "ubuntu-latest",
+            "provider": "mock-openai",
+            "gateway": "ephemeral child via qa suite --runner host"
+          }
+          EOF
+          (cd proof-package && sha256sum * | tee SHA256SUMS)
+          echo "=== qa-suite-report.md ==="
+          cat proof-package/qa-suite-report.md
+
+      - name: Upload proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-mention-proof-${{ inputs.product_sha }}
+          path: proof-package/
+          if-no-files-found: error
