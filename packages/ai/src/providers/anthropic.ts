@@ -5,7 +5,6 @@ import type {
   MessageCreateParamsStreaming,
   MessageParam,
   RawMessageStreamEvent,
-  TextBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
 // Anthropic provider adapts Anthropic streams and tool calls for the runtime.
 import { getEnvApiKey } from "../env-api-keys.js";
@@ -30,6 +29,10 @@ import {
   resolveAnthropicContextManagementBetaHeader,
 } from "../transports/anthropic-payload-policy.js";
 import { consumeAnthropicStream } from "../transports/anthropic-stream-reducer.js";
+import {
+  buildAnthropicSystemBlocks,
+  countNativeCacheControlMarkers,
+} from "../transports/anthropic-system-blocks.js";
 // Anthropic provider adapts Anthropic streams and tool calls for the runtime.
 import { createAssistantOutput } from "../transports/assistant-output.js";
 import { resolveOpencodeSessionHeaders } from "../transports/session-affinity.js";
@@ -52,11 +55,6 @@ import { createDeferredEventBuffer } from "../utils/deferred-event-buffer.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseJsonWithRepair } from "../utils/json-parse.js";
 import { notifyLlmRequestActivity } from "../utils/llm-request-activity.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import {
-  splitSystemPromptCacheBoundary,
-  stripSystemPromptCacheBoundary,
-} from "../utils/system-prompt-cache-boundary.js";
 import {
   isAnthropicOAuthApiKey,
   omitFoundryBearerCredentialHeaders,
@@ -64,7 +62,6 @@ import {
 } from "./anthropic-auth-headers.js";
 import {
   applyClaudeRequestContract,
-  ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK,
   ANTHROPIC_CLAUDE_CODE_VERSION,
   prepareClaudeNoPrefillRequestContext,
   resolveAnthropicThinkingEffort,
@@ -269,9 +266,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicComp
         requestOptions,
         directApiKeyBetaHeader,
       );
-      // Captured after the request is shaped, so the projector holds exactly the
-      // images this call sends and can re-attach their origins once onPayload has
-      // had its chance to clone or replace the parts.
+      // Captured after the request is shaped, so it holds exactly the images this
+      // call sends and can re-attach their origins once onPayload has run.
       const imageHistory = createRequestImageHistoryProjector(params, "anthropic");
       const nextParams = await requestOptions?.onPayload?.(params, model);
       if (nextParams !== undefined) {
@@ -280,8 +276,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicComp
       params = imageHistory.bind(params);
       applyClaudeRequestContract(params, model);
       params = imageHistory.project(params);
-      // Derived from the projected params so the header describes the request
-      // that is actually sent.
+      // Derived from the projected params so it describes the request actually sent.
       const betaHeader = resolveAnthropicContextManagementBetaHeader(
         params,
         directApiKeyBetaHeader,
@@ -716,79 +711,6 @@ async function buildParams(
   );
 
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
-}
-
-function buildAnthropicSystemBlocks(
-  systemPrompt: string | undefined,
-  isOAuthTokenResult: boolean,
-  cacheControl: CacheControlEphemeral | undefined,
-): TextBlockParam[] | undefined {
-  const blocks: TextBlockParam[] = [];
-  if (isOAuthTokenResult) {
-    // Anthropic uses this first system block to route Claude subscription OAuth billing.
-    blocks.push({
-      type: "text",
-      text: ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK,
-    });
-    blocks.push({
-      type: "text",
-      text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      ...(cacheControl ? { cache_control: cacheControl } : {}),
-    });
-  }
-  if (systemPrompt) {
-    blocks.push(...buildSystemPromptBlocks(systemPrompt, cacheControl));
-  }
-  return blocks.length > 0 ? blocks : undefined;
-}
-
-function buildSystemPromptBlocks(
-  systemPrompt: string,
-  cacheControl: CacheControlEphemeral | undefined,
-): TextBlockParam[] {
-  if (!cacheControl) {
-    return [
-      { type: "text", text: sanitizeSurrogates(stripSystemPromptCacheBoundary(systemPrompt)) },
-    ];
-  }
-
-  const split = splitSystemPromptCacheBoundary(systemPrompt);
-  if (!split) {
-    return [
-      {
-        type: "text",
-        text: sanitizeSurrogates(systemPrompt),
-        cache_control: cacheControl,
-      },
-    ];
-  }
-
-  const blocks: TextBlockParam[] = [];
-  if (split.stablePrefix) {
-    blocks.push({
-      type: "text",
-      text: sanitizeSurrogates(split.stablePrefix),
-      cache_control: cacheControl,
-    });
-  }
-  if (split.dynamicSuffix) {
-    blocks.push({ type: "text", text: sanitizeSurrogates(split.dynamicSuffix) });
-  }
-  return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
-}
-
-function countNativeCacheControlMarkers(blocks: unknown): number {
-  if (!Array.isArray(blocks)) {
-    return 0;
-  }
-
-  let count = 0;
-  for (const block of blocks) {
-    if (block && typeof block === "object" && "cache_control" in block) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function shouldUseFineGrainedToolStreamingBeta(
