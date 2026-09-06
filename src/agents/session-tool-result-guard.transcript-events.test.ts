@@ -8,8 +8,8 @@ import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSolidPngBuffer } from "../../test/helpers/image-fixtures.js";import { transformMessages } from "../../packages/ai/src/transcript-transform.js";
-
+import { transformMessages } from "../../packages/ai/src/transcript-transform.js";
+import { createSolidPngBuffer } from "../../test/helpers/image-fixtures.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
   appendTranscriptMessage,
@@ -17,9 +17,9 @@ import {
   persistCompactionBoundaryWithSessionEntrySync,
 } from "../config/sessions/session-accessor.js";
 import { applyAssistantDeliveryDirectives } from "../config/sessions/transcript-assistant-delivery.js";
-import { readRuntimePromptImageProvenance } from "../media/runtime-prompt-image-provenance.js";import { withOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context.js";
+import { withOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context.js";
 import { createAssistantMessageEventStream } from "../llm/utils/event-stream.js";
-
+import { readRuntimePromptImageProvenance } from "../media/runtime-prompt-image-provenance.js";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
@@ -35,12 +35,12 @@ import {
   createUserTurnTranscriptRecorder,
   type UserTurnTranscriptRecorder,
 } from "../sessions/user-turn-transcript.js";
+import { createAssistantErrorTranscript } from "./assistant-error-transcript.js";
+import { normalizeAssistantReplayContent } from "./embedded-agent-runner/replay-history.js";
 import {
   detectAndLoadPromptImages,
   hydratePromptMediaMessages,
-} from "./embedded-agent-runner/run/images.js";import { createAssistantErrorTranscript } from "./assistant-error-transcript.js";
-import { normalizeAssistantReplayContent } from "./embedded-agent-runner/replay-history.js";
-
+} from "./embedded-agent-runner/run/images.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "./harness/hook-helpers.js";
 import { guardSessionManager } from "./session-tool-result-guard-wrapper.js";
 import { installSessionToolResultGuard } from "./session-tool-result-guard.js";

@@ -17,7 +17,6 @@ import { runActiveReplySteer } from "./agent-runner-steer-adoption.js";
 import type { FollowupRun, InternalFollowupRun, QueueSettings } from "./queue.js";
 import { enqueueFollowupRun, FollowupRunDeferredError, scheduleFollowupDrain } from "./queue.js";
 import { createQueueTestRun } from "./queue.test-helpers.js";
-import { prepareReplyToolAuthority } from "./reply-tool-authority.js";
 import {
   createOverflowSummaryRetrySource,
   resolveFollowupDeliveryContextKey,
@@ -25,6 +24,7 @@ import {
 import { clearFollowupQueue } from "./queue/state.js";
 import type { ReplyBackendQueueMessageOptions } from "./reply-run-registry.contracts.js";
 import { createReplyOperation } from "./reply-run-registry.js";
+import { prepareReplyToolAuthority } from "./reply-tool-authority.js";
 import { createMockTypingController } from "./test-helpers.js";
 import { createTypingSignaler } from "./typing-mode.js";
 

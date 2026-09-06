@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import type { HumanMention } from "@openclaw/gateway-protocol";
 import { readRuntimeImageHistory } from "@openclaw/media-core";
-
 import { expectDefined, stableStringify } from "@openclaw/normalization-core";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {

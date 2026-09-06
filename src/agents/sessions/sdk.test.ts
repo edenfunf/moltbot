@@ -6,20 +6,23 @@ import { createAssistantMessageEventStream, type AssistantMessage } from "opencl
 // session write-settlement behavior.
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSolidPngBuffer } from "../../../test/helpers/image-fixtures.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { loadSessionEntry, loadTranscriptEvents } from "../../config/sessions/session-accessor.js";
 import { getStreamLlmRuntime } from "../../llm/model-runtime-binding.js";
 import type { ImageContent, Model, SimpleStreamOptions } from "../../llm/types.js";
-import { createSolidPngBuffer } from "../../../test/helpers/image-fixtures.js";
 import {
-  detectAndLoadPromptImages,
-  hydratePromptMediaMessages,
-} from "../embedded-agent-runner/run/images.js";
-import { readRuntimePromptImageOrder, readRuntimePromptMediaFacts } from "../../media/media-facts.js";
+  readRuntimePromptImageOrder,
+  readRuntimePromptMediaFacts,
+} from "../../media/media-facts.js";
 import { finalizeRuntimePromptImages } from "../../media/runtime-prompt-image-provenance.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
 import { disposeOpenClawAgentDatabaseByPath } from "../../state/openclaw-agent-db.js";
+import {
+  detectAndLoadPromptImages,
+  hydratePromptMediaMessages,
+} from "../embedded-agent-runner/run/images.js";
 import { createZeroUsageFixture } from "../test-helpers/usage-fixtures.js";
 
 const thinkingMocks = vi.hoisted(() => ({

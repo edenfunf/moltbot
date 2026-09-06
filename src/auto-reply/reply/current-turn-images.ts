@@ -153,12 +153,11 @@ export async function resolveCurrentTurnImages(params: {
       includeRecentHistoryImages,
       includeAttachmentIndexes: true,
     });
-    const images = resolved.attachments.map(
-      (attachment): ImageContent =>
-        withRuntimeImageHistory(
-          { type: "image", data: attachment.data, mimeType: attachment.mediaType },
-          readRuntimeImageHistory(attachment),
-        ),
+    const images = resolved.attachments.map((attachment): ImageContent =>
+      withRuntimeImageHistory(
+        { type: "image", data: attachment.data, mimeType: attachment.mediaType },
+        readRuntimeImageHistory(attachment),
+      ),
     );
     const resolvedIndexes = resolved.attachmentIndexes ?? [];
     if (images.length < undescribedImageAttachments.length) {

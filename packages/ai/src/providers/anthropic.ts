@@ -734,7 +734,6 @@ async function buildParams(
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
 }
 
-
 function buildAnthropicSystemBlocks(
   systemPrompt: string | undefined,
   isOAuthTokenResult: boolean,

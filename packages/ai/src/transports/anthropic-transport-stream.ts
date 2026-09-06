@@ -26,7 +26,6 @@ import {
   withRequestImageHistory,
 } from "../internal/request-image-history.js";
 import type { AnthropicOptions } from "../provider-options.js";
-
 import {
   isAnthropicOAuthApiKey,
   omitFoundryBearerCredentialHeaders,
@@ -211,7 +210,6 @@ function buildAnthropicBetaHeader(
     ? `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`
     : betaFeatures.join(",");
 }
-
 
 function ensureNonEmptyAnthropicMessages(messages: Array<Record<string, unknown>>) {
   return messages.length > 0

@@ -80,7 +80,6 @@ function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Cont
       model.provider !== "google-gemini-cli" &&
       (isGemini3ProModel(model) || isGemini3FlashModel(model)),
   });
-
 }
 
 /**

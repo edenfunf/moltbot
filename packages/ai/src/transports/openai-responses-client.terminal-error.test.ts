@@ -67,15 +67,20 @@ describe("managed Responses transport terminal errors", () => {
       })(),
       response: new Response(null, { status: 200 }),
     });
-    const stream = await createOpenAIResponsesTransportStreamFn()(model, { messages: [], tools: [] }, {
-      apiKey: "test-key",
-      sessionId: "session-terminal-error",
-      transport: "sse",
-    } as never);
+    const stream = await createOpenAIResponsesTransportStreamFn()(
+      model,
+      { messages: [], tools: [] },
+      {
+        apiKey: "test-key",
+        sessionId: "session-terminal-error",
+        transport: "sse",
+      } as never,
+    );
     const result = await stream.result();
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toBe("Provider incomplete_reason: content_filter");
-  });  it.each(["incomplete", "completed", "filtered", "failed", "eof", "aborted"] as const)(
+  });
+  it.each(["incomplete", "completed", "filtered", "failed", "eof", "aborted"] as const)(
     "fences later tool completions after truncated output until %s",
     async (ending) => {
       const controller = new AbortController();
@@ -274,5 +279,4 @@ describe("managed Responses transport terminal errors", () => {
       expect(result.errorMessage).toBe("Provider incomplete_reason: content_filter");
     },
   );
-
 });

@@ -798,7 +798,6 @@ existing catalog-registration lifecycle.
 OpenClaw Code Mode's joined `agents.run()` path retains internal waiting; this
 helper does not make raw collector calls available without a native result reader.
 
-
 ### Paired-device execution
 
 Declare `cloudPlacement.devicePlacement.requiredNodeCommands` for the exact node

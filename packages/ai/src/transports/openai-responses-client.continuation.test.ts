@@ -151,7 +151,6 @@ async function run(
   requestModel: Model = model,
 ): Promise<AssistantMessage> {
   const stream = await createOpenAIResponsesTransportStreamFn()(requestModel, context, {
-
     apiKey: "test-key",
     sessionId: options.sessionId ?? "session-1",
     transport: "sse",
