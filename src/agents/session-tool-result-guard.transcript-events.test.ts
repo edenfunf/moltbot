@@ -218,7 +218,11 @@ describe("guardSessionManager transcript updates", () => {
         source === "invalid" ? [] : [hash(source === "current" ? currentBytes : historyBytes)],
       ),
       text: ["Rendered runtime prompt"],
-      failures: [],  it("refreshes the deferred error owner when a session manager serves a new run", async () => {
+      failures: [],
+    });
+  });
+
+  it("refreshes the deferred error owner when a session manager serves a new run", async () => {
     const { sessionManager, target } = await openPersistedSessionManager();
     const first = createAssistantErrorTranscript({ runId: "run-first" });
     const second = createAssistantErrorTranscript({ runId: "run-second" });
@@ -236,7 +240,6 @@ describe("guardSessionManager transcript updates", () => {
     expect(messages[0]?.message).toMatchObject({
       stopReason: "error",
       __openclaw: { runId: "run-second" },
-
     });
   });
 

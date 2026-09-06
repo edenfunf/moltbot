@@ -185,25 +185,22 @@ export abstract class AgentSessionPrompting extends AgentSessionBase {
     images?: ImageContent[],
     preparedMessage?: PersistedUserTurnMessage,
   ): PersistedUserTurnMessage {
-    const imageFactIndexes = readRuntimePromptImageFactIndexes(images);
-    const message = {
+    // One read carries both the fact ownership and the replay placement, so the
+    // metadata is written once and the two cannot disagree about the same images.
+    const provenance = readRuntimePromptImageProvenance(images);
+    const runtimeMessage = {
       role: "user",
       content: this.createUserContent(text, images),
       timestamp: Date.now(),
-      ...(imageFactIndexes ? { __openclaw: { mediaImageBlockFactIndexes: imageFactIndexes } } : {}),
+      ...(provenance
+        ? {
+            __openclaw: {
+              mediaImageBlockFactIndexes: provenance.imageFactIndexes,
+              mediaImageLayout: provenance.mediaImageLayout,
+            },
+          }
+        : {}),
     } satisfies PersistedUserTurnMessage;
-    const provenance = readRuntimePromptImageProvenance(images);
-    // Enriched before the prepared merge: that merge spreads the runtime message's
-    // own metadata first, so the layout has to be on it by then to survive.
-    const runtimeMessage = provenance
-      ? {
-          ...message,
-          __openclaw: {
-            mediaImageBlockFactIndexes: provenance.imageFactIndexes,
-            mediaImageLayout: provenance.mediaImageLayout,
-          },
-        }
-      : message;
     // Admission facts must precede accepted steering input. Keep expanded runtime
     // content separate from the prepared display text used during persistence.
     return Object.assign(

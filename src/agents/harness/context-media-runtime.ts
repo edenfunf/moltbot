@@ -12,7 +12,7 @@ import {
 import {
   readPersistedImageBlockFactIndexes,
   readPersistedMediaImageLayout,
-} from "../embedded-agent-runner/run/prompt-image-metadata.js";
+} from "../../sessions/user-turn-transcript.metadata.js";
 import { resolveImageSanitizationLimits } from "../image-sanitization.js";
 import type { AgentMessage } from "../runtime/index.js";
 import type { SandboxFsBridge } from "../sandbox/fs-bridge.js";

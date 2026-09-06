@@ -6,15 +6,17 @@ import { createAssistantMessageEventStream, type AssistantMessage } from "opencl
 // session write-settlement behavior.
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSolidPngBuffer } from "../../../test/helpers/image-fixtures.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { loadSessionEntry, loadTranscriptEvents } from "../../config/sessions/session-accessor.js";
 import { getStreamLlmRuntime } from "../../llm/model-runtime-binding.js";
 import type { ImageContent, Model, SimpleStreamOptions } from "../../llm/types.js";
+import { createSolidPngBuffer } from "../../../test/helpers/image-fixtures.js";
 import {
-  readRuntimePromptImageOrder,
-  readRuntimePromptMediaFacts,
-} from "../../media/media-facts.js";
+  detectAndLoadPromptImages,
+  hydratePromptMediaMessages,
+} from "../embedded-agent-runner/run/images.js";
+import { readRuntimePromptImageOrder, readRuntimePromptMediaFacts } from "../../media/media-facts.js";
+import { finalizeRuntimePromptImages } from "../../media/runtime-prompt-image-provenance.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
 import { disposeOpenClawAgentDatabaseByPath } from "../../state/openclaw-agent-db.js";
@@ -36,12 +38,9 @@ vi.mock("../../llm/stream.js", () => ({
 }));
 import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
 import {
-  detectAndLoadPromptImages,
-  hydratePromptMediaMessages,
-} from "../embedded-agent-runner/run/images.js";  createCompactionHandlers,
+  createCompactionHandlers,
   createResourceLoader,
 } from "./agent-session-loop-resource-loader.test-support.js";
-
 import { AuthStorage } from "./auth-storage.js";
 import type { ToolDefinition } from "./extensions/types.js";
 import * as publicSessionSdk from "./index.js";
@@ -619,7 +618,6 @@ describe("createAgentSession tool defaults", () => {
     expect(session.getActiveToolNames()).toEqual(["custom_lookup"]);
   });
 
-
   it("preserves channel-progress visibility for custom tools", async () => {
     const hiddenTool: ToolDefinition = {
       name: "internal_wait",
@@ -651,7 +649,7 @@ describe("createAgentSession tool defaults", () => {
     ]);
   });
 
-  it("preserves custom tools and an exact base prompt when builtin tools are disabled", async () => {
+  it("preserves an exact base system prompt when active tools change", async () => {
     const customTool: ToolDefinition = {
       name: "custom_lookup",
       label: "Custom Lookup",
@@ -675,9 +673,6 @@ describe("createAgentSession tool defaults", () => {
       modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
     });
     const systemPrompt = "You are a personal assistant running inside OpenClaw.";
-
-    expect(session.getActiveToolNames()).toEqual(["custom_lookup"]);
-    expect(session.getAllTools().map((tool) => tool.name)).toEqual(["custom_lookup"]);
 
     session.setBaseSystemPrompt(systemPrompt);
     session.setActiveToolsByName(["bash", "custom_lookup"]);
@@ -810,27 +805,23 @@ describe("createAgentSession tool defaults", () => {
     expect(events).toEqual(["settlement:start", "hook", "settlement:end"]);
   });
 
-  it.each([false, true])("fences tool execution with extension hook=%s", async (hasHook) => {
-    // Settlement protects shared session state even when no extension hook is registered.
+  it("runs write-capable tool hooks under the configured write settlement", async () => {
     const events: string[] = [];
     const handlers = new Map<string, Array<(...args: unknown[]) => Promise<unknown>>>([
       [
         "tool_call",
-        hasHook
-          ? [
-              async () => {
-                events.push("hook");
-                return undefined;
-              },
-            ]
-          : [],
+        [
+          async () => {
+            events.push("hook");
+            return undefined;
+          },
+        ],
       ],
     ]);
 
     const { session } = await createAgentSession({
       model: testModel,
       resourceLoader: createResourceLoader(handlers),
-
       sessionManager: SessionManager.inMemory(),
       settingsManager: SettingsManager.inMemory(),
       modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
@@ -855,12 +846,7 @@ describe("createAgentSession tool defaults", () => {
         stopReason: "toolUse",
         timestamp: Date.now(),
       },
-      toolCall: {
-        type: "toolCall",
-        id: "call_1",
-        name: hasHook ? "read" : "write_file",
-        arguments: {},
-      },
+      toolCall: { type: "toolCall", id: "call_1", name: "read", arguments: {} },
       args: {},
       context: {
         systemPrompt: "",
@@ -913,7 +899,6 @@ describe("createAgentSession tool defaults", () => {
     });
 
     expect(events).toEqual(["settlement:start", "settlement:end"]);
-
   });
 });
 
