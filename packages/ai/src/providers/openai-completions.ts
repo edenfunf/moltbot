@@ -8,7 +8,6 @@ import type {
   ChatCompletionSystemMessageParam,
 } from "openai/resources/chat/completions.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { getAiTransportHost } from "../host.js";
 import { createRequestImageHistoryProjector } from "../internal/request-image-history.js";
 import { clampThinkingLevel } from "../model-utils.js";
 import { convertMessages, hasToolCallHistory } from "../openai-completions-messages.js";

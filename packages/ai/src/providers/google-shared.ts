@@ -10,12 +10,8 @@ import {
 /**
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
-import { readRuntimeImageHistory } from "@openclaw/media-core";
-import {
-  createRequestImageHistoryProjector,
-  withRequestImageHistory,
-} from "../internal/request-image-history.js";
-import { calculateCost, clampThinkingLevel } from "../model-utils.js";
+import { createRequestImageHistoryProjector } from "../internal/request-image-history.js";
+import { clampThinkingLevel } from "../model-utils.js";
 import { transformProviderMessages as transformMessages } from "../provider-transcript-transform.js";
 import { googleFlashSupportsMinimalThinking } from "../transports/google-thinking-level.js";
 import {

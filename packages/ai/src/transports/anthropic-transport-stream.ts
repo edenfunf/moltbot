@@ -5,7 +5,6 @@ import type {
   SimpleStreamOptions,
   StreamFn,
 } from "@openclaw/llm-core";
-import { readRuntimeImageHistory } from "@openclaw/media-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 /**
  * Native Anthropic Messages streaming transport.
@@ -15,16 +14,7 @@ import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
-import {
-  createAnthropicInlineImageBudget,
-  normalizeAnthropicInlineContent,
-  resolveAnthropicImageMediaType,
-  type AnthropicInlineImageBudget,
-} from "../internal/anthropic-inline-images.js";
-import {
-  createRequestImageHistoryProjector,
-  withRequestImageHistory,
-} from "../internal/request-image-history.js";
+import { createRequestImageHistoryProjector } from "../internal/request-image-history.js";
 import type { AnthropicOptions } from "../provider-options.js";
 import {
   isAnthropicOAuthApiKey,

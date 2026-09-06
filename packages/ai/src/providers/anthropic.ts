@@ -8,26 +8,10 @@ import type {
   TextBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
 // Anthropic provider adapts Anthropic streams and tool calls for the runtime.
-import { readRuntimeImageHistory } from "@openclaw/media-core";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
-import {
-  createAnthropicInlineImageBudget,
-  normalizeAnthropicInlineContent,
-  resolveAnthropicImageMediaType,
-  type AnthropicInlineImageBudget,
-} from "../internal/anthropic-inline-images.js";
-import {
-  createRequestImageHistoryProjector,
-  withRequestImageHistory,
-} from "../internal/request-image-history.js";
-import { calculateCost } from "../model-utils.js";
-import type {
-  AnthropicContextManagementOptions,
-  AnthropicOptions,
-  AnthropicThinkingDisplay,
-} from "../provider-options.js";
+import { createRequestImageHistoryProjector } from "../internal/request-image-history.js";
+import type { AnthropicContextManagementOptions, AnthropicOptions } from "../provider-options.js";
 import { transformProviderMessages as transformMessages } from "../provider-transcript-transform.js";
 import {
   buildAnthropicReplayPlan,
