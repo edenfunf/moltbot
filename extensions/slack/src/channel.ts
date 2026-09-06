@@ -31,6 +31,7 @@ import {
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
+import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   resolveDefaultSlackAccountId,
   resolveSlackAccount,
@@ -67,6 +68,7 @@ import type { SlackProbe } from "./probe.js";
 import { resolveSlackReplyBlocks } from "./reply-blocks.js";
 import { getOptionalSlackRuntime } from "./runtime.js";
 import { slackSecurityAdapter } from "./security.js";
+import { setSlackSessionStatus } from "./session-status.js";
 import { createSlackSetupWizardProxy, slackSetupContract } from "./setup-core.js";
 import {
   createSlackPluginBase,
@@ -190,7 +192,7 @@ async function setSlackHeartbeatThreadStatus(params: {
   to: string;
   accountId?: string | null;
   threadId?: string | number | null;
-  status: string;
+  status: "processing" | "active";
 }) {
   const threadTs = resolveSlackThreadTsValue({ threadId: params.threadId });
   const target = parseSlackTarget(params.to, { defaultKind: "channel" });
@@ -217,10 +219,11 @@ async function setSlackHeartbeatThreadStatus(params: {
             accountId: account.accountId,
             token: botToken,
           });
-    await client.assistant.threads.setStatus({
+    await setSlackSessionStatus({
+      client,
       token: botToken,
-      channel_id: channelId,
-      thread_ts: threadTs,
+      channelId,
+      threadTs,
       status: params.status,
     });
   } catch (error) {
@@ -682,7 +685,7 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount, SlackProbe> = crea
           to,
           accountId,
           threadId,
-          status: "is typing...",
+          status: "processing",
         });
       },
       clearTyping: async ({ cfg, to, accountId, threadId }) => {
@@ -691,7 +694,7 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount, SlackProbe> = crea
           to,
           accountId,
           threadId,
-          status: "",
+          status: "active",
         });
       },
     },
@@ -829,7 +832,15 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount, SlackProbe> = crea
       },
     },
     mentions: {
-      stripPatterns: () => ["<@[^>\\s]+>"],
+      stripPatterns: ({ ctx }) => {
+        const preparedPatterns = ctx.ChannelContext?.chat?.mentionStripPatterns;
+        const exactPatterns = Array.isArray(preparedPatterns)
+          ? preparedPatterns.flatMap((pattern) =>
+              typeof pattern === "string" ? [escapeRegExp(pattern)] : [],
+            )
+          : [];
+        return [...exactPatterns, "<@[^>\\s]+>"];
+      },
     },
   },
   pairing: {

@@ -69,6 +69,9 @@ export function buildPersistedUserTurnMetadata(
     ...(senderName ? { senderName } : {}),
     ...(senderUsername ? { senderUsername } : {}),
     ...(senderIdentity && senderIdentity.id === senderId ? { senderIdentity } : {}),
+    ...(input.mentions?.length
+      ? { humanMentions: input.mentions.map((mention) => ({ ...mention })) }
+      : {}),
     ...(replyToId ? { replyToId } : {}),
     ...(replyPreviewText
       ? {
@@ -129,17 +132,16 @@ export function rewritePersistedSteerTargetRunId(
  * Runtime hooks may rewrite roles and redact display/transport fields. Restore only
  * operational facts here; canonical admission preparation deliberately protects more.
  */
-export function restorePreparedUserTurnOperationalMetaForRuntime(params: {
-  runtimeMessage: AgentMessage;
-  preparedMessage?: PersistedUserTurnMessage;
-}): AgentMessage {
+export function restorePreparedUserTurnOperationalMetaForRuntime<
+  TMessage extends AgentMessage,
+>(params: { runtimeMessage: TMessage; preparedMessage?: PersistedUserTurnMessage }): TMessage {
   if (!params.preparedMessage || params.runtimeMessage.role !== "user") {
     return params.runtimeMessage;
   }
   const preparedMeta = params.preparedMessage["__openclaw"];
   const senderIsOwner = preparedMeta?.senderIsOwner;
   const steerTargetRunId = normalizePersistedSteerTargetRunId(preparedMeta?.steerTargetRunId);
-  const nextMessage: AgentMessage & { display?: false; __openclaw?: Record<string, unknown> } = {
+  const nextMessage: TMessage & { display?: boolean; __openclaw?: Record<string, unknown> } = {
     ...params.runtimeMessage,
   };
   const provenance = normalizeInputProvenance(Reflect.get(params.preparedMessage, "provenance"));
@@ -160,6 +162,14 @@ export function restorePreparedUserTurnOperationalMetaForRuntime(params: {
   }
   if (typeof senderIsOwner === "boolean") {
     runtimeMeta.senderIsOwner = senderIsOwner;
+  }
+  // Selections belong to the submitted bytes, not a hook's rewritten text.
+  delete runtimeMeta.humanMentions;
+  if (
+    preparedMeta?.humanMentions !== undefined &&
+    isDeepStrictEqual(params.runtimeMessage.content, params.preparedMessage.content)
+  ) {
+    runtimeMeta.humanMentions = preparedMeta.humanMentions;
   }
   delete nextMessage["__openclaw"];
   if (Object.keys(runtimeMeta).length > 0) {
@@ -208,6 +218,12 @@ export function preparePersistedUserTurnMessageForTranscriptWrite(
     typeof originalIdempotencyKey === "string" ? originalIdempotencyKey : undefined;
   const provenance = normalizeInputProvenance(Reflect.get(message, "provenance"));
   const originalMeta = message["__openclaw"];
+  const originalContent =
+    originalMeta?.humanMentions === undefined ? undefined : structuredClone(message.content);
+  const humanMentions =
+    originalMeta?.humanMentions === undefined
+      ? undefined
+      : structuredClone(originalMeta.humanMentions);
   const display = message.display;
   const intent =
     originalMeta?.intent === undefined ? undefined : structuredClone(originalMeta.intent);
@@ -261,6 +277,10 @@ export function preparePersistedUserTurnMessageForTranscriptWrite(
   };
   if (intent === undefined) {
     delete protectedMeta.intent;
+  }
+  delete protectedMeta.humanMentions;
+  if (humanMentions !== undefined && isDeepStrictEqual(nextUserMessage.content, originalContent)) {
+    protectedMeta.humanMentions = humanMentions;
   }
   delete protectedMeta.steerTargetRunId;
   if (steerTargetRunId) {
