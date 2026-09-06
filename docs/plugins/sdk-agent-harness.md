@@ -777,7 +777,9 @@ The helper adds at most four bounded source notes for images retained from
 room history. Ordinary images leave the prompt unchanged. Apply this at both
 initial-input and steering boundaries; adding notes before filtering can tell
 the model it received an image that the runtime omitted. These notes are a
-request projection, not a replacement for the canonical transcript.After the last policy filter, schema quarantine, and native registration
+request projection, not a replacement for the canonical transcript.
+
+After the last policy filter, schema quarantine, and native registration
 intersection, call `finalizeAgentToolAvailability(tools, options?)` from
 `openclaw/plugin-sdk/agent-harness-runtime` before snapshotting tool definitions.
 It returns a new array containing the same tool objects and updates only
