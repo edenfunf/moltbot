@@ -125,10 +125,17 @@ type LineDurableSendRef = {
   /** Index of this push within the part it belongs to. */
   pushIndex?: number;
   /**
-   * Instant LINE stops deduplicating this retry key. Only a replay sets it: a live
-   * send just minted the key, so it cannot be stale. Checked before every attempt
-   * because the retry backoff can outlive the window the reconciler entered under,
-   * and a replay past it is a second delivery rather than a deduplicated one.
+   * Instant LINE stops deduplicating this retry key, checked before every attempt
+   * because the backoff between attempts can outlive the window its caller entered
+   * under, and a request that lands after it is a second delivery rather than a
+   * deduplicated one.
+   *
+   * Only reconciliation sets it, because only reconciliation knows when the key was
+   * first used: the key itself is a timestamp-free hash of the durable id and the
+   * part/push indexes (`resolveLinePushRetryKey`), so a live send cannot tell a first
+   * attempt from a much later queue retry that derives the same value. Carrying that
+   * instant on the recorded plan would close the live path too; until then this
+   * bounds the replay path only.
    */
   retryKeyExpiresAtMs?: number;
 };
