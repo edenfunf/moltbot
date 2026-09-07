@@ -519,9 +519,12 @@ These particular outcomes do not dead-letter the incoming event, so
   enough to replay from, so recovery declines rather than risk duplicating an accepted
   push or dropping one LINE never received.
 
-None of the outcomes in this list is retried. Every one of them settles the delivery as
-unresolved and not retryable, so nothing will arrive later: read what did reach the
-conversation, then send the rest by hand.
+None of the outcomes named above is retried: each settles the delivery as unresolved and
+not retryable, so nothing will arrive later — read what did reach the conversation, then
+send the rest by hand. A failure to _read_ the record back is the one exception. That is
+the storage layer failing rather than the record being untrustworthy, its message is the
+store's own, and it stays retryable, so a transient state-directory problem resolves on
+a later attempt instead of stranding the delivery.
 
 A refusal LINE itself returns while a replay is in flight is not on this list: it is
 surfaced verbatim, so the reason reads as LINE wrote it rather than as one of the
