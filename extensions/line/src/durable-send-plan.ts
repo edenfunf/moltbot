@@ -1,7 +1,6 @@
 // Line plugin module implements durable send plan persistence behavior.
 import { createHash } from "node:crypto";
 import type { messagingApi } from "@line/bot-sdk";
-import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { z } from "zod";
 import { getLineRuntime } from "./runtime.js";
 import { LINE_RETRY_KEY_TTL_MS } from "./send-retry.js";
@@ -17,25 +16,30 @@ const PLAN_NAMESPACE = "outbound-send-plans";
 const PLAN_DIAGNOSTIC_RETENTION_MS = 60 * 60 * 1000;
 const PLAN_TTL_MS = LINE_RETRY_KEY_TTL_MS + PLAN_DIAGNOSTIC_RETENTION_MS;
 
-/** One recorded platform send: the request LINE saw, under the key that deduplicates it. */
-type LineDurablePush = {
+/** One platform send: the request LINE saw, under the key that deduplicates it. */
+export type LineDurablePush = {
   retryKey: string;
   messages: messagingApi.Message[];
 };
 
 /**
- * What one delivery part sent, and what it was sending. The payload is what lets
- * a replay finish a fan-out the crash cut in half; the pushes are what prove the
- * replay is reproducing that fan-out rather than a different one.
+ * Every push one delivery part will make, written once before the first of them
+ * crosses the platform boundary.
+ *
+ * The whole fan-out is decided before any of it is sent — no LINE message in a
+ * part depends on the result of an earlier one — so the record can be complete
+ * rather than accumulated. A replay reissues these exact requests instead of
+ * re-rendering the reply, which is what keeps a chunk-limit change or an upgrade
+ * across the interruption from putting different content behind a key LINE has
+ * already answered.
  */
-type LineDurableSendPlan = {
+export type LineDurableSendPlan = {
   version: typeof PLAN_VERSION;
   queueId: string;
   partIndex: number;
   partCount: number;
   to: string;
   accountId?: string;
-  payload: ReplyPayload;
   /**
    * When this plan's retry keys were first handed to LINE. The keys themselves are a
    * timestamp-free hash (`resolveLinePushRetryKey`), and the queue entry's
@@ -91,19 +95,14 @@ function planKey(queueId: string, partIndex: number): string {
 
 // Stored bytes are a deserialization boundary: the plan's own fields are parsed,
 // and a plan that no longer matches its version or topology is refused rather
-// than trusted. The two payload shapes below are checked only far enough to be
-// safe to hand back — they are re-rendered and compared push by push before any
-// of them is sent again, which is the check that matters for a replay.
+// than trusted. A stored message is checked only far enough to be a LINE message
+// object, because it is reissued verbatim rather than interpreted here.
 const lineMessageSchema = z.custom<messagingApi.Message>(
   (value) =>
     typeof value === "object" &&
     value !== null &&
     "type" in value &&
     typeof value.type === "string",
-);
-
-const replyPayloadSchema = z.custom<ReplyPayload>(
-  (value) => typeof value === "object" && value !== null,
 );
 
 const planSchema = z
@@ -114,7 +113,6 @@ const planSchema = z
     partCount: z.number().int().positive(),
     to: z.string().trim().min(1),
     accountId: z.string().optional(),
-    payload: replyPayloadSchema,
     firstDispatchedAtMs: z.number().int().positive(),
     pushes: z
       .array(
@@ -143,12 +141,42 @@ function decodePlan(bytes: Uint8Array): LineDurableSendPlan {
   return parsed.data;
 }
 
-async function readPlan(queueId: string, partIndex: number): Promise<LineDurableSendPlan | null> {
-  const entry = await createPlanStore().lookup(planKey(queueId, partIndex));
-  return entry ? decodePlan(entry.bytes) : null;
-}
-
-async function writePlan(plan: LineDurableSendPlan): Promise<void> {
+/**
+ * Claims the record for one delivery part, or hands back the one already there.
+ *
+ * A retry of the same queued send re-renders the reply from live configuration,
+ * which can differ from what was already sent. The stored plan wins in that case:
+ * the keys are derived from the delivery, so reissuing re-rendered content under
+ * them would let LINE answer 409 for a request it never saw and drop the
+ * difference. First write wins, and every later attempt replays it.
+ */
+export async function recordLineDurableSendPlan(params: {
+  queueId: string;
+  partIndex: number;
+  partCount: number;
+  to: string;
+  accountId?: string;
+  pushes: LineDurablePush[];
+}): Promise<LineDurableSendPlan> {
+  const key = planKey(params.queueId, params.partIndex);
+  const store = createPlanStore();
+  const existing = await store.lookup(key);
+  if (existing) {
+    return decodePlan(existing.bytes);
+  }
+  const plan: LineDurableSendPlan = {
+    version: PLAN_VERSION,
+    queueId: params.queueId,
+    partIndex: requireIndex(params.partIndex, "part index"),
+    // Not coerced: the schema refuses a non-positive count below, before the first
+    // push crosses the boundary. Substituting a value would record a topology the
+    // delivery never had and let reconciliation call it complete.
+    partCount: params.partCount,
+    to: params.to,
+    ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
+    firstDispatchedAtMs: Date.now(),
+    pushes: params.pushes,
+  };
   // The record is only worth writing if recovery can read it back. Checking here
   // fails the send before the push crosses the boundary; the same plan rejected
   // on the way out would instead be discovered after the reply was delivered,
@@ -156,119 +184,12 @@ async function writePlan(plan: LineDurableSendPlan): Promise<void> {
   const parsed = planSchema.safeParse(plan);
   if (!parsed.success) {
     throw new LineDurableSendPlanError(
-      `LINE durable send plan part ${plan.partIndex} cannot be recorded: ${parsed.error.message}`,
+      `LINE durable send plan part ${params.partIndex} cannot be recorded: ${parsed.error.message}`,
     );
   }
-  const store = createPlanStore();
   await store.deleteExpired();
-  await store.register(
-    planKey(plan.queueId, plan.partIndex),
-    new TextEncoder().encode(JSON.stringify(plan)),
-    {},
-  );
-}
-
-/** Records each push of one delivery part, before that push crosses the boundary. */
-type LineDurablePushRecorder = {
-  /** A property, not a method: the send options take it as a bare callback. */
-  recordPush: (push: LineDurablePush) => Promise<void>;
-  /** Refuses a fan-out that reproduced fewer pushes than the record it replayed. */
-  assertRecordFullyReplayed: () => Promise<void>;
-  /**
-   * When LINE stops deduplicating this part's retry keys, or undefined until the
-   * record has been read. A first send answers with its own dispatch, so the window
-   * is wide open; a retry of the same delivery answers with the instant the record
-   * kept, which is the only thing that knows when LINE first saw these keys.
-   */
-  retryKeyExpiresAtMs: () => number | undefined;
-};
-
-/**
- * Opens the recorded plan for one delivery part.
- *
- * A live send starts an empty record and appends to it. A replay re-enters the
- * same fan-out and finds that record already there, so every push it reproduces
- * is checked against what was actually sent before it is sent again — and the
- * pushes the interrupted fan-out never reached are simply appended and sent.
- * Live and replay run the same code, which is what keeps them from drifting.
- */
-export function createLineDurablePushRecorder(params: {
-  queueId: string;
-  partIndex: number;
-  partCount: number;
-  to: string;
-  accountId?: string;
-  payload: ReplyPayload;
-}): LineDurablePushRecorder {
-  const plan: LineDurableSendPlan = {
-    version: PLAN_VERSION,
-    queueId: params.queueId,
-    partIndex: requireIndex(params.partIndex, "part index"),
-    // Not coerced: the schema refuses a non-positive count in writePlan, which runs
-    // before the first push crosses the boundary. Substituting 1 here would record a
-    // topology the delivery never had and let reconciliation call it complete.
-    partCount: params.partCount,
-    to: params.to,
-    ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
-    payload: params.payload,
-    firstDispatchedAtMs: Date.now(),
-    pushes: [],
-  };
-  let loaded = false;
-  let produced = 0;
-  // Seed from what is already on disk. A replay must never shrink the record it
-  // is replaying: a second crash would then leave later pushes with nothing to
-  // be compared against, and a diverged fan-out could go out under keys LINE has
-  // already accepted.
-  const loadRecordedPushes = async (): Promise<void> => {
-    if (loaded) {
-      return;
-    }
-    const recorded = await readPlan(params.queueId, plan.partIndex);
-    plan.pushes = recorded?.pushes ?? [];
-    // A replay keeps the original instant: the window it must respect opened when
-    // LINE first saw these keys, not when this attempt started.
-    if (recorded) {
-      plan.firstDispatchedAtMs = recorded.firstDispatchedAtMs;
-    }
-    loaded = true;
-  };
-  return {
-    retryKeyExpiresAtMs: () =>
-      loaded ? plan.firstDispatchedAtMs + LINE_RETRY_KEY_TTL_MS : undefined,
-    // An arrow keeps the recorder usable as a bare callback on the send options.
-    recordPush: async (push: LineDurablePush): Promise<void> => {
-      await loadRecordedPushes();
-      const previous = plan.pushes[produced];
-      if (previous) {
-        if (JSON.stringify(previous) !== JSON.stringify(push)) {
-          // The fan-out no longer reproduces what LINE was asked to deliver, so
-          // resending under these keys would drop content behind a stale 409.
-          throw new LineDurableSendPlanError(
-            `LINE durable send plan part ${plan.partIndex} no longer reproduces its recorded push ${produced}`,
-          );
-        }
-        produced += 1;
-        return;
-      }
-      plan.pushes.push(push);
-      produced += 1;
-      await writePlan(plan);
-    },
-    assertRecordFullyReplayed: async (): Promise<void> => {
-      // The fan-out is rebuilt at replay time, so anything that changes how this
-      // reply splits between the interrupted send and the retry — an upgrade across
-      // the interruption — can make it render fewer pushes than were recorded.
-      // Settling that as sent would drop a recorded push that may never have
-      // reached LINE.
-      await loadRecordedPushes();
-      if (produced < plan.pushes.length) {
-        throw new LineDurableSendPlanError(
-          `LINE durable send plan part ${plan.partIndex} reproduced ${produced} of its ${plan.pushes.length} recorded pushes`,
-        );
-      }
-    },
-  };
+  await store.register(key, new TextEncoder().encode(JSON.stringify(plan)), {});
+  return plan;
 }
 
 /**

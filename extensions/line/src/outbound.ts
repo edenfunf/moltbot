@@ -25,11 +25,12 @@ import {
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { resolveOutboundMediaUrls } from "openclaw/plugin-sdk/reply-payload";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
+import { normalizeLineMessage } from "./actions.js";
 import {
   clearLineDurableSendPlans,
-  createLineDurablePushRecorder,
   LineDurableSendPlanError,
   loadLineDurableSendPlans,
+  recordLineDurableSendPlan,
 } from "./durable-send-plan.js";
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { buildLineQuickReplyFallbackText } from "./quick-reply-fallback.js";
@@ -45,8 +46,12 @@ import {
   isLineRetryKeyExpiredError,
   LINE_RETRY_KEY_TTL_MS,
   resolveLineNonDispatchRetryable,
+  resolveLinePushRetryKey,
 } from "./send-retry.js";
 import type { LineChannelData, LineSendResult, ResolvedLineAccount } from "./types.js";
+
+/** Any LINE message this adapter can put on the wire. */
+type LineOutboundMessage = messagingApi.Message;
 
 const loadLineOutboundRuntime = createLazyRuntimeModule(() => import("./outbound.runtime.js"));
 
@@ -63,11 +68,13 @@ function createDispatchOnce(onPlatformSendDispatch?: () => Promise<void>): () =>
 }
 
 /**
- * The one send path both a live delivery and a recovery replay take, so a replay
- * cannot drift from the send it is reproducing. Whenever this send is durable it also
- * hands the push layer the recorded plan's deadline, so every provider attempt is
- * checked against the instant LINE stops deduplicating these retry keys — the same
- * instant for a first send and for the replay that reproduces it.
+ * Renders one delivery part into the exact pushes it will make, records them all
+ * before the first of them leaves, then sends them.
+ *
+ * No LINE message in a part depends on the result of an earlier one, so the whole
+ * fan-out is known before any of it is sent. Recording it whole is what lets a
+ * replay reissue the very requests LINE was asked to take, instead of re-rendering
+ * the reply and hoping it still renders the same way.
  */
 async function sendLinePayload({
   to,
@@ -83,41 +90,6 @@ async function sendLinePayload({
   NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
 >[0]) {
   const runtime = getLineRuntime();
-  // Each platform send inside one durable delivery keeps a stable retry key, so a
-  // recovery replay is deduplicated by LINE push for push instead of resending.
-  // Core owns the part index; this payload owns the pushes it fans out into.
-  let durablePushIndex = 0;
-  const dispatchOnce = onPlatformSendDispatch
-    ? createDispatchOnce(onPlatformSendDispatch)
-    : undefined;
-  const recorder = deliveryQueueId
-    ? createLineDurablePushRecorder({
-        queueId: deliveryQueueId,
-        partIndex: deliveryPartIndex ?? 0,
-        partCount: deliveryPartCount ?? 1,
-        to,
-        ...(accountId ? { accountId } : {}),
-        payload,
-      })
-    : undefined;
-  const nextDurableSend = () => ({
-    ...(dispatchOnce ? { onPlatformSendDispatch: dispatchOnce } : {}),
-    ...(recorder
-      ? {
-          onDurablePush: recorder.recordPush,
-          resolveRetryKeyExpiresAtMs: recorder.retryKeyExpiresAtMs,
-        }
-      : {}),
-    ...(deliveryQueueId
-      ? {
-          durableSend: {
-            deliveryQueueId,
-            partIndex: deliveryPartIndex ?? 0,
-            pushIndex: durablePushIndex++,
-          },
-        }
-      : {}),
-  });
   const outboundRuntime = await loadLineOutboundRuntime();
   const rawLineData = (payload.channelData?.line as LineChannelData | undefined) ?? {};
   const lineData =
@@ -126,49 +98,12 @@ async function sendLinePayload({
       : rawLineData;
   const lineRuntime = runtime.channel.line;
   const location = lineData.location;
-  const locationMessage = location ? outboundRuntime.createLocationMessage(location) : null;
-  const sendText = lineRuntime?.pushMessageLine ?? outboundRuntime.pushMessageLine;
-  const sendBatch = lineRuntime?.pushMessagesLine ?? outboundRuntime.pushMessagesLine;
-  const sendFlex = lineRuntime?.pushFlexMessage ?? outboundRuntime.pushFlexMessage;
-  const sendTemplate = lineRuntime?.pushTemplateMessage ?? outboundRuntime.pushTemplateMessage;
-  const sendLocation = lineRuntime?.pushLocationMessage ?? outboundRuntime.pushLocationMessage;
-  const sendQuickReplies =
-    lineRuntime?.pushTextMessageWithQuickReplies ?? outboundRuntime.pushTextMessageWithQuickReplies;
+  const createFlex = outboundRuntime.createFlexMessage;
+  const createLocation = outboundRuntime.createLocationMessage;
   const buildTemplate =
     lineRuntime?.buildTemplateMessageFromPayload ?? outboundRuntime.buildTemplateMessageFromPayload;
-  const sendOptions = { verbose: false, cfg, accountId: accountId ?? undefined };
+  const locationMessage = location ? createLocation(location) : null;
 
-  let lastResult: LineSendResult | null = null;
-  const recordResult = async (resultPromise: Promise<LineSendResult>): Promise<LineSendResult> => {
-    let result: LineSendResult;
-    try {
-      result = await resultPromise;
-    } catch (error) {
-      // Accepted payload parts keep their receipt and must not wait for quota diagnosis.
-      const refusal =
-        lastResult !== null || isChannelPartialDeliveryError(error)
-          ? undefined
-          : await explainLineRefusal({ error, cfg, accountId });
-      throw refusal?.retryable !== undefined
-        ? new PlatformMessageNotDispatchedError(refusal.reason, {
-            cause: error,
-            retryable: refusal.retryable,
-          })
-        : error;
-    }
-    lastResult = result;
-    try {
-      await onDeliveryResult?.(createEmptyChannelResult("line", { ...result }));
-    } catch (error) {
-      // Observers run after provider acceptance; losing this receipt invites duplicate delivery.
-      throw createChannelPartialDeliveryError(error, {
-        messageIds: listMessageReceiptPlatformIds(result.receipt),
-        receipt: result.receipt,
-        visibleReplySent: true,
-      });
-    }
-    return result;
-  };
   const quickReplies = lineData.quickReplies ?? [];
   const quickReplyItems = lineData.quickReplyItems ?? [];
   const hasQuickReplies = quickReplies.length > 0 || quickReplyItems.length > 0;
@@ -181,26 +116,23 @@ async function sendLinePayload({
     ? quickReplyItems.map((item) => item.label)
     : quickReplies;
 
-  // LINE SDK expects Message[] but we build dynamically.
-  const sendMessageBatch = async (messages: Array<Record<string, unknown>>) => {
-    if (messages.length === 0) {
-      return;
-    }
-    for (let i = 0; i < messages.length; i += 5) {
-      const batch = messages.slice(i, i + 5) as unknown as Parameters<typeof sendBatch>[1];
-      await recordResult(sendBatch(to, batch, { ...sendOptions, ...nextDurableSend() }));
+  // Every entry is one push, in the order it will be made. Nothing is sent while
+  // this is being built, so a failure here — an unusable media URL, for instance —
+  // refuses the whole reply instead of leaving half of it delivered.
+  const plannedPushes: LineOutboundMessage[][] = [];
+  const addPush = (messages: LineOutboundMessage[]): void => {
+    if (messages.length > 0) {
+      plannedPushes.push(messages);
     }
   };
-
-  const sendTextWithQuickReply = async (text: string) => {
-    if (quickReplyItems.length > 0 && quickReply) {
-      await sendMessageBatch([{ type: "text", text, quickReply }]);
-      return;
+  // LINE takes at most five messages per push.
+  const addBatched = (messages: LineOutboundMessage[]): void => {
+    for (let index = 0; index < messages.length; index += 5) {
+      addPush(messages.slice(index, index + 5));
     }
-    await recordResult(
-      sendQuickReplies(to, text, quickReplies, { ...sendOptions, ...nextDurableSend() }),
-    );
   };
+  const textWithQuickReply = (text: string): LineOutboundMessage[] =>
+    quickReply ? [{ type: "text", text, quickReply }] : [{ type: "text", text }];
 
   const processed = payload.text
     ? outboundRuntime.processLineMessage(payload.text)
@@ -225,7 +157,10 @@ async function sendLinePayload({
     : processed.text
       ? runtime.channel.text.chunkMarkdownText(processed.text, chunkLimit)
       : [];
-  const mediaUrls = resolveOutboundMediaUrls(payload);
+  const mediaUrls = resolveOutboundMediaUrls(payload).flatMap((url) => {
+    const trimmed = url?.trim();
+    return trimmed ? [trimmed] : [];
+  });
   const mediaOptions = {
     mediaKind: lineData.mediaKind,
     previewImageUrl: lineData.previewImageUrl,
@@ -233,98 +168,73 @@ async function sendLinePayload({
     trackingId: lineData.trackingId,
   };
   const shouldSendQuickRepliesInline = chunks.length === 0 && hasQuickReplies;
-  const sendMediaMessages = async () => {
-    for (const url of mediaUrls) {
-      const trimmed = url?.trim();
-      if (!trimmed) {
-        continue;
-      }
-      await recordResult(
-        (lineRuntime?.sendMessageLine ?? outboundRuntime.sendMessageLine)(to, "", {
-          ...sendOptions,
-          ...mediaOptions,
-          ...nextDurableSend(),
-          mediaUrl: trimmed,
-        }),
-      );
-    }
-  };
+  const buildMediaMessages = async (): Promise<LineOutboundMessage[]> =>
+    await Promise.all(mediaUrls.map((url) => buildLineMediaMessage(url, mediaOptions, to)));
 
   if (!shouldSendQuickRepliesInline) {
     if (lineData.flexMessage) {
-      const flexContents = lineData.flexMessage.contents as Parameters<typeof sendFlex>[2];
-      await recordResult(
-        sendFlex(to, lineData.flexMessage.altText, flexContents, {
-          ...sendOptions,
-          ...nextDurableSend(),
-        }),
-      );
+      const flexContents = lineData.flexMessage.contents as messagingApi.FlexContainer;
+      addPush([createFlex(lineData.flexMessage.altText, flexContents)]);
     }
 
     if (lineData.templateMessage) {
       const template = buildTemplate(lineData.templateMessage);
       if (template) {
-        await recordResult(sendTemplate(to, template, { ...sendOptions, ...nextDurableSend() }));
+        addPush([template]);
       }
     }
 
-    if (location) {
-      await recordResult(sendLocation(to, location, { ...sendOptions, ...nextDurableSend() }));
+    if (locationMessage) {
+      addPush([locationMessage]);
     }
 
     if (!orderedMessages) {
       for (const flexMsg of processed.flexMessages) {
-        await recordResult(
-          sendFlex(to, flexMsg.altText, flexMsg.contents, {
-            ...sendOptions,
-            ...nextDurableSend(),
-          }),
-        );
+        addPush([createFlex(flexMsg.altText, flexMsg.contents)]);
       }
     }
   }
 
   const sendMediaAfterText = !(hasQuickReplies && chunks.length > 0);
-  if (mediaUrls.length > 0 && !shouldSendQuickRepliesInline && !sendMediaAfterText) {
-    await sendMediaMessages();
+  const mediaMessages =
+    mediaUrls.length > 0 && !shouldSendQuickRepliesInline ? await buildMediaMessages() : [];
+  if (!sendMediaAfterText) {
+    for (const message of mediaMessages) {
+      addPush([message]);
+    }
   }
 
   if (orderedMessages && !shouldSendQuickRepliesInline) {
     for (const [index, message] of orderedMessages.entries()) {
       const isLast = index === orderedMessages.length - 1;
       if (message.type === "flex") {
-        if (isLast && quickReply) {
-          await sendMessageBatch([{ ...message, quickReply }]);
-        } else {
-          await recordResult(
-            sendFlex(to, message.altText, message.contents, {
-              ...sendOptions,
-              ...nextDurableSend(),
-            }),
-          );
-        }
+        addPush(
+          isLast && quickReply
+            ? [{ ...message, quickReply }]
+            : [createFlex(message.altText, message.contents)],
+        );
       } else if (isLast && hasQuickReplies) {
-        await sendTextWithQuickReply(message.text);
+        addPush(textWithQuickReply(message.text));
       } else {
-        await recordResult(sendText(to, message.text, { ...sendOptions, ...nextDurableSend() }));
+        addPush([{ type: "text", text: message.text.trim() }]);
       }
     }
   } else if (chunks.length > 0) {
-    for (const [i, chunk] of chunks.entries()) {
-      const isLast = i === chunks.length - 1;
-      if (isLast && hasQuickReplies) {
-        await sendTextWithQuickReply(chunk);
-      } else {
-        await recordResult(sendText(to, chunk, { ...sendOptions, ...nextDurableSend() }));
-      }
+    for (const [index, chunk] of chunks.entries()) {
+      const isLast = index === chunks.length - 1;
+      addPush(
+        isLast && hasQuickReplies
+          ? textWithQuickReply(chunk)
+          : [{ type: "text", text: chunk.trim() }],
+      );
     }
   } else if (shouldSendQuickRepliesInline) {
-    const quickReplyMessages: Array<Record<string, unknown>> = [];
+    const quickReplyMessages: LineOutboundMessage[] = [];
     if (lineData.flexMessage) {
       quickReplyMessages.push(
-        outboundRuntime.createFlexMessage(
+        createFlex(
           lineData.flexMessage.altText,
-          lineData.flexMessage.contents as Parameters<typeof outboundRuntime.createFlexMessage>[1],
+          lineData.flexMessage.contents as messagingApi.FlexContainer,
         ),
       );
     }
@@ -338,39 +248,127 @@ async function sendLinePayload({
       quickReplyMessages.push(locationMessage);
     }
     for (const flexMsg of processed.flexMessages) {
-      quickReplyMessages.push(outboundRuntime.createFlexMessage(flexMsg.altText, flexMsg.contents));
+      quickReplyMessages.push(createFlex(flexMsg.altText, flexMsg.contents));
     }
-    for (const url of mediaUrls) {
-      const trimmed = url?.trim();
-      if (!trimmed) {
-        continue;
-      }
-      quickReplyMessages.push(await buildLineMediaMessage(trimmed, mediaOptions, to));
-    }
+    quickReplyMessages.push(...(await buildMediaMessages()));
     if (quickReplyMessages.length > 0 && quickReply) {
       const lastIndex = quickReplyMessages.length - 1;
       quickReplyMessages[lastIndex] = {
         ...quickReplyMessages[lastIndex],
         quickReply,
-      };
-      await sendMessageBatch(quickReplyMessages);
+      } as LineOutboundMessage;
+      addBatched(quickReplyMessages);
     } else if (quickReply) {
-      await sendTextWithQuickReply(buildLineQuickReplyFallbackText(quickReplyLabels));
+      addPush(textWithQuickReply(buildLineQuickReplyFallbackText(quickReplyLabels)));
     }
   }
 
-  if (mediaUrls.length > 0 && !shouldSendQuickRepliesInline && sendMediaAfterText) {
-    await sendMediaMessages();
+  if (sendMediaAfterText) {
+    for (const message of mediaMessages) {
+      addPush([message]);
+    }
   }
 
-  // Checked before the emptiness guard so a replay that rendered fewer pushes
-  // than it recorded reports that, rather than an unrelated empty-payload error.
-  await recorder?.assertRecordFullyReplayed();
-  const completedResult = lastResult as LineSendResult | null;
-  if (!completedResult) {
+  if (plannedPushes.length === 0) {
     throw new Error("Message must be non-empty for LINE sends");
   }
-  return createEmptyChannelResult("line", { ...completedResult });
+
+  return await dispatchLinePushes({
+    to,
+    cfg,
+    accountId,
+    onPlatformSendDispatch,
+    onDeliveryResult,
+    pushes: deliveryQueueId
+      ? (
+          await recordLineDurableSendPlan({
+            queueId: deliveryQueueId,
+            partIndex: deliveryPartIndex ?? 0,
+            partCount: deliveryPartCount ?? 1,
+            to,
+            ...(accountId ? { accountId } : {}),
+            pushes: plannedPushes.map((messages, pushIndex) => ({
+              retryKey: resolveLinePushRetryKey({
+                deliveryQueueId,
+                partIndex: deliveryPartIndex ?? 0,
+                pushIndex,
+              }),
+              messages: messages.map(normalizeLineMessage),
+            })),
+          })
+        ).pushes
+      : plannedPushes.map((messages) => ({ messages })),
+  });
+}
+
+/**
+ * Sends the pushes of one part, in order, under the keys they were recorded with.
+ *
+ * A recorded key makes each request idempotent for LINE's 24-hour window, so this
+ * is also the replay path: reissuing an accepted push answers 409 with its original
+ * receipt, and one that never landed is delivered now.
+ */
+async function dispatchLinePushes(params: {
+  to: string;
+  cfg: Parameters<
+    NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
+  >[0]["cfg"];
+  accountId?: string | null;
+  onPlatformSendDispatch?: () => Promise<void>;
+  onDeliveryResult?: (result: OutboundDeliveryResult) => void | Promise<void>;
+  pushes: readonly { retryKey?: string; messages: LineOutboundMessage[] }[];
+  retryKeyExpiresAtMs?: number;
+}): Promise<OutboundDeliveryResult> {
+  const runtime = getLineRuntime();
+  const outboundRuntime = await loadLineOutboundRuntime();
+  const sendBatch = runtime.channel.line?.pushMessagesLine ?? outboundRuntime.pushMessagesLine;
+  const dispatchOnce = params.onPlatformSendDispatch
+    ? createDispatchOnce(params.onPlatformSendDispatch)
+    : undefined;
+  const accountId = params.accountId ?? undefined;
+  let lastResult: LineSendResult | null = null;
+  for (const push of params.pushes) {
+    let result: LineSendResult;
+    try {
+      result = await sendBatch(params.to, push.messages as never, {
+        verbose: false,
+        cfg: params.cfg,
+        accountId,
+        ...(dispatchOnce ? { onPlatformSendDispatch: dispatchOnce } : {}),
+        ...(push.retryKey ? { durableRetryKey: push.retryKey } : {}),
+        ...(params.retryKeyExpiresAtMs === undefined
+          ? {}
+          : { retryKeyExpiresAtMs: params.retryKeyExpiresAtMs }),
+      });
+    } catch (error) {
+      // Accepted pushes keep their receipt and must not wait for quota diagnosis.
+      const refusal =
+        lastResult !== null || isChannelPartialDeliveryError(error)
+          ? undefined
+          : await explainLineRefusal({ error, cfg: params.cfg, accountId });
+      throw refusal?.retryable !== undefined
+        ? new PlatformMessageNotDispatchedError(refusal.reason, {
+            cause: error,
+            retryable: refusal.retryable,
+          })
+        : error;
+    }
+    lastResult = result;
+    try {
+      await params.onDeliveryResult?.(createEmptyChannelResult("line", { ...result }));
+    } catch (error) {
+      // Observers run after provider acceptance; losing this receipt invites duplicate delivery.
+      throw createChannelPartialDeliveryError(error, {
+        messageIds: listMessageReceiptPlatformIds(result.receipt),
+        receipt: result.receipt,
+        visibleReplySent: true,
+      });
+    }
+  }
+  if (!lastResult) {
+    throw new Error("Message must be non-empty for LINE sends");
+  }
+  return createEmptyChannelResult("line", { ...lastResult });
 }
 
 export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]> = {
@@ -471,19 +469,18 @@ async function reconcileLineUnknownSend(
   // One payload can fan out into several platform sends, and the settled queue
   // entry must carry the identity of every one of them. Collecting per push is
   // what the live path does through this same observer; the payload's return
-  // value only carries its final send.
+  // value only carries its final send. Nothing is re-rendered here: the recorded
+  // requests are reissued exactly, so a reply that would render differently now
+  // still resolves as the one LINE was asked to take.
   const results: OutboundDeliveryResult[] = [];
   for (const plan of plans) {
     try {
-      await sendLinePayload({
+      await dispatchLinePushes({
         cfg: ctx.cfg,
         to: plan.to,
-        text: plan.payload.text ?? "",
-        payload: plan.payload,
         ...(plan.accountId === undefined ? {} : { accountId: plan.accountId }),
-        deliveryQueueId: ctx.queueId,
-        deliveryPartIndex: plan.partIndex,
-        deliveryPartCount: plan.partCount,
+        pushes: plan.pushes,
+        retryKeyExpiresAtMs,
         onDeliveryResult: (result) => {
           results.push(result);
         },

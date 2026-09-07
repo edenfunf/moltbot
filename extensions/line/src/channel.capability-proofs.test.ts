@@ -3,10 +3,10 @@ import {
   verifyChannelMessageAdapterCapabilityProofs,
   verifyChannelMessageReceiveAckPolicyAdapterProofs,
 } from "openclaw/plugin-sdk/channel-outbound";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../api.js";
 import { linePlugin } from "./channel.js";
-import { createLineDurablePushRecorder } from "./durable-send-plan.js";
+import { recordLineDurableSendPlan } from "./durable-send-plan.js";
 import { createRuntime } from "./outbound-harness.test-support.js";
 import { setLineRuntime } from "./runtime.js";
 import { createLineSendReceipt } from "./send-receipt.js";
@@ -18,9 +18,29 @@ function lineReceipt(messageId: string) {
 
 const CFG = { channels: { line: {} } } as OpenClawConfig;
 
+const ssrfMocks = vi.hoisted(() => ({
+  resolvePinnedHostnameWithPolicy: vi.fn(),
+}));
+
+// The payload owner builds its own media message now, so the media URL is
+// validated in-process instead of behind a stand-in sender.
+vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
+  resolvePinnedHostnameWithPolicy: ssrfMocks.resolvePinnedHostnameWithPolicy,
+}));
+
+afterAll(() => {
+  vi.doUnmock("openclaw/plugin-sdk/ssrf-runtime");
+  vi.resetModules();
+});
+
 describe("line message adapter capability contracts", () => {
   beforeEach(() => {
     vi.setSystemTime(1_800_000_000_000);
+    ssrfMocks.resolvePinnedHostnameWithPolicy.mockReset();
+    ssrfMocks.resolvePinnedHostnameWithPolicy.mockResolvedValue({
+      hostname: "example.com",
+      addresses: ["93.184.216.34"],
+    });
   });
 
   afterEach(() => {
@@ -42,11 +62,11 @@ describe("line message adapter capability contracts", () => {
             text: "hello",
             accountId: "primary",
           });
-          expect(mocks.pushMessageLine).toHaveBeenCalledWith("line:user:U123", "hello", {
-            verbose: false,
-            accountId: "primary",
-            cfg: CFG,
-          });
+          expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
+            "line:user:U123",
+            [{ type: "text", text: "hello" }],
+            { verbose: false, accountId: "primary", cfg: CFG },
+          );
           expect(result?.receipt.platformMessageIds).toEqual(["m-text"]);
         },
         media: async () => {
@@ -57,12 +77,17 @@ describe("line message adapter capability contracts", () => {
             mediaUrl: "https://example.com/image.jpg",
             accountId: "primary",
           });
-          expect(mocks.sendMessageLine).toHaveBeenCalledWith("line:user:U123", "", {
-            verbose: false,
-            mediaUrl: "https://example.com/image.jpg",
-            accountId: "primary",
-            cfg: CFG,
-          });
+          expect(mocks.pushMessagesLine).toHaveBeenLastCalledWith(
+            "line:user:U123",
+            [
+              {
+                type: "image",
+                originalContentUrl: "https://example.com/image.jpg",
+                previewImageUrl: "https://example.com/image.jpg",
+              },
+            ],
+            { verbose: false, accountId: "primary", cfg: CFG },
+          );
           expect(result?.receipt.platformMessageIds).toEqual(["m-media"]);
         },
         payload: async () => {
@@ -78,12 +103,15 @@ describe("line message adapter capability contracts", () => {
             deliveryPartIndex: 0,
             deliveryPartCount: 1,
           });
-          expect(mocks.pushTextMessageWithQuickReplies).toHaveBeenCalledWith(
+          expect(mocks.pushMessagesLine).toHaveBeenLastCalledWith(
             "line:user:U123",
-            "pick one",
-            ["One", "Two"],
+            [{ type: "text", text: "pick one", quickReply: { items: ["One", "Two"] } }],
             expect.objectContaining({
-              durableSend: { deliveryQueueId: "queue-payload", partIndex: 0, pushIndex: 0 },
+              durableRetryKey: resolveLinePushRetryKey({
+                deliveryQueueId: "queue-payload",
+                partIndex: 0,
+                pushIndex: 0,
+              }),
             }),
           );
           expect(result?.receipt.platformMessageIds).toEqual(["m-quick"]);
@@ -99,14 +127,13 @@ describe("line message adapter capability contracts", () => {
             pushIndex: 0,
           });
           const messages = [{ type: "text" as const, text: "hello" }];
-          const recorder = createLineDurablePushRecorder({
+          await recordLineDurableSendPlan({
             queueId: "queue-entry-1",
             partIndex: 0,
             partCount: 1,
             to: "line:user:U123",
-            payload: { text: "hello" },
+            pushes: [{ retryKey, messages }],
           });
-          await recorder.recordPush({ retryKey, messages });
 
           const reconciliation = await linePlugin.message?.durableFinal?.reconcileUnknownSend?.({
             cfg: CFG,
@@ -119,31 +146,29 @@ describe("line message adapter capability contracts", () => {
             retryCount: 1,
             payloads: [{ text: "hello" }],
           });
-          // The replay re-enters the recorded part's fan-out under that part's
-          // durable identity, which is what regenerates the key LINE 409s on. The
-          // deduplication deadline is not on this ref: the recorded plan owns it, so
-          // a live send and its replay read the same instant.
-          expect(mocks.pushMessageLine).toHaveBeenCalledWith(
+          // The replay reissues the recorded request under the key it was recorded
+          // with, which is what LINE 409s on. The deduplication deadline comes off
+          // the recorded plan, so a live send and its replay read the same instant.
+          expect(mocks.pushMessagesLine).toHaveBeenCalledWith(
             "line:user:U123",
-            "hello",
-            expect.objectContaining({
-              durableSend: { deliveryQueueId: "queue-entry-1", partIndex: 0, pushIndex: 0 },
-            }),
+            messages,
+            expect.objectContaining({ durableRetryKey: retryKey }),
           );
           expect(reconciliation).toMatchObject({ status: "sent", messageId: "m-text" });
         },
         afterCommit: async () => {
           const otherDeliveries = mocks.blobs.size;
-          const recorder = createLineDurablePushRecorder({
+          await recordLineDurableSendPlan({
             queueId: "queue-commit",
             partIndex: 0,
             partCount: 1,
             to: "line:user:U123",
-            payload: { text: "hello" },
-          });
-          await recorder.recordPush({
-            retryKey: "8ac8b1bc-98a6-4f0e-9f2f-0a3f5d0a6e11",
-            messages: [{ type: "text", text: "hello" }],
+            pushes: [
+              {
+                retryKey: "8ac8b1bc-98a6-4f0e-9f2f-0a3f5d0a6e11",
+                messages: [{ type: "text", text: "hello" }],
+              },
+            ],
           });
           expect(mocks.blobs.size).toBe(otherDeliveries + 1);
 

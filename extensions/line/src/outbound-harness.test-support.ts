@@ -1,8 +1,7 @@
 // Line test support shares the outbound runtime harness across send suites.
-import { type Mock, vi } from "vitest";
+import { vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../api.js";
 import { createLineSendReceipt } from "./send-receipt.js";
-import { resolveLinePushRetryKey } from "./send-retry.js";
 
 /** In-memory stand-in for the plugin blob store the durable send plan persists to. */
 export type LineBlobStoreFake = Map<string, Uint8Array>;
@@ -158,13 +157,8 @@ type LineRuntimeMocks = {
   blobs: LineBlobStoreFake;
   pushMessageLine: ReturnType<typeof vi.fn>;
   pushMessagesLine: ReturnType<typeof vi.fn>;
-  pushFlexMessage: ReturnType<typeof vi.fn>;
-  pushTemplateMessage: ReturnType<typeof vi.fn>;
-  pushLocationMessage: ReturnType<typeof vi.fn>;
-  pushTextMessageWithQuickReplies: Mock<typeof import("./send.js").pushTextMessageWithQuickReplies>;
   createQuickReplyItems: ReturnType<typeof vi.fn>;
   buildTemplateMessageFromPayload: ReturnType<typeof vi.fn>;
-  sendMessageLine: ReturnType<typeof vi.fn>;
   chunkMarkdownText: ReturnType<typeof vi.fn>;
   resolveLineAccount: ReturnType<typeof vi.fn>;
   resolveTextChunkLimit: ReturnType<typeof vi.fn>;
@@ -179,58 +173,46 @@ export function lineResult(messageId: string, chatId = "c1") {
 }
 
 /**
- * The real push owner records every push before dispatching it. A stand-in that
- * skipped that would let a durable send look like a fan-out that reproduced
- * nothing, so the mocks honour the same callback contract.
+ * Every payload push now leaves through the one batch primitive, so the stand-in
+ * names its receipt after what the push actually carries. Two sends that used to
+ * reach different senders stay as distinguishable as they were.
  */
-type StubbedPushOpts = {
-  durableSend?: { deliveryQueueId?: string | null; partIndex?: number; pushIndex?: number };
-  onDurablePush?: (push: {
-    retryKey: string;
-    messages: { type: string; text?: string }[];
-  }) => Promise<void>;
-};
-
-async function recordStubbedPush(opts: StubbedPushOpts | undefined, text: string): Promise<void> {
-  await opts?.onDurablePush?.({
-    retryKey: resolveLinePushRetryKey(opts.durableSend ?? {}),
-    messages: [{ type: "text", text }],
-  });
+function stubbedLineMessageId(messages: readonly StubbedLineMessage[]): string {
+  if (messages.length !== 1) {
+    return "m-batch";
+  }
+  const [message] = messages;
+  switch (message?.type) {
+    case "flex":
+      return "m-flex";
+    case "template":
+      return "m-template";
+    case "location":
+      return "m-loc";
+    case "image":
+    case "video":
+    case "audio":
+      return "m-media";
+    default:
+      return message?.quickReply === undefined ? "m-text" : "m-quick";
+  }
 }
 
+/** Only the fields the receipt id is chosen by; the push carries the whole message. */
+type StubbedLineMessage = { type?: string; quickReply?: unknown };
+
 export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMocks } {
-  const pushMessageLine = vi.fn(async (_to: string, text: string, opts?: StubbedPushOpts) => {
-    await recordStubbedPush(opts, text);
-    return lineResult("m-text");
-  });
-  const pushMessagesLine = vi.fn(
-    async (_to: string, _messages: unknown, opts?: StubbedPushOpts) => {
-      await recordStubbedPush(opts, "m-batch");
-      return lineResult("m-batch");
-    },
+  const pushMessageLine = vi.fn(async () => lineResult("m-text"));
+  const pushMessagesLine = vi.fn(async (_to: string, messages: StubbedLineMessage[]) =>
+    lineResult(stubbedLineMessageId(messages)),
   );
-  const pushFlexMessage = vi.fn(
-    async (_to: string, _alt: string, _contents: unknown, opts?: StubbedPushOpts) => {
-      await recordStubbedPush(opts, "m-flex");
-      return lineResult("m-flex");
-    },
-  );
-  const pushTemplateMessage = vi.fn(
-    async (_to: string, _alt: string, _t: unknown, opts?: StubbedPushOpts) => {
-      await recordStubbedPush(opts, "m-template");
-      return lineResult("m-template");
-    },
-  );
-  const pushLocationMessage = vi.fn(async (_to: string, _loc: unknown, opts?: StubbedPushOpts) => {
-    await recordStubbedPush(opts, "m-loc");
-    return lineResult("m-loc");
-  });
-  const pushTextMessageWithQuickReplies = vi.fn<
-    typeof import("./send.js").pushTextMessageWithQuickReplies
-  >(async () => lineResult("m-quick"));
   const createQuickReplyItems = vi.fn((labels: string[]) => ({ items: labels }));
-  const buildTemplateMessageFromPayload = vi.fn(() => ({ type: "buttons" }));
-  const sendMessageLine = vi.fn(async () => lineResult("m-media"));
+  // A real built template rides the push verbatim, so the stand-in has to be one.
+  const buildTemplateMessageFromPayload = vi.fn(() => ({
+    type: "template",
+    altText: "Choose one",
+    template: { type: "buttons" },
+  }));
   const chunkMarkdownText = vi.fn((text: string) => [text]);
   const resolveTextChunkLimit = vi.fn(() => 123);
   const resolveLineAccount = vi.fn(
@@ -255,13 +237,8 @@ export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMoc
       line: {
         pushMessageLine,
         pushMessagesLine,
-        pushFlexMessage,
-        pushTemplateMessage,
-        pushLocationMessage,
-        pushTextMessageWithQuickReplies,
         createQuickReplyItems,
         buildTemplateMessageFromPayload,
-        sendMessageLine,
         resolveLineAccount,
       },
       text: {
@@ -277,13 +254,8 @@ export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMoc
       blobs,
       pushMessageLine,
       pushMessagesLine,
-      pushFlexMessage,
-      pushTemplateMessage,
-      pushLocationMessage,
-      pushTextMessageWithQuickReplies,
       createQuickReplyItems,
       buildTemplateMessageFromPayload,
-      sendMessageLine,
       chunkMarkdownText,
       resolveLineAccount,
       resolveTextChunkLimit,

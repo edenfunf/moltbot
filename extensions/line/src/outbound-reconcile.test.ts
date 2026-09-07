@@ -83,10 +83,6 @@ function readPlan(key: string): StoredPlan {
   return JSON.parse(new TextDecoder().decode(blobs.get(key)!)) as StoredPlan;
 }
 
-function writePlan(key: string, plan: StoredPlan): void {
-  blobs.set(key, new TextEncoder().encode(JSON.stringify(plan)));
-}
-
 function reconcile(overrides: Partial<ChannelMessageUnknownSendContext> = {}) {
   const ctx: ChannelMessageUnknownSendContext = {
     cfg: CFG,
@@ -232,22 +228,33 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("finishes a part that was interrupted between its pushes", async () => {
-    await sendDurableFlexPart();
-    const live = pushedRequests();
-    expect(live).toHaveLength(2);
-
-    // A crash between the two pushes leaves only the first one recorded.
+  it("records the pushes a crash never reached, so the replay can deliver them", async () => {
+    // The whole fan-out is written before any of it leaves, so a crash partway
+    // through does not truncate the record. Standing in for that crash: the second
+    // push never reaches LINE.
+    fetchMock.mockImplementationOnce(async () =>
+      jsonResponse({ sentMessages: [{ id: "delivered-1" }] }),
+    );
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error("process died before the second push");
+    });
+    await expect(sendDurableFlexPart()).rejects.toThrow();
     const [key] = planKeys();
-    const plan = readPlan(key!);
-    writePlan(key!, { ...plan, pushes: plan.pushes.slice(0, 1) });
+    expect(readPlan(key!).pushes).toHaveLength(2);
+
     fetchMock.mockClear();
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ sentMessages: [{ id: "delivered-1" }] }),
+    );
 
     await expect(reconcile()).resolves.toMatchObject({ status: "sent" });
 
-    // The recorded push is reissued under its key so LINE drops it as a duplicate,
-    // and the push the crash cut off is delivered for the first time.
-    expect(pushedRequests()).toEqual(live);
+    // The accepted push is reissued under its key so LINE drops it as a duplicate,
+    // and the one the crash cut off is delivered for the first time.
+    expect(pushedRequests().map((request) => request.retryKey)).toEqual([
+      resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 0, pushIndex: 0 }),
+      resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 0, pushIndex: 1 }),
+    ]);
   });
 
   it("keeps the whole recorded fan-out after a replay that is itself interrupted", async () => {
@@ -268,35 +275,22 @@ describe("LINE unknown-send reconciliation", () => {
     expect(readPlan(key!).pushes).toHaveLength(2);
   });
 
-  it("refuses to settle a replay that reproduced fewer pushes than were recorded", async () => {
-    await sendDurableFlexPart();
-    const [key] = planKeys();
-    expect(readPlan(key!).pushes).toHaveLength(2);
-
-    // The fan-out is rebuilt from live configuration, so a limit change between
-    // the crash and the recovery can render a shorter one. Standing in for that:
-    // the payload now renders only the first of the two recorded pushes.
-    const plan = readPlan(key!);
-    writePlan(key!, { ...plan, payload: { channelData: plan.payload.channelData } });
-    fetchMock.mockClear();
-
-    await expect(reconcile()).resolves.toMatchObject({ status: "unresolved", retryable: false });
-  });
-
-  it("refuses to replay a fan-out that no longer reproduces what was sent", async () => {
+  it("replays what was recorded when the same delivery now renders differently", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
-    const [key] = planKeys();
-    const plan = readPlan(key!);
-    // Stand in for anything that could make the fan-out diverge from the record.
-    writePlan(key!, {
-      ...plan,
-      pushes: [{ ...plan.pushes[0]!, messages: [{ type: "text", text: "something else" }] }],
-    });
+    const recorded = pushedRequests();
     fetchMock.mockClear();
 
-    await expect(reconcile()).resolves.toMatchObject({ status: "unresolved", retryable: false });
-    // Reissuing a diverged push would hide its content behind a stale 409.
-    expect(fetchMock).not.toHaveBeenCalled();
+    // A retry of the same queued send re-renders from live configuration, which an
+    // upgrade or a chunk-limit change can make differ. The keys are derived from the
+    // delivery, so reissuing the new render under them would let LINE answer 409 for
+    // a request it never saw and drop the difference. The record wins instead.
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "something else entirely" });
+
+    expect(pushedRequests()).toEqual(recorded);
+    const [key] = planKeys();
+    expect(readPlan(key!).pushes).toEqual(
+      recorded.map((request) => ({ retryKey: request.retryKey, messages: request.messages })),
+    );
   });
 
   it("refuses to replay when a planned part was never dispatched", async () => {
@@ -379,12 +373,18 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // The one user-visible harm the troubleshooting docs describe: recording happens push
-  // by push, so a ceiling reached partway leaves the earlier pushes already delivered
-  // and only the rest withheld. A part is rewritten under one key, so the row count
-  // cannot grow within it — but both byte ceilings can still stop a later push, and
-  // this covers the per-entry one.
-  it("leaves the earlier pushes delivered when a later one cannot be recorded", async () => {
+  // Recording is one write per part, made before any of the part leaves, so a
+  // ceiling reached while writing it withholds the whole reply rather than leaving
+  // half of it delivered. Both byte ceilings reach an operator under their own
+  // message, which is what the troubleshooting docs name.
+  it.each([
+    { name: "per-entry", option: "maxBytesPerEntry", message: "byte limit" },
+    {
+      name: "namespace",
+      option: "maxBytesPerNamespace",
+      message: "Plugin blob namespace reached its stored byte limit.",
+    },
+  ])("delivers nothing when the record hits the $name ceiling", async ({ option, message }) => {
     const store = createLineBlobStoreState();
     // Held in a box because the opener closes over it before the measuring run has
     // produced the value the restricted run needs.
@@ -394,7 +394,7 @@ describe("LINE unknown-send reconciliation", () => {
     setLineRuntime({
       state: {
         openBlobStore: (options: { namespace: string }) => {
-          const opened = store.state.openBlobStore({ ...options, maxBytesPerEntry: limit.bytes });
+          const opened = store.state.openBlobStore({ ...options, [option]: limit.bytes });
           return {
             ...opened,
             register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
@@ -414,73 +414,20 @@ describe("LINE unknown-send reconciliation", () => {
     } as unknown as PluginRuntime);
     const threeChunks = "x".repeat(120);
 
-    // Observe how the record grows push by push, then cap between the first and second
-    // so the first push records and the second is the one refused.
+    // Measure the one write this part makes, then cap just under it.
     await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
-    expect(writes.length).toBeGreaterThan(1);
-    limit.bytes = writes[0];
+    expect(writes).toHaveLength(1);
+    limit.bytes = writes[0]! - 1;
     store.blobs.clear();
     writes.length = 0;
     fetchMock.mockClear();
 
     await expect(
       sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
-    ).rejects.toThrow("byte limit");
+    ).rejects.toThrow(message);
 
-    // The first chunk reached the recipient; the rest of the reply did not.
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  // The namespace byte ceiling is the other half, and it reaches an operator under a
-  // different message the troubleshooting docs name. Production charges a rewrite only
-  // its growth (namespaceBytes - previousBytes + new), so a part growing push by push
-  // can cross it even though it never adds a row.
-  it("surfaces a full plan namespace byte budget as the store's own refusal", async () => {
-    const store = createLineBlobStoreState();
-    // Held in a box because the opener closes over it before the measuring run has
-    // produced the value the restricted run needs.
-    const limit: { bytes?: number } = {};
-    const writes: number[] = [];
-    const chunked = (text: string) => text.match(/.{1,40}/gs) ?? [text];
-    setLineRuntime({
-      state: {
-        openBlobStore: (options: { namespace: string }) => {
-          const opened = store.state.openBlobStore({
-            ...options,
-            maxBytesPerNamespace: limit.bytes,
-          });
-          return {
-            ...opened,
-            register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
-              writes.push(bytes.byteLength);
-              return await (opened.register as (...args: unknown[]) => Promise<void>)(
-                key,
-                bytes,
-                ...rest,
-              );
-            },
-          };
-        },
-      },
-      channel: {
-        text: { chunkMarkdownText: chunked, resolveTextChunkLimit: () => 40 },
-      },
-    } as unknown as PluginRuntime);
-    const threeChunks = "x".repeat(120);
-
-    await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
-    expect(writes.length).toBeGreaterThan(1);
-    limit.bytes = writes[0];
-    store.blobs.clear();
-    writes.length = 0;
-    fetchMock.mockClear();
-
-    await expect(
-      sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
-    ).rejects.toThrow("Plugin blob namespace reached its stored byte limit.");
-
-    // The first chunk reached the recipient; the rest of the reply did not.
-    expect(fetchMock).toHaveBeenCalledOnce();
+    // Nothing reached the recipient, so there is nothing left half-delivered.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("refuses to replay once LINE has forgotten the retry keys", async () => {

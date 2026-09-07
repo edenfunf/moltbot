@@ -112,28 +112,23 @@ interface LineSendOpts {
   durationMs?: number;
   trackingId?: string;
   replyToken?: string;
-  durableSend?: LineDurableSendRef;
-  onDurablePush?: (push: { retryKey: string; messages: Message[] }) => Promise<void>;
   /**
-   * Reads when LINE stops deduplicating this send's retry key, asked per attempt
-   * because the backoff between attempts can outlive the window, and a request that
-   * lands after it is a second delivery rather than a deduplicated one. The recorded
-   * plan answers it: the key itself is a timestamp-free hash of the durable id and the
-   * part/push indexes (`resolveLinePushRetryKey`), so neither a first send nor a retry
-   * can tell from the key alone when LINE first saw it.
+   * The recorded key for this push. The plan owns key derivation so a replay
+   * reissues the exact request that was recorded, rather than one this process
+   * would derive again; an unrecorded send gets a fresh key it cannot reuse.
    */
-  resolveRetryKeyExpiresAtMs?: () => number | undefined;
+  durableRetryKey?: string;
+  /**
+   * When LINE stops deduplicating this send's retry key. Checked per attempt because
+   * the backoff between attempts can outlive the window, and a request that lands
+   * after it is a second delivery rather than a deduplicated one. The recorded plan
+   * answers it: the key itself is a timestamp-free hash (`resolveLinePushRetryKey`),
+   * so neither a first send nor a retry can tell from the key alone when LINE first
+   * saw it.
+   */
+  retryKeyExpiresAtMs?: number;
   onPlatformSendDispatch?: () => Promise<void>;
 }
-
-/** Identifies one platform send inside a durable delivery so retries stay idempotent. */
-type LineDurableSendRef = {
-  deliveryQueueId?: string | null;
-  /** Index of the delivery part core planned, or 0 when the payload owns the fan-out. */
-  partIndex?: number;
-  /** Index of this push within the part it belongs to. */
-  pushIndex?: number;
-};
 
 type LineClientOpts = Pick<LineSendOpts, "cfg" | "channelAccessToken" | "accountId">;
 type LinePushOpts = Pick<
@@ -142,10 +137,9 @@ type LinePushOpts = Pick<
   | "channelAccessToken"
   | "accountId"
   | "verbose"
-  | "durableSend"
-  | "onDurablePush"
+  | "durableRetryKey"
   | "onPlatformSendDispatch"
-  | "resolveRetryKeyExpiresAtMs"
+  | "retryKeyExpiresAtMs"
 >;
 
 interface LinePushBehavior {
@@ -397,23 +391,20 @@ async function pushLineMessages(
   const { account, token, chatId } = createLinePushContext(to, opts);
   const normalizedMessages = messages.map(normalizeLineMessage);
   // One retry key per logical push: every attempt reuses it so LINE deduplicates
-  // an attempt that was accepted before its outcome reached us. A durable intent
-  // id keeps that key stable across processes so recovery can replay this exact
-  // request instead of guessing whether it landed.
-  const retryKey = resolveLinePushRetryKey(opts.durableSend ?? {});
+  // an attempt that was accepted before its outcome reached us. A recorded key
+  // stays stable across processes, so recovery replays this exact request instead
+  // of guessing whether it landed; an unrecorded send cannot be replayed at all.
+  const retryKey = opts.durableRetryKey ?? resolveLinePushRetryKey({});
 
-  // Both records must land before the recipient can see anything. The plan is
-  // what recovery replays; the dispatch marker is what tells core a send began.
-  // A crash before either one looks like a send that never started, and one
-  // after both is reconciled instead of replayed blind.
-  await opts.onDurablePush?.({ retryKey, messages: normalizedMessages });
+  // The dispatch marker is what tells core a send began. A crash before it looks
+  // like a send that never started; one after it is reconciled, not replayed blind.
   await opts.onPlatformSendDispatch?.();
 
   const response = await runLinePushWithRetries(async () => {
-    // Re-read per attempt, not once: the backoff between attempts can outlast the
+    // Re-checked per attempt, not once: the backoff between attempts can outlast the
     // window the caller entered under, and a request that lands after LINE forgets
     // the key is delivered again instead of deduplicated.
-    const retryKeyExpiresAtMs = opts.resolveRetryKeyExpiresAtMs?.();
+    const { retryKeyExpiresAtMs } = opts;
     if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
       throw new LineRetryKeyExpiredError();
     }
