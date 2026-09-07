@@ -30,7 +30,6 @@ import {
   resolveAnthropicContextManagementBetaHeader,
 } from "../transports/anthropic-payload-policy.js";
 import { consumeAnthropicStream } from "../transports/anthropic-stream-reducer.js";
-import { countNativeCacheControlMarkers } from "../transports/anthropic-system-blocks.js";
 // Anthropic provider adapts Anthropic streams and tool calls for the runtime.
 import { createAssistantOutput } from "../transports/assistant-output.js";
 import { resolveOpencodeSessionHeaders } from "../transports/session-affinity.js";
