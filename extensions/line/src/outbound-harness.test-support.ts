@@ -28,6 +28,7 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
     defaultTtlMs?: number;
     maxEntries?: number;
     maxBytesPerEntry?: number;
+    maxBytesPerNamespace?: number;
     overflowPolicy?: "reject-new" | "evict-oldest";
   }) => {
     const blobs = namespaces.get(options.namespace) ?? new Map<string, Uint8Array>();
@@ -56,7 +57,8 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
       // evicting one, and that refusal is what an operator actually sees. A stand-in
       // with no ceiling makes every full-namespace assertion pass by construction.
       // A part is rewritten under one key as its pushes are appended, so the row count
-      // never grows within a part and only the per-entry ceiling can stop a later push.
+      // never grows within a part — but the namespace byte total does, and production
+      // charges a rewrite its growth, so that ceiling can refuse a later push too.
       if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
         throw new Error(
           `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,
@@ -69,6 +71,18 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
         blobs.size >= options.maxEntries
       ) {
         throw new Error("Plugin blob namespace reached its stored row limit.");
+      }
+      if (options.maxBytesPerNamespace !== undefined) {
+        // Same accounting as the real store: the row being replaced is credited back
+        // before the new bytes are charged (plugin-blob-store.sqlite.ts).
+        let namespaceBytes = 0;
+        for (const stored of blobs.values()) {
+          namespaceBytes += stored.byteLength;
+        }
+        const previousBytes = blobs.get(key)?.byteLength ?? 0;
+        if (namespaceBytes - previousBytes + bytes.byteLength > options.maxBytesPerNamespace) {
+          throw new Error("Plugin blob namespace reached its stored byte limit.");
+        }
       }
       blobs.set(key, bytes);
       const effectiveTtlMs = ttlMs ?? options.defaultTtlMs;

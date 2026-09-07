@@ -382,7 +382,8 @@ describe("LINE unknown-send reconciliation", () => {
   // The one user-visible harm the troubleshooting docs describe: recording happens push
   // by push, so a ceiling reached partway leaves the earlier pushes already delivered
   // and only the rest withheld. A part is rewritten under one key, so the row count
-  // cannot grow within it — only the per-entry byte ceiling can stop a later push.
+  // cannot grow within it — but both byte ceilings can still stop a later push, and
+  // this covers the per-entry one.
   it("leaves the earlier pushes delivered when a later one cannot be recorded", async () => {
     const store = createLineBlobStoreState();
     // Held in a box because the opener closes over it before the measuring run has
@@ -425,6 +426,58 @@ describe("LINE unknown-send reconciliation", () => {
     await expect(
       sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
     ).rejects.toThrow("byte limit");
+
+    // The first chunk reached the recipient; the rest of the reply did not.
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  // The namespace byte ceiling is the other half, and it reaches an operator under a
+  // different message the troubleshooting docs name. Production charges a rewrite only
+  // its growth (namespaceBytes - previousBytes + new), so a part growing push by push
+  // can cross it even though it never adds a row.
+  it("surfaces a full plan namespace byte budget as the store's own refusal", async () => {
+    const store = createLineBlobStoreState();
+    // Held in a box because the opener closes over it before the measuring run has
+    // produced the value the restricted run needs.
+    const limit: { bytes?: number } = {};
+    const writes: number[] = [];
+    const chunked = (text: string) => text.match(/.{1,40}/gs) ?? [text];
+    setLineRuntime({
+      state: {
+        openBlobStore: (options: { namespace: string }) => {
+          const opened = store.state.openBlobStore({
+            ...options,
+            maxBytesPerNamespace: limit.bytes,
+          });
+          return {
+            ...opened,
+            register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
+              writes.push(bytes.byteLength);
+              return await (opened.register as (...args: unknown[]) => Promise<void>)(
+                key,
+                bytes,
+                ...rest,
+              );
+            },
+          };
+        },
+      },
+      channel: {
+        text: { chunkMarkdownText: chunked, resolveTextChunkLimit: () => 40 },
+      },
+    } as unknown as PluginRuntime);
+    const threeChunks = "x".repeat(120);
+
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
+    expect(writes.length).toBeGreaterThan(1);
+    limit.bytes = writes[0];
+    store.blobs.clear();
+    writes.length = 0;
+    fetchMock.mockClear();
+
+    await expect(
+      sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
+    ).rejects.toThrow("Plugin blob namespace reached its stored byte limit.");
 
     // The first chunk reached the recipient; the rest of the reply did not.
     expect(fetchMock).toHaveBeenCalledOnce();
