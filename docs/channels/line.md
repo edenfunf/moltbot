@@ -463,9 +463,9 @@ retry of the same queued send, not only after a restart.
 
 Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
 reply is recorded only when it is a final block, carries text without media or
-LINE-specific rich content, and the event's reply token has already been spent — so
-the first reply of an exchange, which is often the only one, is normally sent inline
-and not recorded. Sends queued by other callers follow their own rules. The observable
+LINE-specific rich content, and the event's reply token is spent or absent — so the
+first reply of an exchange, which is often the only one, is normally sent inline and
+not recorded. Sends queued by other callers follow their own rules. The observable
 rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
 it needs reconciling. Seeing that message is how you know this send was not on the
@@ -504,19 +504,17 @@ These particular outcomes do not dead-letter the incoming event, so
 
 #### When the record itself cannot be written
 
-This is a different failure from the ones above, and it is not silent about the
-incoming message: the reply fails, and the LINE event that prompted it is
-dead-lettered rather than answered, under the reason
+Two things can fail before a send is recorded, and they end differently. If the **queue row** cannot be written
+the reply still goes out live, and `openclaw logs` carries
+`outbound queue write failed; continuing without durability`. That send has no queue
+row, so nothing will ever replay it and nothing can reconcile it either: if it is
+interrupted, it is simply lost. If the **recorded plan** cannot be stored the reply
+fails, and it is not silent about the incoming message: the LINE event that prompted
+it is dead-lettered rather than answered, under the reason
 `delivery-side-effects-committed`. As noted earlier on this page, that reason must
 never be resubmitted — the turn was already adopted, so re-enqueuing repeats the
-committed work. Fix the cause and let the sender ask again.
-
-Because recorded sends are reconcilable, the outbound queue treats persistence as
-required rather than best-effort — an unrecorded push is the one a later replay would
-duplicate. Two things can fail. If the **queue row** cannot be written the send fails
-before any push, and the person on LINE sees nothing; the trace is a
-`line ... reply failed` line in `openclaw logs`. If the **recorded plan** cannot be
-stored, what you see depends on which half rejected it: a validation problem is
+committed work. Fix the cause and let the sender ask again. What you see depends on
+which half of the store rejected it: a validation problem is
 reported as `LINE durable send plan part N cannot be recorded: ...`, while the plan
 store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
@@ -524,17 +522,20 @@ the plan namespace is full, `plugin blob entry exceeds the configured 1048576 by
 limit` when this one reply's record is itself too large, and other store errors when
 the state directory will not take the write. The namespace limits clear as sends
 settle; the per-entry limit does not — a reply whose record cannot fit will never fit,
-so that one is permanently undeliverable and needs the reply made smaller, not waited
-out.
+so that one is permanently undeliverable. No setting resizes it: a plan is about the
+size of the reply itself, and `textChunkLimit` only changes how many pushes the reply
+splits into, which makes the record larger rather than smaller.
 
 Two consequences worth knowing before they bite. Recording happens push by push, so a
 send that fans out into several pushes can fail partway: the earlier pushes have
 already reached the recipient and only the remainder is withheld, leaving a truncated
 reply that no log line counts. And the plan namespace refuses new entries when full
 rather than evicting, with records kept about an hour past their
-twenty-four-hour window and cleared only as each send settles — so a namespace that fills up stops the account from replying
-until it drains, and there is no CLI or doctor command to inspect or clear it. Watch
-for the limit messages above; they are the only warning.
+twenty-four-hour window and cleared only as each send settles. The namespace is shared
+by the whole LINE plugin, not divided per account: one that fills up stops recorded
+replies for **every** LINE account on this Gateway until it drains, and there is no
+CLI or doctor command to inspect or clear it. Watch for the limit messages above; they
+are the only warning, and they arrive after replies have already started failing.
 
 ## Related
 
