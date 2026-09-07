@@ -455,11 +455,12 @@ link-local, and private-network targets.
 
 ### Outbound replies that could not be reconciled
 
-Some LINE sends are recorded before they go out: each push is written down first, so a
-send interrupted between its push and its result can be recovered by reissuing the
-recorded requests under the same retry keys — a push LINE already took answers 409
-with its original receipt, and one that never landed goes out now. This runs on any
-retry of the same queued send, not only after a restart.
+Some LINE sends are recorded before they go out: every push the reply will make is
+written down before the first of them leaves, so a send interrupted anywhere in that
+fan-out can be recovered by reissuing the recorded requests under the same retry keys
+— a push LINE already took answers 409 with its original receipt, and one that never
+landed goes out now. This runs on any retry of the same queued send, not only after a
+restart, and the record always wins over what the reply would render today.
 
 Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
 reply is recorded only when it is a final block, carries text without media or
@@ -520,16 +521,15 @@ store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
 the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
 limit` when this one reply's record is itself too large, and other store errors when
-the state directory will not take the write. The namespace limits clear as sends
+the state directory will not take the write. Nothing is sent in that case: the record
+lands before any push does, so a reply whose record is refused is withheld whole
+rather than half delivered. The namespace limits clear as sends
 settle; the per-entry limit does not — a reply whose record cannot fit will never fit,
 so that one is permanently undeliverable. No setting resizes it: a plan is about the
 size of the reply itself, and `textChunkLimit` only changes how many pushes the reply
 splits into, which makes the record larger rather than smaller.
 
-Two consequences worth knowing before they bite. Recording happens push by push, so a
-send that fans out into several pushes can fail partway: the earlier pushes have
-already reached the recipient and only the remainder is withheld, leaving a truncated
-reply that no log line counts. And the plan namespace refuses new entries when full
+One consequence worth knowing before it bites. The plan namespace refuses new entries when full
 rather than evicting, with records kept about an hour past their
 twenty-four-hour window and cleared only as each send settles. The namespace is shared
 by the whole LINE plugin, not divided per account: one that fills up stops recorded

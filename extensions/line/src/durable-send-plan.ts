@@ -17,7 +17,7 @@ const PLAN_DIAGNOSTIC_RETENTION_MS = 60 * 60 * 1000;
 const PLAN_TTL_MS = LINE_RETRY_KEY_TTL_MS + PLAN_DIAGNOSTIC_RETENTION_MS;
 
 /** One platform send: the request LINE saw, under the key that deduplicates it. */
-export type LineDurablePush = {
+type LineDurablePush = {
   retryKey: string;
   messages: messagingApi.Message[];
 };
@@ -33,7 +33,7 @@ export type LineDurablePush = {
  * across the interruption from putting different content behind a key LINE has
  * already answered.
  */
-export type LineDurableSendPlan = {
+type LineDurableSendPlan = {
   version: typeof PLAN_VERSION;
   queueId: string;
   partIndex: number;
