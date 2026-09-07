@@ -14,12 +14,13 @@ describe("resolveLineDurableReplyOptions", () => {
       }),
     ).toEqual({
       to: "U123",
-      // Requiring reconciliation is what earns this send a durable intent id, so a
-      // send interrupted mid-flight can be resolved instead of stranded.
+      replyToId: null,
+      // No reconcileUnknownSend: the adapter's automatic reconciliation already earns
+      // this send its durable intent id, and requiring it would only make a failed
+      // queue write drop the reply instead of delivering it live.
       requiredCapabilities: {
         text: true,
         messageSendingHooks: true,
-        reconcileUnknownSend: true,
       },
     });
   });

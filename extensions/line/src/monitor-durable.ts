@@ -6,6 +6,7 @@ import type { LineChannelData } from "./types.js";
 
 type LineDurableReplyOptions = {
   to: string;
+  replyToId: null;
   requiredCapabilities: ReturnType<typeof deriveDurableFinalDeliveryRequirements>;
 };
 
@@ -39,15 +40,19 @@ export function resolveLineDurableReplyOptions(params: {
   }
   return {
     to: params.to,
-    // Requiring reconciliation is what makes core hand this send a durable intent
-    // id, which is the retry key LINE answers with 409 when a replayed part was
-    // already accepted. Without it an interrupted send stays unresolved forever.
-    // It also makes the send `required` rather than best-effort, so a queue write
-    // that fails now fails the reply instead of sending it live and unrecorded:
-    // an unrecorded push is exactly the one a replay would duplicate.
+    // LINE cannot quote a message id, so this send replies to nothing. Saying so
+    // explicitly stops core resolving the inbound quote id from the turn context and
+    // requiring a `replyTo` capability the send would not use.
+    replyToId: null,
+    // Reconciliation is not requested here. The adapter already declares
+    // automaticUnknownSendReconciliation, which is what earns this send its durable
+    // intent id — the retry key LINE answers with 409 when a replayed part was
+    // already accepted. Requiring it as well would only raise durability to
+    // `required`, and that turns a failed queue write from a reply delivered live
+    // with a warning into no reply at all. A live-only send leaves no queue row, so
+    // nothing ever replays it; the duplicate that would justify the cost cannot happen.
     requiredCapabilities: deriveDurableFinalDeliveryRequirements({
       payload: params.payload,
-      reconcileUnknownSend: true,
     }),
   };
 }

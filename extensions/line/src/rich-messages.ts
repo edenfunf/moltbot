@@ -241,11 +241,17 @@ export function renderLinePresentation(
  * portable. Preparing them here keeps both LINE delivery paths on one rendering.
  */
 export function prepareLineReplyPayload(payload: ReplyPayload): ReplyPayload {
-  const presentation = normalizeMessagePresentation(payload.presentation);
+  // LINE has no reply-to primitive: quoting needs the inbound event's quote token,
+  // not a message id, so no LINE send reads replyToId. Core still threads one onto
+  // ordinary replies, and durable delivery turns that unused field into a required
+  // `replyTo` capability this channel cannot declare. Dropping it here keeps the
+  // prepared payload describing the send LINE will actually make.
+  const prepared = payload.replyToId == null ? payload : { ...payload, replyToId: undefined };
+  const presentation = normalizeMessagePresentation(prepared.presentation);
   if (!presentation) {
-    return payload;
+    return prepared;
   }
-  const { presentation: _presentation, presentationTextMode, ...rest } = payload;
+  const { presentation: _presentation, presentationTextMode, ...rest } = prepared;
   // "fallback" text already renders these controls as prose; native ones replace it.
   const usesFallbackText = presentationTextMode === "fallback" && Boolean(rest.text?.trim());
   const rendered = renderLinePresentation(
