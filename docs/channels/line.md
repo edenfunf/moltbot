@@ -464,12 +464,18 @@ restart, and the record always wins over what the reply would render today.
 
 Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
 reply is recorded only when it is a final block, carries text without media or
-LINE-specific rich content, does not reply to a specific message, and the event's reply
-token is spent or absent — so the first reply of an exchange, which is often the only
-one, is normally sent inline and not recorded. A model that tags a reply with
-`[[reply:...]]` takes it off the recorded path too, because LINE cannot quote a message
-id and the send would then need a capability this channel does not have. Sends queued by other callers follow their own rules. The observable
-rule is simple: a send that was never recorded reports
+LINE-specific rich content, does not reply to one specific earlier message (LINE cannot
+quote by message id), and the event's reply token is spent or absent — so the first
+reply of an exchange, which is often the only one, is normally sent inline and not
+recorded.
+
+Sends queued by other callers follow their own rules: `openclaw message send`, the
+agent's `message` tool, and scheduled notifications are recorded whenever the Gateway
+queues one of them as a single payload. Those have no inbound LINE event behind them,
+so when one fails there is nothing in `openclaw channels dead-letters list` to find and
+the log line is the whole story.
+
+The observable rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
 it needs reconciling. Seeing that message is how you know this send was not on the
 recorded path; it is not itself a fault.
@@ -494,11 +500,11 @@ These particular outcomes do not dead-letter the incoming event, so
   be recorded means that fallback is now being taken every time, which is worth
   investigating rather than ignoring.
 - **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply is split
-  into parts by the sender, and each part records itself when its turn comes. This
-  message means the interruption landed between two of them: what the missing part
-  would have said only ever existed inside the interrupted run, so it cannot be
-  replayed and the delivery is not settled either way. The named indexes are the parts
-  with no record.
+  into parts, and each part writes its record before its first push leaves. A part with
+  no record therefore never reached LINE, while the parts named around it did — the
+  reply is genuinely half delivered. Reconciliation answers for the whole queued send,
+  and neither "sent" nor "not sent" is true of it, so it refuses rather than resend the
+  parts the recipient already has. The named indexes are the parts with no record.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
   `key is invalid`, `has no part count`, `part topology is inconsistent`,
   `requires a queue id`, `... must be a non-negative integer`,
