@@ -372,6 +372,12 @@ async function finalizeLineInboundContext(params: {
     media,
     extra: {
       ...params.locationContext,
+      // LINE has no reply-to primitive: quoting needs the inbound event's quote token,
+      // never a message id, and no LINE send reads a reply-to. Letting core thread one
+      // onto the reply would put a capability this channel cannot declare on the
+      // payload, which makes durable final delivery refuse the send and fall back to
+      // the inline push it cannot recover.
+      ReplyThreading: { implicitCurrentMessage: "deny" },
       GroupSubject: params.source.isGroup
         ? (groupName ?? params.source.groupId ?? params.source.roomId)
         : undefined,

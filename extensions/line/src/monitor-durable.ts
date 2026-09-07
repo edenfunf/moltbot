@@ -38,6 +38,12 @@ export function resolveLineDurableReplyOptions(params: {
   if (reply.hasMedia || !reply.hasText) {
     return false;
   }
+  // An explicit reply-to survives the inbound context's threading policy. LINE cannot
+  // honour it, and core would require a `replyTo` capability this channel does not
+  // declare, so such a reply keeps the inline path rather than being refused there.
+  if (params.payload.replyToId != null) {
+    return false;
+  }
   return {
     to: params.to,
     // LINE cannot quote a message id, so this send replies to nothing. Saying so

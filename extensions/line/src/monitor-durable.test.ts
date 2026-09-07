@@ -37,6 +37,19 @@ describe("resolveLineDurableReplyOptions", () => {
     ).toBe(false);
   });
 
+  it("keeps a reply that carries an explicit reply-to on the legacy path", () => {
+    // LINE cannot quote by message id, so core would require a `replyTo` capability
+    // this channel does not declare and refuse the durable send outright.
+    expect(
+      resolveLineDurableReplyOptions({
+        payload: { text: "hello", replyToId: "630776817589944423" },
+        infoKind: "final",
+        to: "U123",
+        replyTokenUsed: true,
+      }),
+    ).toBe(false);
+  });
+
   it("keeps rich and media replies on the legacy path", () => {
     expect(
       resolveLineDurableReplyOptions({

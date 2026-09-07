@@ -238,17 +238,11 @@ export function renderLinePresentation(payload: ReplyPayload, presentation: Mess
  * portable. Preparing them here keeps both LINE delivery paths on one rendering.
  */
 export async function prepareLineReplyPayload(payload: ReplyPayload): Promise<ReplyPayload> {
-  // LINE has no reply-to primitive: quoting needs the inbound event's quote token,
-  // not a message id, so no LINE send reads replyToId. Core still threads one onto
-  // ordinary replies, and durable delivery turns that unused field into a required
-  // `replyTo` capability this channel cannot declare. Dropping it before the early
-  // return below keeps every prepared payload describing the send LINE will make.
-  const prepared = payload.replyToId == null ? payload : { ...payload, replyToId: undefined };
-  if (!normalizeMessagePresentation(prepared.presentation)) {
-    return prepared;
+  if (!normalizeMessagePresentation(payload.presentation)) {
+    return payload;
   }
   const usesFallbackText =
-    prepared.presentationTextMode === "fallback" && Boolean(prepared.text?.trim());
+    payload.presentationTextMode === "fallback" && Boolean(payload.text?.trim());
   return renderPresentationForDelivery(
     {
       presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
@@ -256,11 +250,11 @@ export async function prepareLineReplyPayload(payload: ReplyPayload): Promise<Re
         const rendered = renderLinePresentation(adapted, adapted.presentation);
         // Quick replies have no Flex body to replace the author's fallback prose.
         return rendered && usesFallbackText && rendered.channelData.line.flexMessage === undefined
-          ? { ...rendered, text: prepared.text }
+          ? { ...rendered, text: payload.text }
           : rendered;
       },
     },
-    { ...prepared, presentationTextMode: usesFallbackText ? "fallback" : undefined },
+    { ...payload, presentationTextMode: usesFallbackText ? "fallback" : undefined },
   );
 }
 

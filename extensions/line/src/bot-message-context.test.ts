@@ -139,6 +139,23 @@ describe("buildLineMessageContext", () => {
     });
   });
 
+  it("denies implicit reply threading, which LINE has no primitive for", async () => {
+    // Core threads the current message id onto an ordinary reply unless the channel
+    // denies it. LINE quotes with the inbound event's quote token, never a message id,
+    // so a threaded reply would carry a reply-to no LINE send reads — and durable
+    // final delivery would then require a `replyTo` capability this channel does not
+    // declare, refusing the send.
+    const context = await buildLineMessageContext({
+      event: createMessageEvent({ type: "user", userId: "user-1" }),
+      allMedia: [],
+      cfg,
+      account,
+      commandAuthorized: true,
+    });
+
+    expect(context?.ctxPayload.ReplyThreading).toEqual({ implicitCurrentMessage: "deny" });
+  });
+
   it("routes group message replies to the group id", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 

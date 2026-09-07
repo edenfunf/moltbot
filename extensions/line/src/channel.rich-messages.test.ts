@@ -99,33 +99,6 @@ describe("LINE rich-message boundaries", () => {
     });
   });
 
-  it("drops the reply-to LINE has no primitive for", async () => {
-    // Core threads an implicit reply id onto ordinary replies. LINE quotes with the
-    // inbound event's quote token, never a message id, so no LINE send reads it —
-    // and a prepared payload that still carries one makes durable delivery require a
-    // `replyTo` capability this channel cannot declare, which refuses the send.
-    expect(
-      (await prepareLineReplyPayload({ text: "Done.", replyToId: "630776817589944423" }))
-        .replyToId,
-    ).toBeUndefined();
-    expect(
-      (
-        await prepareLineReplyPayload({
-          text: "Approve this run?",
-          replyToId: "630776817589944423",
-          presentation: {
-            blocks: [
-              {
-                type: "buttons",
-                buttons: [{ label: "Approve", action: { type: "callback", value: "approve" } }],
-              },
-            ],
-          },
-        })
-      ).replyToId,
-    ).toBeUndefined();
-  });
-
   it("resolves a reply's presentation into LINE controls before delivery reads it", async () => {
     const prepared = await prepareLineReplyPayload({
       text: "Approve this run?",
