@@ -3,9 +3,9 @@ import type { messagingApi } from "@line/bot-sdk";
 import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-send-result";
 import {
-  adaptMessagePresentationForChannel,
   normalizeMessagePresentation,
   renderMessagePresentationFallbackText,
+  renderPresentationForDelivery,
   resolveMessagePresentationButtonAction,
   resolveMessagePresentationOptionAction,
   type MessagePresentation,
@@ -154,10 +154,7 @@ function toLineAction(button: MessagePresentationButton): Action | undefined {
   return undefined;
 }
 
-export function renderLinePresentation(
-  payload: ReplyPayload,
-  presentation: MessagePresentation,
-): ReplyPayload | null {
+export function renderLinePresentation(payload: ReplyPayload, presentation: MessagePresentation) {
   const hasCard = presentation.blocks.some(
     (block) => block.type === "buttons" && block.buttons.length > 0,
   );
@@ -240,43 +237,31 @@ export function renderLinePresentation(
  * replies the plugin delivers itself reach delivery with the controls still
  * portable. Preparing them here keeps both LINE delivery paths on one rendering.
  */
-export function prepareLineReplyPayload(payload: ReplyPayload): ReplyPayload {
+export async function prepareLineReplyPayload(payload: ReplyPayload): Promise<ReplyPayload> {
   // LINE has no reply-to primitive: quoting needs the inbound event's quote token,
   // not a message id, so no LINE send reads replyToId. Core still threads one onto
   // ordinary replies, and durable delivery turns that unused field into a required
-  // `replyTo` capability this channel cannot declare. Dropping it here keeps the
-  // prepared payload describing the send LINE will actually make.
+  // `replyTo` capability this channel cannot declare. Dropping it before the early
+  // return below keeps every prepared payload describing the send LINE will make.
   const prepared = payload.replyToId == null ? payload : { ...payload, replyToId: undefined };
-  const presentation = normalizeMessagePresentation(prepared.presentation);
-  if (!presentation) {
+  if (!normalizeMessagePresentation(prepared.presentation)) {
     return prepared;
   }
-  const { presentation: _presentation, presentationTextMode, ...rest } = prepared;
-  // "fallback" text already renders these controls as prose; native ones replace it.
-  const usesFallbackText = presentationTextMode === "fallback" && Boolean(rest.text?.trim());
-  const rendered = renderLinePresentation(
-    usesFallbackText ? { ...rest, text: undefined } : rest,
-    adaptMessagePresentationForChannel({
-      presentation,
-      capabilities: LINE_PRESENTATION_CAPABILITIES,
-    }),
+  const usesFallbackText =
+    prepared.presentationTextMode === "fallback" && Boolean(prepared.text?.trim());
+  return renderPresentationForDelivery(
+    {
+      presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
+      renderPresentation: (adapted) => {
+        const rendered = renderLinePresentation(adapted, adapted.presentation);
+        // Quick replies have no Flex body to replace the author's fallback prose.
+        return rendered && usesFallbackText && rendered.channelData.line.flexMessage === undefined
+          ? { ...rendered, text: prepared.text }
+          : rendered;
+      },
+    },
+    { ...prepared, presentationTextMode: usesFallbackText ? "fallback" : undefined },
   );
-  if (rendered) {
-    // Only a Flex body replaces the fallback prose. Without a card the renderer
-    // rebuilds the words it could not draw, and the author's own fallback text
-    // is the better rendering of the same facts, so it wins.
-    const renderedLine = isRecord(rendered.channelData?.line) ? rendered.channelData.line : {};
-    return usesFallbackText && renderedLine.flexMessage === undefined
-      ? { ...rendered, text: rest.text }
-      : rendered;
-  }
-  // LINE renders these controls natively or not at all; keep their labels visible.
-  return {
-    ...rest,
-    text: usesFallbackText
-      ? (rest.text ?? renderMessagePresentationFallbackText({ presentation }))
-      : renderMessagePresentationFallbackText({ text: rest.text, presentation }),
-  };
 }
 
 const toSlug = (value: string): string =>
