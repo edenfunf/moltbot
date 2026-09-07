@@ -75,7 +75,6 @@ export {
 export {
   createFlexMessage,
   createLocationMessage,
-  createTextMessageWithQuickReplies,
   getUserDisplayName,
   getUserProfile,
   pushImageMessage,

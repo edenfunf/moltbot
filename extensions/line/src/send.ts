@@ -587,17 +587,6 @@ export function createQuickReplyItems(labels: string[]): QuickReply {
   return { items };
 }
 
-export function createTextMessageWithQuickReplies(
-  text: string,
-  quickReplyLabels: string[],
-): TextMessage & { quickReply: QuickReply } {
-  return {
-    type: "text",
-    text,
-    quickReply: createQuickReplyItems(quickReplyLabels),
-  };
-}
-
 export async function showLoadingAnimation(
   chatId: string,
   opts: LineClientOpts & { loadingSeconds?: number },
