@@ -114,6 +114,15 @@ interface LineSendOpts {
   replyToken?: string;
   durableSend?: LineDurableSendRef;
   onDurablePush?: (push: { retryKey: string; messages: Message[] }) => Promise<void>;
+  /**
+   * Reads when LINE stops deduplicating this send's retry key, asked per attempt
+   * because the backoff between attempts can outlive the window, and a request that
+   * lands after it is a second delivery rather than a deduplicated one. The recorded
+   * plan answers it: the key itself is a timestamp-free hash of the durable id and the
+   * part/push indexes (`resolveLinePushRetryKey`), so neither a first send nor a retry
+   * can tell from the key alone when LINE first saw it.
+   */
+  resolveRetryKeyExpiresAtMs?: () => number | undefined;
   onPlatformSendDispatch?: () => Promise<void>;
 }
 
@@ -124,20 +133,6 @@ type LineDurableSendRef = {
   partIndex?: number;
   /** Index of this push within the part it belongs to. */
   pushIndex?: number;
-  /**
-   * Instant LINE stops deduplicating this retry key, checked before every attempt
-   * because the backoff between attempts can outlive the window its caller entered
-   * under, and a request that lands after it is a second delivery rather than a
-   * deduplicated one.
-   *
-   * Only reconciliation sets it, because only reconciliation knows when the key was
-   * first used: the key itself is a timestamp-free hash of the durable id and the
-   * part/push indexes (`resolveLinePushRetryKey`), so a live send cannot tell a first
-   * attempt from a much later queue retry that derives the same value. Carrying that
-   * instant on the recorded plan would close the live path too; until then this
-   * bounds the replay path only.
-   */
-  retryKeyExpiresAtMs?: number;
 };
 
 type LineClientOpts = Pick<LineSendOpts, "cfg" | "channelAccessToken" | "accountId">;
@@ -413,11 +408,11 @@ async function pushLineMessages(
   await opts.onDurablePush?.({ retryKey, messages: normalizedMessages });
   await opts.onPlatformSendDispatch?.();
 
-  const retryKeyExpiresAtMs = opts.durableSend?.retryKeyExpiresAtMs;
   const response = await runLinePushWithRetries(async () => {
     // Re-read per attempt, not once: the backoff between attempts can outlast the
     // window the caller entered under, and a request that lands after LINE forgets
     // the key is delivered again instead of deduplicated.
+    const retryKeyExpiresAtMs = opts.resolveRetryKeyExpiresAtMs?.();
     if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
       throw new LineRetryKeyExpiredError();
     }

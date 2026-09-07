@@ -174,6 +174,13 @@ type LineDurablePushRecorder = {
   recordPush: (push: LineDurablePush) => Promise<void>;
   /** Refuses a fan-out that reproduced fewer pushes than the record it replayed. */
   assertRecordFullyReplayed: () => Promise<void>;
+  /**
+   * When LINE stops deduplicating this part's retry keys, or undefined until the
+   * record has been read. A first send answers with its own dispatch, so the window
+   * is wide open; a retry of the same delivery answers with the instant the record
+   * kept, which is the only thing that knows when LINE first saw these keys.
+   */
+  retryKeyExpiresAtMs: () => number | undefined;
 };
 
 /**
@@ -224,6 +231,8 @@ export function createLineDurablePushRecorder(params: {
     loaded = true;
   };
   return {
+    retryKeyExpiresAtMs: () =>
+      loaded ? plan.firstDispatchedAtMs + LINE_RETRY_KEY_TTL_MS : undefined,
     // An arrow keeps the recorder usable as a bare callback on the send options.
     recordPush: async (push: LineDurablePush): Promise<void> => {
       await loadRecordedPushes();

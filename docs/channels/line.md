@@ -453,49 +453,56 @@ link-local, and private-network targets.
   letter lands under `retry-limit-exceeded`, not under a timeout reason. Check
   `openclaw logs --follow` around the affected event id.
 
-### Outbound replies that could not be reconciled after a restart
+### Outbound replies that could not be reconciled
 
 LINE has no read-only "was this accepted?" endpoint, so a reply interrupted between
 its push and its result is recovered by reissuing the recorded requests under the same
 retry keys: a push LINE already took answers 409 with its original receipt, and one
-that never landed goes out now. When that recovery cannot run safely it stops instead
-of guessing, and `openclaw logs` carries the reason. None of these dead-letter the
-inbound event, and none are recoverable with
-`openclaw channels dead-letters resubmit` — the reply, not the incoming message, is
-what was interrupted.
+that never landed goes out now. This runs on any retry of the same queued reply, not
+only after a restart. When recovery cannot run safely it stops instead of guessing,
+and `openclaw logs` carries the reason.
 
-- **`LINE retry key expired before the queued send could be reconciled`:** LINE
-  forgets a retry key 24 hours after the reply was first handed to it, so a replay
-  after that window would deliver a second copy rather than be deduplicated. The
-  queued reply is retired undelivered. Expect this only after an outage or a Gateway
-  that stayed down longer than a day; if it appears sooner, check the host clock.
+**Read these as "delivery unknown", not "not delivered".** They fire exactly when
+OpenClaw cannot tell whether LINE took the reply, and it settles them as `unknown`
+rather than `failed` for that reason. Check the conversation before re-sending
+anything by hand; a blind resend is how the recipient gets two copies. None of these
+dead-letter the incoming event either, so
+`openclaw channels dead-letters resubmit` is the wrong tool — the reply was
+interrupted, not the message that prompted it.
+
+- **`LINE retry key expired before the queued send could be reconciled`:** LINE forgets
+  a retry key 24 hours after the reply was first handed to it, so a replay after that
+  window could no longer be deduplicated. Recovery stops; whether the original arrived
+  is unknown. Expect this only after an outage longer than a day — sooner means the
+  host clock moved.
 - **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
-  the reply was sent through a path that carries no per-push identity — a batch, or a
-  send whose queue id core withheld — so its pushes went out under keys LINE will not
-  deduplicate. Replaying them would deliver a second copy, so recovery declines.
-  Whether the original arrived is genuinely unknown; check the conversation before
-  resending by hand.
-- **`LINE durable send plan part N no longer reproduces its recorded push M`** and
-  **`... reproduced X of its Y recorded pushes`:** the reply was re-rendered on
-  recovery and no longer matches what LINE was asked to deliver, so resending would
-  hide new content behind a key LINE has already answered. The usual cause is a
-  setting that changes how a reply is split — `channels.line.textChunkLimit` — or an
-  upgrade that changed rendering between the interrupted send and the restart. The
-  recorded reply is discarded rather than sent wrong; re-send it if it still matters.
-- **`LINE durable send plan part N cannot be recorded`:** the plan failed its own
-  validation before the push crossed the boundary, so nothing was sent and the send
-  fails outright rather than becoming unreconcilable later.
+  the reply went out through a path that carries no per-push identity — a batch, or a
+  send whose queue id core withheld — so its pushes used keys LINE will not
+  deduplicate.
+- **`LINE durable send plan part N no longer reproduces its recorded push M`,
+  `... reproduced X of its Y recorded pushes`, and
+  `LINE ambiguous delivery is missing recorded parts: ...`:** the reply was
+  re-rendered on retry and no longer matches what was recorded, so resending would
+  hide different content behind a key LINE may already have answered. The usual cause
+  is a setting that changes how a reply is split — `channels.line.textChunkLimit` —
+  changing between the interrupted send and the retry. Note that a push is recorded
+  just before it is sent, so a recorded push is not proof that LINE ever saw it: a
+  first attempt refused with a 4xx also leaves one behind.
+- **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
+  `key is invalid`, `has no part count`, `part topology is inconsistent`,
+  `disappeared during reconciliation`) mean the stored evidence is not trustworthy
+  enough to replay from. Recovery declines for the same reason: partial evidence can
+  duplicate an accepted push or drop one LINE never received.
 
-A reply that cannot be recorded at all is also not sent. Because these replies are
+A reply that cannot be recorded at all is not sent. Because these replies are
 reconcilable, the outbound queue treats persistence as required rather than
-best-effort: if the queue write itself fails, the reply fails instead of going out
-live and unrecorded, since an unrecorded push is exactly the one a later replay would
-duplicate. The person on LINE sees nothing in that case, and the only trace is a
-`line ... reply failed` line in `openclaw logs`, so treat repeated occurrences as a
-state-directory or disk problem rather than a LINE one.
-
-`openclaw health` counts outbound queue failures; the reasons above appear in
-`openclaw logs` around the affected reply.
+best-effort: if the record cannot be written, the reply fails instead of going out
+live and unrecorded, since an unrecorded push is the one a later replay would
+duplicate. The person on LINE sees nothing, and the trace is a `line ... reply failed`
+line in `openclaw logs`. The likely causes are a full plan namespace or a state
+directory that cannot be written — the underlying error is a generic
+`Failed to register plugin blob entry.` that does not mention LINE — so treat repeats
+as a disk or state-directory problem rather than a LINE one.
 
 ## Related
 

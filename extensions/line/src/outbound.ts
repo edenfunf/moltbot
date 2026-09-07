@@ -62,11 +62,6 @@ function createDispatchOnce(onPlatformSendDispatch?: () => Promise<void>): () =>
   };
 }
 
-/** `sendPayload`'s own params plus the deadline only a replay carries. */
-type LineSendPayloadParams = Parameters<
-  NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
->[0] & { retryKeyExpiresAtMs?: number };
-
 /**
  * The one send path both a live delivery and a recovery replay take, so a replay
  * cannot drift from the send it is reproducing. `retryKeyExpiresAtMs` is supplied
@@ -83,8 +78,9 @@ async function sendLinePayload({
   deliveryPartCount,
   onPlatformSendDispatch,
   onDeliveryResult,
-  retryKeyExpiresAtMs,
-}: LineSendPayloadParams) {
+}: Parameters<
+  NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
+>[0]) {
   const runtime = getLineRuntime();
   // Each platform send inside one durable delivery keeps a stable retry key, so a
   // recovery replay is deduplicated by LINE push for push instead of resending.
@@ -105,14 +101,18 @@ async function sendLinePayload({
     : undefined;
   const nextDurableSend = () => ({
     ...(dispatchOnce ? { onPlatformSendDispatch: dispatchOnce } : {}),
-    ...(recorder ? { onDurablePush: recorder.recordPush } : {}),
+    ...(recorder
+      ? {
+          onDurablePush: recorder.recordPush,
+          resolveRetryKeyExpiresAtMs: recorder.retryKeyExpiresAtMs,
+        }
+      : {}),
     ...(deliveryQueueId
       ? {
           durableSend: {
             deliveryQueueId,
             partIndex: deliveryPartIndex ?? 0,
             pushIndex: durablePushIndex++,
-            ...(retryKeyExpiresAtMs === undefined ? {} : { retryKeyExpiresAtMs }),
           },
         }
       : {}),
@@ -476,7 +476,6 @@ async function reconcileLineUnknownSend(
     try {
       await sendLinePayload({
         cfg: ctx.cfg,
-        retryKeyExpiresAtMs,
         to: plan.to,
         text: plan.payload.text ?? "",
         payload: plan.payload,
