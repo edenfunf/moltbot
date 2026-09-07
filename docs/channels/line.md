@@ -453,6 +453,50 @@ link-local, and private-network targets.
   letter lands under `retry-limit-exceeded`, not under a timeout reason. Check
   `openclaw logs --follow` around the affected event id.
 
+### Outbound replies that could not be reconciled after a restart
+
+LINE has no read-only "was this accepted?" endpoint, so a reply interrupted between
+its push and its result is recovered by reissuing the recorded requests under the same
+retry keys: a push LINE already took answers 409 with its original receipt, and one
+that never landed goes out now. When that recovery cannot run safely it stops instead
+of guessing, and `openclaw logs` carries the reason. None of these dead-letter the
+inbound event, and none are recoverable with
+`openclaw channels dead-letters resubmit` — the reply, not the incoming message, is
+what was interrupted.
+
+- **`LINE retry key expired before the queued send could be reconciled`:** LINE
+  forgets a retry key 24 hours after the reply was first handed to it, so a replay
+  after that window would deliver a second copy rather than be deduplicated. The
+  queued reply is retired undelivered. Expect this only after an outage or a Gateway
+  that stayed down longer than a day; if it appears sooner, check the host clock.
+- **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
+  the reply was sent through a path that carries no per-push identity — a batch, or a
+  send whose queue id core withheld — so its pushes went out under keys LINE will not
+  deduplicate. Replaying them would deliver a second copy, so recovery declines.
+  Whether the original arrived is genuinely unknown; check the conversation before
+  resending by hand.
+- **`LINE durable send plan part N no longer reproduces its recorded push M`** and
+  **`... reproduced X of its Y recorded pushes`:** the reply was re-rendered on
+  recovery and no longer matches what LINE was asked to deliver, so resending would
+  hide new content behind a key LINE has already answered. The usual cause is a
+  setting that changes how a reply is split — `channels.line.textChunkLimit` — or an
+  upgrade that changed rendering between the interrupted send and the restart. The
+  recorded reply is discarded rather than sent wrong; re-send it if it still matters.
+- **`LINE durable send plan part N cannot be recorded`:** the plan failed its own
+  validation before the push crossed the boundary, so nothing was sent and the send
+  fails outright rather than becoming unreconcilable later.
+
+A reply that cannot be recorded at all is also not sent. Because these replies are
+reconcilable, the outbound queue treats persistence as required rather than
+best-effort: if the queue write itself fails, the reply fails instead of going out
+live and unrecorded, since an unrecorded push is exactly the one a later replay would
+duplicate. The person on LINE sees nothing in that case, and the only trace is a
+`line ... reply failed` line in `openclaw logs`, so treat repeated occurrences as a
+state-directory or disk problem rather than a LINE one.
+
+`openclaw health` counts outbound queue failures; the reasons above appear in
+`openclaw logs` around the affected reply.
+
 ## Related
 
 - [Channels Overview](/channels) — all supported channels
