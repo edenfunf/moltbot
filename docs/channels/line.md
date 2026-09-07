@@ -455,54 +455,60 @@ link-local, and private-network targets.
 
 ### Outbound replies that could not be reconciled
 
-LINE has no read-only "was this accepted?" endpoint, so a reply interrupted between
-its push and its result is recovered by reissuing the recorded requests under the same
-retry keys: a push LINE already took answers 409 with its original receipt, and one
-that never landed goes out now. This runs on any retry of the same queued reply, not
-only after a restart. When recovery cannot run safely it stops instead of guessing,
-and `openclaw logs` carries the reason.
+Some LINE replies are sent through a durable queue that records each push before it
+goes out, so a reply interrupted between its push and its result can be recovered:
+the recorded requests are reissued under the same retry keys, and a push LINE already
+took answers 409 with its original receipt while one that never landed goes out now.
+This runs on any retry of the same queued reply, not only after a restart.
 
-**Read these as "delivery unknown", not "not delivered".** They fire exactly when
-OpenClaw cannot tell whether LINE took the reply, and it settles them as `unknown`
-rather than `failed` for that reason. Check the conversation before re-sending
-anything by hand; a blind resend is how the recipient gets two copies. None of these
-dead-letter the incoming event either, so
+This path covers a turn's plain-text replies after its reply token is spent. A reply
+that is not the turn's final block, the first reply of a turn (which still uses the
+reply token), and any reply carrying media or LINE-specific rich content are sent
+inline instead and are not queued, so none of the messages below can appear for them.
+
+When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
+carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
+fire exactly when OpenClaw cannot tell whether LINE took the reply, and it settles
+them as `unknown` rather than `failed` for that reason. Check the conversation before
+re-sending anything by hand; a blind resend is how the recipient gets two copies.
+None of these dead-letter the incoming event, so
 `openclaw channels dead-letters resubmit` is the wrong tool — the reply was
 interrupted, not the message that prompted it.
 
 - **`LINE retry key expired before the queued send could be reconciled`:** LINE forgets
   a retry key 24 hours after the reply was first handed to it, so a replay after that
-  window could no longer be deduplicated. Recovery stops; whether the original arrived
-  is unknown. Expect this only after an outage longer than a day — sooner means the
-  host clock moved.
+  window could no longer be deduplicated. Expect this only after an outage longer than
+  a day — sooner means the host clock moved.
 - **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
-  the reply went out through a path that carries no per-push identity — a batch, or a
-  send whose queue id core withheld — so its pushes used keys LINE will not
-  deduplicate.
+  the reply went out through a path that carries no per-push identity, so its pushes
+  used keys LINE will not deduplicate.
 - **`LINE durable send plan part N no longer reproduces its recorded push M`,
   `... reproduced X of its Y recorded pushes`, and
   `LINE ambiguous delivery is missing recorded parts: ...`:** the reply was
   re-rendered on retry and no longer matches what was recorded, so resending would
-  hide different content behind a key LINE may already have answered. The usual cause
-  is a setting that changes how a reply is split — `channels.line.textChunkLimit` —
-  changing between the interrupted send and the retry. Note that a push is recorded
-  just before it is sent, so a recorded push is not proof that LINE ever saw it: a
-  first attempt refused with a 4xx also leaves one behind.
+  hide different content behind a key LINE may already have answered. The cause is
+  something that changed how the reply is split or ordered between the interrupted
+  send and the retry — in practice an upgrade across the interruption. Note that a
+  push is recorded just before it is sent, so a recorded push is not proof LINE saw
+  it: a first attempt refused with a 4xx also leaves one behind.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
   `key is invalid`, `has no part count`, `part topology is inconsistent`,
+  `requires a queue id`, `... must be a non-negative integer`,
   `disappeared during reconciliation`) mean the stored evidence is not trustworthy
   enough to replay from. Recovery declines for the same reason: partial evidence can
   duplicate an accepted push or drop one LINE never received.
 
-A reply that cannot be recorded at all is not sent. Because these replies are
-reconcilable, the outbound queue treats persistence as required rather than
-best-effort: if the record cannot be written, the reply fails instead of going out
-live and unrecorded, since an unrecorded push is the one a later replay would
-duplicate. The person on LINE sees nothing, and the trace is a `line ... reply failed`
-line in `openclaw logs`. The likely causes are a full plan namespace or a state
-directory that cannot be written — the underlying error is a generic
-`Failed to register plugin blob entry.` that does not mention LINE — so treat repeats
-as a disk or state-directory problem rather than a LINE one.
+A reply that cannot be recorded is not sent, and there are two distinct ways that
+happens. If the **queue row** cannot be written, the reply fails before any push:
+because these replies are reconcilable, the queue treats persistence as required
+rather than best-effort, since an unrecorded push is the one a later replay would
+duplicate. The person on LINE sees nothing and the trace is a `line ... reply failed`
+line in `openclaw logs`. If the **recorded plan** cannot be stored, the failure names
+the part — `LINE durable send plan part N cannot be recorded: ...` — and the rest of
+that message says which of the two it was: a validation complaint means the plan
+itself was rejected, while a generic `Failed to register plugin blob entry.` means
+the store would not take it, usually a full plan namespace or a state directory that
+cannot be written. Only the second is a disk or state-directory problem.
 
 ## Related
 

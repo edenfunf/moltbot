@@ -64,9 +64,10 @@ function createDispatchOnce(onPlatformSendDispatch?: () => Promise<void>): () =>
 
 /**
  * The one send path both a live delivery and a recovery replay take, so a replay
- * cannot drift from the send it is reproducing. `retryKeyExpiresAtMs` is supplied
- * only by reconciliation: it is the instant LINE stops deduplicating these retry
- * keys; every provider attempt below is checked against it.
+ * cannot drift from the send it is reproducing. Whenever this send is durable it also
+ * hands the push layer the recorded plan's deadline, so every provider attempt is
+ * checked against the instant LINE stops deduplicating these retry keys — the same
+ * instant for a first send and for the replay that reproduces it.
  */
 async function sendLinePayload({
   to,
