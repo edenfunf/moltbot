@@ -29,8 +29,6 @@ import type { LineChannelData, LineOutboundMediaKind, LineSendResult } from "./t
 type Message = messagingApi.Message;
 type TextMessage = messagingApi.TextMessage;
 type LocationMessage = messagingApi.LocationMessage;
-type FlexContainer = messagingApi.FlexContainer;
-type TemplateMessage = messagingApi.TemplateMessage;
 type QuickReply = messagingApi.QuickReply;
 type QuickReplyItem = messagingApi.QuickReplyItem;
 type LineLocation = NonNullable<LineChannelData["location"]>;
@@ -578,51 +576,6 @@ export async function pushImageMessage(
   );
   return pushLineMessages(to, [message], opts, {
     verboseMessage: (chatId) => `line: pushed image to ${chatId}`,
-  });
-}
-
-export async function pushLocationMessage(
-  to: string,
-  location: LineLocation,
-  opts: LinePushOpts,
-): Promise<LineSendResult> {
-  return pushLineMessages(to, [createLocationMessage(location)], opts, {
-    verboseMessage: (chatId) => `line: pushed location to ${chatId}`,
-  });
-}
-
-export async function pushFlexMessage(
-  to: string,
-  altText: string,
-  contents: FlexContainer,
-  opts: LinePushOpts,
-): Promise<LineSendResult> {
-  return pushLineMessages(to, [createFlexMessage(altText, contents)], opts, {
-    errorContext: "push flex message",
-    verboseMessage: (chatId) => `line: pushed flex message to ${chatId}`,
-  });
-}
-
-export async function pushTemplateMessage(
-  to: string,
-  template: TemplateMessage,
-  opts: LinePushOpts,
-): Promise<LineSendResult> {
-  return pushLineMessages(to, [template], opts, {
-    verboseMessage: (chatId) => `line: pushed template message to ${chatId}`,
-  });
-}
-
-export async function pushTextMessageWithQuickReplies(
-  to: string,
-  text: string,
-  quickReplyLabels: string[],
-  opts: LinePushOpts,
-): Promise<LineSendResult> {
-  const message = createTextMessageWithQuickReplies(text, quickReplyLabels);
-
-  return pushLineMessages(to, [message], opts, {
-    verboseMessage: (chatId) => `line: pushed message with quick replies to ${chatId}`,
   });
 }
 

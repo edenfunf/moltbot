@@ -205,7 +205,13 @@ describe("LINE send helpers", () => {
   it("sends the same provider-valid Flex alternative text through direct pushes", async () => {
     const altText = "a".repeat(1200);
 
-    await sendModule.pushFlexMessage("U123", altText, { type: "bubble" }, { cfg: LINE_TEST_CFG });
+    // The payload owner builds the message and pushes it through the one send
+    // primitive, so the alt-text bound belongs to the builder, not to a wrapper.
+    await sendModule.pushMessagesLine(
+      "U123",
+      [sendModule.createFlexMessage(altText, { type: "bubble" })],
+      { cfg: LINE_TEST_CFG },
+    );
 
     expect(pushMessageMock).toHaveBeenCalledWith({
       to: "U123",
@@ -988,10 +994,17 @@ describe("LINE send helpers", () => {
   });
 
   it("pushes quick-reply text and caps to 13 buttons", async () => {
-    await sendModule.pushTextMessageWithQuickReplies(
+    await sendModule.pushMessagesLine(
       "U-quick",
-      "Pick one",
-      Array.from({ length: 20 }, (_, index) => `Choice ${index + 1}`),
+      [
+        {
+          type: "text",
+          text: "Pick one",
+          quickReply: sendModule.createQuickReplyItems(
+            Array.from({ length: 20 }, (_, index) => `Choice ${index + 1}`),
+          ),
+        },
+      ],
       { cfg: LINE_TEST_CFG },
     );
 
