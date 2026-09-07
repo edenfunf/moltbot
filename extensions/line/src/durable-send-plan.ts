@@ -253,9 +253,11 @@ export function createLineDurablePushRecorder(params: {
       await writePlan(plan);
     },
     assertRecordFullyReplayed: async (): Promise<void> => {
-      // The fan-out is rebuilt from live configuration, so a limit change can
-      // make it render fewer pushes than were recorded. Settling that as sent
-      // would drop a recorded push that may never have reached LINE.
+      // The fan-out is rebuilt at replay time, so anything that changes how this
+      // reply splits between the interrupted send and the retry — an upgrade across
+      // the interruption — can make it render fewer pushes than were recorded.
+      // Settling that as sent would drop a recorded push that may never have
+      // reached LINE.
       await loadRecordedPushes();
       if (produced < plan.pushes.length) {
         throw new LineDurableSendPlanError(

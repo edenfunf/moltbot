@@ -52,7 +52,6 @@ export function resolveLinePushRetryKey(params: {
   ].join("-");
 }
 
-/** The LINE HTTP response carried by an error graph, when the request reached LINE. */
 /** True when a replay stopped because its retry key's window closed, at any wrap depth. */
 export function isLineRetryKeyExpiredError(error: unknown): boolean {
   return collectErrorGraphCandidates(error, (candidate) => [candidate.cause, candidate.error]).some(
@@ -60,6 +59,7 @@ export function isLineRetryKeyExpiredError(error: unknown): boolean {
   );
 }
 
+/** The LINE HTTP response carried by an error graph, when the request reached LINE. */
 export function findLineHttpError(error: unknown): HTTPFetchError | undefined {
   return collectErrorGraphCandidates(error, (candidate) => [candidate.cause, candidate.error]).find(
     (candidate): candidate is HTTPFetchError => candidate instanceof HTTPFetchError,

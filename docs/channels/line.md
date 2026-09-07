@@ -461,10 +461,13 @@ the recorded requests are reissued under the same retry keys, and a push LINE al
 took answers 409 with its original receipt while one that never landed goes out now.
 This runs on any retry of the same queued reply, not only after a restart.
 
-This path covers a turn's plain-text replies after its reply token is spent. A reply
-that is not the turn's final block, the first reply of a turn (which still uses the
-reply token), and any reply carrying media or LINE-specific rich content are sent
-inline instead and are not queued, so none of the messages below can appear for them.
+Which replies take this path is decided in two places, so it is wider than the agent's
+own replies. For a turn's auto-replies, only plain-text final blocks after the reply
+token is spent are queued — the turn's first reply, non-final blocks, and replies
+carrying media or LINE-specific rich content are sent inline. But every single-payload
+LINE send gets a durable identity, so sends made through the message tool, the CLI, or
+a cron job — including media and Flex cards — are recorded too and can produce the
+messages below.
 
 When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
 carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
@@ -498,17 +501,18 @@ interrupted, not the message that prompted it.
   enough to replay from. Recovery declines for the same reason: partial evidence can
   duplicate an accepted push or drop one LINE never received.
 
-A reply that cannot be recorded is not sent, and there are two distinct ways that
-happens. If the **queue row** cannot be written, the reply fails before any push:
+A reply that cannot be recorded is normally not sent, and there are two distinct ways
+that happens. If the **queue row** cannot be written, the reply fails before any push:
 because these replies are reconcilable, the queue treats persistence as required
 rather than best-effort, since an unrecorded push is the one a later replay would
 duplicate. The person on LINE sees nothing and the trace is a `line ... reply failed`
 line in `openclaw logs`. If the **recorded plan** cannot be stored, the failure names
 the part — `LINE durable send plan part N cannot be recorded: ...` — and the rest of
 that message says which of the two it was: a validation complaint means the plan
-itself was rejected, while a generic `Failed to register plugin blob entry.` means
-the store would not take it, usually a full plan namespace or a state directory that
-cannot be written. Only the second is a disk or state-directory problem.
+itself was rejected, while `Plugin blob namespace reached its stored row limit.` or
+`... stored byte limit.` means the plan namespace is full, and other store errors mean
+the state directory would not take the write. Only those last two are a disk or
+state-directory problem.
 
 ## Related
 
