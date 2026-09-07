@@ -160,10 +160,6 @@ export async function recordLineDurableSendPlan(params: {
 }): Promise<LineDurableSendPlan> {
   const key = planKey(params.queueId, params.partIndex);
   const store = createPlanStore();
-  const existing = await store.lookup(key);
-  if (existing) {
-    return decodePlan(existing.bytes);
-  }
   const plan: LineDurableSendPlan = {
     version: PLAN_VERSION,
     queueId: params.queueId,
@@ -188,8 +184,29 @@ export async function recordLineDurableSendPlan(params: {
     );
   }
   await store.deleteExpired();
-  await store.register(key, new TextEncoder().encode(JSON.stringify(plan)), {});
-  return plan;
+  // Claim atomically rather than checking then writing: two attempts at the same part
+  // can race, and a lost race that still wrote would put re-rendered content behind
+  // keys the winner already used.
+  if (await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(plan)), {})) {
+    return plan;
+  }
+  const existing = await store.lookup(key);
+  if (!existing) {
+    // The record was there a moment ago and is not now. Nothing has been sent yet, so
+    // refuse rather than send under keys whose record no longer exists.
+    throw new LineDurableSendPlanError(
+      `LINE durable send plan part ${params.partIndex} disappeared while being recorded`,
+    );
+  }
+  const recorded = decodePlan(existing.bytes);
+  if (recorded.to !== params.to) {
+    // The keys are derived from the delivery, so a record under this key that names a
+    // different recipient is not this send's record and must not be replayed to it.
+    throw new LineDurableSendPlanError(
+      `LINE durable send plan part ${params.partIndex} was recorded for a different recipient`,
+    );
+  }
+  return recorded;
 }
 
 /**

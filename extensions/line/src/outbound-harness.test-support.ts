@@ -55,9 +55,9 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
       // Production refuses a new entry once the namespace is full rather than
       // evicting one, and that refusal is what an operator actually sees. A stand-in
       // with no ceiling makes every full-namespace assertion pass by construction.
-      // A part is rewritten under one key as its pushes are appended, so the row count
-      // never grows within a part — but the namespace byte total does, and production
-      // charges a rewrite its growth, so that ceiling can refuse a later push too.
+      // A part writes one row once, so within a part the row count cannot grow — but a
+      // delivery has one row per part, and production charges a rewrite only its growth,
+      // so both ceilings still decide whether a later part can be recorded.
       if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
         throw new Error(
           `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,

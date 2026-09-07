@@ -397,9 +397,9 @@ describe("LINE unknown-send reconciliation", () => {
           const opened = store.state.openBlobStore({ ...options, [option]: limit.bytes });
           return {
             ...opened,
-            register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
+            registerIfAbsent: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
               writes.push(bytes.byteLength);
-              return await (opened.register as (...args: unknown[]) => Promise<void>)(
+              return await (opened.registerIfAbsent as (...args: unknown[]) => Promise<boolean>)(
                 key,
                 bytes,
                 ...rest,
