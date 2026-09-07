@@ -145,6 +145,7 @@ type LinePushOpts = Pick<
   | "durableSend"
   | "onDurablePush"
   | "onPlatformSendDispatch"
+  | "resolveRetryKeyExpiresAtMs"
 >;
 
 interface LinePushBehavior {
