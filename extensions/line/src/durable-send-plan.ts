@@ -204,7 +204,10 @@ export function createLineDurablePushRecorder(params: {
     version: PLAN_VERSION,
     queueId: params.queueId,
     partIndex: requireIndex(params.partIndex, "part index"),
-    partCount: requireIndex(params.partCount, "part count") || 1,
+    // Not coerced: the schema refuses a non-positive count in writePlan, which runs
+    // before the first push crosses the boundary. Substituting 1 here would record a
+    // topology the delivery never had and let reconciliation call it complete.
+    partCount: params.partCount,
     to: params.to,
     ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
     payload: params.payload,
