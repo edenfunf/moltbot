@@ -312,17 +312,23 @@ describe("LINE unknown-send reconciliation", () => {
   // last stretch of the window it exists to serve. Reconciliation reads a missing
   // plan as "this delivery carried no recorder" and retires a reply LINE would
   // still have deduplicated.
-  it("still holds the recorded plan at the far edge of the reconciliation window", async () => {
+  // The queue entry's timestamp is refreshed on every dispatch, so it cannot say when
+  // LINE first saw these keys. The plan records that instant, and it is what decides
+  // the window: a delivery whose keys are a day old must be refused even though the
+  // entry says the latest attempt started seconds ago.
+  it("measures the window from the recorded dispatch, not the refreshed queue entry", async () => {
     await sendDurableFlexPart();
     fetchMock.mockClear();
-    // One millisecond is all it takes: the marker cannot precede the record.
-    const dispatchedAt = NOW + 1;
-    vi.setSystemTime(dispatchedAt + LINE_RETRY_KEY_TTL_MS - 1);
+    vi.setSystemTime(NOW + LINE_RETRY_KEY_TTL_MS + 1);
 
-    const result = await reconcile({ platformSendStartedAt: dispatchedAt });
+    const result = await reconcile({ platformSendStartedAt: NOW + LINE_RETRY_KEY_TTL_MS });
 
-    expect(result).not.toMatchObject({ status: "unresolved", retryable: false });
-    expect(fetchMock).toHaveBeenCalled();
+    expect(result).toEqual({
+      status: "unresolved",
+      error: "LINE retry key expired before the queued send could be reconciled",
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   // Entering the window is not enough: the retry backoff between attempts can outlast

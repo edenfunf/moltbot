@@ -8,17 +8,14 @@ import { LINE_RETRY_KEY_TTL_MS } from "./send-retry.js";
 
 const PLAN_VERSION = 1;
 const PLAN_NAMESPACE = "outbound-send-plans";
-// The plan's clock starts when the push is recorded; the window that consumes it
-// is measured from the dispatch marker written immediately afterwards. Expiring
-// on the bare retry-key TTL therefore retires the record a moment before the last
-// replay it has to serve, and reconciliation reads that gap as "this delivery
-// never carried a recorder" and gives up on a send LINE would still deduplicate.
-// The margin only has to cover the write that separates the two.
-const PLAN_TTL_DISPATCH_MARGIN_MS = 60_000;
-// A replay can only deduplicate while LINE still remembers the retry keys, so a
-// plan is worthless past that point and must not outlive it by more than the
-// margin above.
-const PLAN_TTL_MS = LINE_RETRY_KEY_TTL_MS + PLAN_TTL_DISPATCH_MARGIN_MS;
+// The authoritative deadline is `firstDispatchedAtMs + LINE_RETRY_KEY_TTL_MS`, read off
+// the plan rather than off the queue entry. The store's own TTL runs from the last
+// write, so it is given a tail past that deadline: a record that vanishes exactly when
+// the window closes leaves reconciliation unable to tell "LINE has forgotten these
+// keys" from "this delivery never carried a recorder", and those two need different
+// answers. The tail only has to outlast the window, not extend it.
+const PLAN_DIAGNOSTIC_RETENTION_MS = 60 * 60 * 1000;
+const PLAN_TTL_MS = LINE_RETRY_KEY_TTL_MS + PLAN_DIAGNOSTIC_RETENTION_MS;
 
 /** One recorded platform send: the request LINE saw, under the key that deduplicates it. */
 type LineDurablePush = {
@@ -39,6 +36,14 @@ type LineDurableSendPlan = {
   to: string;
   accountId?: string;
   payload: ReplyPayload;
+  /**
+   * When this plan's retry keys were first handed to LINE. The keys themselves are a
+   * timestamp-free hash (`resolveLinePushRetryKey`), and the queue entry's
+   * `platformSendStartedAt` is refreshed on every dispatch
+   * (`markDeliveryPlatformSendDispatched`), so this record is the only place that
+   * knows when LINE's deduplication window actually opened.
+   */
+  firstDispatchedAtMs: number;
   pushes: LineDurablePush[];
 };
 
@@ -110,6 +115,7 @@ const planSchema = z
     to: z.string().trim().min(1),
     accountId: z.string().optional(),
     payload: replyPayloadSchema,
+    firstDispatchedAtMs: z.number().int().positive(),
     pushes: z
       .array(
         z.object({
@@ -195,6 +201,7 @@ export function createLineDurablePushRecorder(params: {
     to: params.to,
     ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
     payload: params.payload,
+    firstDispatchedAtMs: Date.now(),
     pushes: [],
   };
   let loaded = false;
@@ -207,7 +214,13 @@ export function createLineDurablePushRecorder(params: {
     if (loaded) {
       return;
     }
-    plan.pushes = (await readPlan(params.queueId, plan.partIndex))?.pushes ?? [];
+    const recorded = await readPlan(params.queueId, plan.partIndex);
+    plan.pushes = recorded?.pushes ?? [];
+    // A replay keeps the original instant: the window it must respect opened when
+    // LINE first saw these keys, not when this attempt started.
+    if (recorded) {
+      plan.firstDispatchedAtMs = recorded.firstDispatchedAtMs;
+    }
     loaded = true;
   };
   return {

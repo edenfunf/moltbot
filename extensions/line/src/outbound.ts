@@ -411,11 +411,13 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
 async function reconcileLineUnknownSend(
   ctx: ChannelMessageUnknownSendContext,
 ): Promise<ChannelMessageUnknownSendReconciliationResult> {
+  // `platformSendStartedAt` is refreshed on every dispatch
+  // (`markDeliveryPlatformSendDispatched`), so it answers "when did the latest attempt
+  // start", not "when did LINE first see these keys". It is only good enough to reject
+  // a delivery that is already past the window before any record is read; the
+  // authoritative instant comes off the recorded plan below.
   const sendStartedAt = ctx.platformSendStartedAt ?? ctx.enqueuedAt;
-  // The same instant every replay attempt below is measured against, so a retry that
-  // backs off past it stops instead of sending under a key LINE no longer dedupes.
-  const retryKeyExpiresAtMs = sendStartedAt + LINE_RETRY_KEY_TTL_MS;
-  if (Date.now() >= retryKeyExpiresAtMs) {
+  if (Date.now() - sendStartedAt >= LINE_RETRY_KEY_TTL_MS) {
     // LINE forgets a retry key after 24 hours, so a replay would deliver a second copy.
     return {
       status: "unresolved",
@@ -433,6 +435,22 @@ async function reconcileLineUnknownSend(
       status: "unresolved",
       error: formatErrorMessage(error),
       retryable: !(error instanceof LineDurableSendPlanError),
+    };
+  }
+  // Every part of one delivery is dispatched together, so the earliest recorded
+  // instant is when this delivery's keys first reached LINE.
+  const firstDispatchedAtMs = plans.length
+    ? Math.min(...plans.map((plan) => plan.firstDispatchedAtMs))
+    : undefined;
+  const retryKeyExpiresAtMs =
+    firstDispatchedAtMs === undefined ? undefined : firstDispatchedAtMs + LINE_RETRY_KEY_TTL_MS;
+  if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
+    // The recorded instant is older than the queue entry knew, so this is the first
+    // point that can tell the window has actually closed.
+    return {
+      status: "unresolved",
+      error: "LINE retry key expired before the queued send could be reconciled",
+      retryable: false,
     };
   }
   if (plans.length === 0) {
