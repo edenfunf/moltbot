@@ -27,6 +27,7 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
     namespace: string;
     defaultTtlMs?: number;
     maxEntries?: number;
+    maxBytesPerEntry?: number;
     overflowPolicy?: "reject-new" | "evict-oldest";
   }) => {
     const blobs = namespaces.get(options.namespace) ?? new Map<string, Uint8Array>();
@@ -54,6 +55,13 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
       // Production refuses a new entry once the namespace is full rather than
       // evicting one, and that refusal is what an operator actually sees. A stand-in
       // with no ceiling makes every full-namespace assertion pass by construction.
+      // A part is rewritten under one key as its pushes are appended, so the row count
+      // never grows within a part and only the per-entry ceiling can stop a later push.
+      if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
+        throw new Error(
+          `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,
+        );
+      }
       if (
         options.overflowPolicy === "reject-new" &&
         options.maxEntries !== undefined &&

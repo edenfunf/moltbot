@@ -461,8 +461,12 @@ recorded requests under the same retry keys — a push LINE already took answers
 with its original receipt, and one that never landed goes out now. This runs on any
 retry of the same queued send, not only after a restart.
 
-Not every send is recorded. Whether one is depends on the caller that queued it, and
-the observable rule is simple: a send that was never recorded reports
+Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
+reply is recorded only when it is a final block, carries text without media or
+LINE-specific rich content, and the event's reply token has already been spent — so
+the first reply of an exchange, which is often the only one, is normally sent inline
+and not recorded. Sends queued by other callers follow their own rules. The observable
+rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
 it needs reconciling. Seeing that message is how you know this send was not on the
 recorded path; it is not itself a fault.
@@ -502,7 +506,10 @@ These particular outcomes do not dead-letter the incoming event, so
 
 This is a different failure from the ones above, and it is not silent about the
 incoming message: the reply fails, and the LINE event that prompted it is
-dead-lettered rather than answered.
+dead-lettered rather than answered, under the reason
+`delivery-side-effects-committed`. As noted earlier on this page, that reason must
+never be resubmitted — the turn was already adopted, so re-enqueuing repeats the
+committed work. Fix the cause and let the sender ask again.
 
 Because recorded sends are reconcilable, the outbound queue treats persistence as
 required rather than best-effort — an unrecorded push is the one a later replay would
@@ -513,15 +520,19 @@ stored, what you see depends on which half rejected it: a validation problem is
 reported as `LINE durable send plan part N cannot be recorded: ...`, while the plan
 store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
-the plan namespace is full, and other store errors when the state directory will not
-take the write.
+the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
+limit` when this one reply's record is itself too large, and other store errors when
+the state directory will not take the write. The namespace limits clear as sends
+settle; the per-entry limit does not — a reply whose record cannot fit will never fit,
+so that one is permanently undeliverable and needs the reply made smaller, not waited
+out.
 
 Two consequences worth knowing before they bite. Recording happens push by push, so a
 send that fans out into several pushes can fail partway: the earlier pushes have
 already reached the recipient and only the remainder is withheld, leaving a truncated
 reply that no log line counts. And the plan namespace refuses new entries when full
-rather than evicting, with records kept about a day past their window and cleared only
-as each send settles — so a namespace that fills up stops the account from replying
+rather than evicting, with records kept about an hour past their
+twenty-four-hour window and cleared only as each send settles — so a namespace that fills up stops the account from replying
 until it drains, and there is no CLI or doctor command to inspect or clear it. Watch
 for the limit messages above; they are the only warning.
 

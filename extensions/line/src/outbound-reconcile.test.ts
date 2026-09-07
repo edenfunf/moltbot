@@ -379,6 +379,55 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // The one user-visible harm the troubleshooting docs describe: recording happens push
+  // by push, so a ceiling reached partway leaves the earlier pushes already delivered
+  // and only the rest withheld. A part is rewritten under one key, so the row count
+  // cannot grow within it — only the per-entry byte ceiling can stop a later push.
+  it("leaves the earlier pushes delivered when a later one cannot be recorded", async () => {
+    const store = createLineBlobStoreState();
+    let ceiling: number | undefined;
+    const writes: number[] = [];
+    const chunked = (text: string) => text.match(/.{1,40}/gs) ?? [text];
+    setLineRuntime({
+      state: {
+        openBlobStore: (options: { namespace: string }) => {
+          const opened = store.state.openBlobStore({ ...options, maxBytesPerEntry: ceiling });
+          return {
+            ...opened,
+            register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
+              writes.push(bytes.byteLength);
+              return await (opened.register as (...args: unknown[]) => Promise<void>)(
+                key,
+                bytes,
+                ...rest,
+              );
+            },
+          };
+        },
+      },
+      channel: {
+        text: { chunkMarkdownText: chunked, resolveTextChunkLimit: () => 40 },
+      },
+    } as unknown as PluginRuntime);
+    const threeChunks = "x".repeat(120);
+
+    // Observe how the record grows push by push, then cap between the first and second
+    // so the first push records and the second is the one refused.
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
+    expect(writes.length).toBeGreaterThan(1);
+    ceiling = writes[0];
+    store.blobs.clear();
+    writes.length = 0;
+    fetchMock.mockClear();
+
+    await expect(
+      sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
+    ).rejects.toThrow("byte limit");
+
+    // The first chunk reached the recipient; the rest of the reply did not.
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("refuses to replay once LINE has forgotten the retry keys", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockClear();
