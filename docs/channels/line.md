@@ -469,14 +469,17 @@ quote by message id), and the event's reply token is spent or absent — so the 
 reply of an exchange, which is often the only one, is normally sent inline and not
 recorded.
 
-Sends queued by other callers follow their own rules. Anything the Gateway queues as a
-single payload is recorded — `openclaw message send`, the agent's `message` tool,
-heartbeat and session-maintenance notices, transcript echoes, exec-approval prompts and
-the `ask_user` question prompt among them. None of those has an inbound LINE event
-behind it, so a failure leaves nothing in `openclaw channels dead-letters list`. Where
-it does show up depends on the caller: most only log, but a failed `ask_user` prompt
-cancels the tool and the agent says it could not reach anyone, and a failed
-exec-approval prompt leaves a command waiting for an approval that was never asked for.
+Sends queued by other callers follow the same capability rule. The Gateway queues a
+single payload for `openclaw message send`, the agent's `message` tool, heartbeat and
+session-maintenance notices, transcript echoes, cron deliveries, exec-approval prompts
+and the `ask_user` question prompt, and each of those is recorded **unless it asks for
+something this channel cannot do** — a reply-to, a thread, or a silent send. LINE
+declares none of those three, so a send carrying one gets no durable record, exactly as
+if it had not been queued. None of these callers has an inbound LINE event behind it,
+so a failure leaves nothing in `openclaw channels dead-letters list`. Where it does show
+up depends on the caller: most only log, but a failed `ask_user` prompt cancels the tool
+and the agent says it could not reach anyone, and a failed exec-approval prompt leaves a
+command waiting for an approval that was never asked for.
 
 The observable rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
@@ -505,17 +508,20 @@ These particular outcomes do not dead-letter the incoming event, so
 - **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply, or one
   carrying several media files, is split into parts, and each part writes its record
   before its first push leaves. A part with no record therefore never reached LINE,
-  while at least one other part did. Reconciliation answers for the whole queued send,
-  and neither "sent" nor "not sent" is true of a delivery in that state, so it refuses
-  rather than resend parts the recipient may already have. The named indexes are the
-  parts with no record. This one is final: the missing part will not arrive later, so
-  the reply needs sending again by hand once you have read what did arrive.
+  while at least one other part got as far as starting to send. Reconciliation answers
+  for the whole queued send, and neither "sent" nor "not sent" is true of a delivery in
+  that state, so it refuses rather than resend parts the recipient may already have. The
+  named indexes are the parts with no record.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
   `key is invalid`, `has no part count`, `part topology is inconsistent`,
   `requires a queue id`, `... must be a non-negative integer`,
   `disappeared during reconciliation`) mean the stored evidence is not trustworthy
   enough to replay from, so recovery declines rather than risk duplicating an accepted
   push or dropping one LINE never received.
+
+None of the outcomes in this list is retried. Every one of them settles the delivery as
+unresolved and not retryable, so nothing will arrive later: read what did reach the
+conversation, then send the rest by hand.
 
 A refusal LINE itself returns while a replay is in flight is not on this list: it is
 surfaced verbatim, so the reason reads as LINE wrote it rather than as one of the
@@ -533,12 +539,15 @@ it: if it is interrupted, it is simply lost. Callers that ask for a durable send
 outright — the `ask_user` prompt and the exec-approval prompt among them — get no such
 fallback and no such log line. Their send fails instead.
 
-If the **recorded plan** cannot be stored, that part of the reply fails, and it is not
-silent about the incoming message: the LINE event that prompted it is dead-lettered
-rather than answered, under the reason `delivery-side-effects-committed`. As noted
-earlier on this page, that reason must never be resubmitted — the turn was already
-adopted, so re-enqueuing repeats the committed work. Fix the cause and let the sender
-ask again. What you see depends on which half of the store rejected it: a validation
+If the **recorded plan** cannot be stored, that part of the send fails. When the send
+was answering an inbound message it is not silent about it: the LINE event that prompted
+it is dead-lettered rather than answered, under the reason
+`delivery-side-effects-committed`. As noted earlier on this page, that reason must never
+be resubmitted — the turn was already adopted, so re-enqueuing repeats the committed
+work. Fix the cause and let the sender ask again. A send with no inbound event behind it
+— a cron delivery, `openclaw message send`, an `ask_user` prompt — has nothing to
+dead-letter, so it fails wherever its own caller reports failures and leaves no queued
+record to find. What you see depends on which half of the store rejected it: a validation
 problem is reported as `LINE durable send plan part N cannot be recorded: ...`, while
 the plan store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
