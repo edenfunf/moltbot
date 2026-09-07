@@ -469,11 +469,14 @@ quote by message id), and the event's reply token is spent or absent — so the 
 reply of an exchange, which is often the only one, is normally sent inline and not
 recorded.
 
-Sends queued by other callers follow their own rules: `openclaw message send`, the
-agent's `message` tool, and scheduled notifications are recorded whenever the Gateway
-queues one of them as a single payload. Those have no inbound LINE event behind them,
-so when one fails there is nothing in `openclaw channels dead-letters list` to find and
-the log line is the whole story.
+Sends queued by other callers follow their own rules. Anything the Gateway queues as a
+single payload is recorded — `openclaw message send`, the agent's `message` tool,
+heartbeat and session-maintenance notices, transcript echoes, exec-approval prompts and
+the `ask_user` question prompt among them. None of those has an inbound LINE event
+behind it, so a failure leaves nothing in `openclaw channels dead-letters list`. Where
+it does show up depends on the caller: most only log, but a failed `ask_user` prompt
+cancels the tool and the agent says it could not reach anyone, and a failed
+exec-approval prompt leaves a command waiting for an approval that was never asked for.
 
 The observable rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
@@ -499,12 +502,14 @@ These particular outcomes do not dead-letter the incoming event, so
   the unrecorded path without logging that it did. Seeing it for replies that used to
   be recorded means that fallback is now being taken every time, which is worth
   investigating rather than ignoring.
-- **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply is split
-  into parts, and each part writes its record before its first push leaves. A part with
-  no record therefore never reached LINE, while the parts named around it did — the
-  reply is genuinely half delivered. Reconciliation answers for the whole queued send,
-  and neither "sent" nor "not sent" is true of it, so it refuses rather than resend the
-  parts the recipient already has. The named indexes are the parts with no record.
+- **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply, or one
+  carrying several media files, is split into parts, and each part writes its record
+  before its first push leaves. A part with no record therefore never reached LINE,
+  while at least one other part did. Reconciliation answers for the whole queued send,
+  and neither "sent" nor "not sent" is true of a delivery in that state, so it refuses
+  rather than resend parts the recipient may already have. The named indexes are the
+  parts with no record. This one is final: the missing part will not arrive later, so
+  the reply needs sending again by hand once you have read what did arrive.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
   `key is invalid`, `has no part count`, `part topology is inconsistent`,
   `requires a queue id`, `... must be a non-negative integer`,
@@ -538,9 +543,10 @@ the state directory will not take the write. Nothing is sent in that case: the r
 lands before any push does, so a reply whose record is refused is withheld whole
 rather than half delivered. The namespace limits clear as sends
 settle; the per-entry limit does not — a reply whose record cannot fit will never fit,
-so that one is permanently undeliverable. No setting resizes it: a plan is about the
-size of the reply itself, and `textChunkLimit` only changes how many pushes the reply
-splits into, which makes the record larger rather than smaller.
+so that one is permanently undeliverable. One record covers one delivery part, so the
+lever that would split a too-large record into several smaller ones is the text chunk
+limit core plans parts with. LINE does not expose that limit as a setting today, which
+is why this one has no operator remedy: the reply has to get smaller at the source.
 
 One consequence worth knowing before it bites. The plan namespace refuses new entries when full
 rather than evicting, with records kept about an hour past their
