@@ -385,13 +385,15 @@ describe("LINE unknown-send reconciliation", () => {
   // cannot grow within it — only the per-entry byte ceiling can stop a later push.
   it("leaves the earlier pushes delivered when a later one cannot be recorded", async () => {
     const store = createLineBlobStoreState();
-    let ceiling: number | undefined;
+    // Held in a box because the opener closes over it before the measuring run has
+    // produced the value the restricted run needs.
+    const limit: { bytes?: number } = {};
     const writes: number[] = [];
     const chunked = (text: string) => text.match(/.{1,40}/gs) ?? [text];
     setLineRuntime({
       state: {
         openBlobStore: (options: { namespace: string }) => {
-          const opened = store.state.openBlobStore({ ...options, maxBytesPerEntry: ceiling });
+          const opened = store.state.openBlobStore({ ...options, maxBytesPerEntry: limit.bytes });
           return {
             ...opened,
             register: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
@@ -415,7 +417,7 @@ describe("LINE unknown-send reconciliation", () => {
     // so the first push records and the second is the one refused.
     await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
     expect(writes.length).toBeGreaterThan(1);
-    ceiling = writes[0];
+    limit.bytes = writes[0];
     store.blobs.clear();
     writes.length = 0;
     fetchMock.mockClear();
