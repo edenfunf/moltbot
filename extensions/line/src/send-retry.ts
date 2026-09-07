@@ -13,6 +13,18 @@ import { readLineAccountMessageQuota } from "./probe.js";
 export const LINE_RETRY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * A replay that reached its retry key's deadline before the request went out. It is
+ * never retryable: LINE has stopped deduplicating the key, so the next attempt would
+ * deliver a second copy rather than resolve the first.
+ */
+export class LineRetryKeyExpiredError extends Error {
+  constructor() {
+    super("LINE retry key expired before the queued send could be reconciled");
+    this.name = "LineRetryKeyExpiredError";
+  }
+}
+
+/**
  * Derives the retry key for one platform send. A durable intent id produces the
  * same key in every process, so recovery can replay the exact request that may
  * already have been accepted; unqueued sends fall back to a fresh key.
@@ -41,6 +53,13 @@ export function resolveLinePushRetryKey(params: {
 }
 
 /** The LINE HTTP response carried by an error graph, when the request reached LINE. */
+/** True when a replay stopped because its retry key's window closed, at any wrap depth. */
+export function isLineRetryKeyExpiredError(error: unknown): boolean {
+  return collectErrorGraphCandidates(error, (candidate) => [candidate.cause, candidate.error]).some(
+    (candidate) => candidate instanceof LineRetryKeyExpiredError,
+  );
+}
+
 export function findLineHttpError(error: unknown): HTTPFetchError | undefined {
   return collectErrorGraphCandidates(error, (candidate) => [candidate.cause, candidate.error]).find(
     (candidate): candidate is HTTPFetchError => candidate instanceof HTTPFetchError,
@@ -93,6 +112,9 @@ export function resolveLineNonDispatchRetryable(error: unknown): boolean | undef
 }
 
 function isRetryableLinePushError(error: unknown): boolean {
+  if (error instanceof LineRetryKeyExpiredError) {
+    return false;
+  }
   const httpError = findLineHttpError(error);
   if (httpError) {
     // LINE documents server errors and transport failures as the retriable

@@ -10,7 +10,7 @@ import { createLineDurablePushRecorder } from "./durable-send-plan.js";
 import { createRuntime } from "./outbound-harness.test-support.js";
 import { setLineRuntime } from "./runtime.js";
 import { createLineSendReceipt } from "./send-receipt.js";
-import { resolveLinePushRetryKey } from "./send-retry.js";
+import { LINE_RETRY_KEY_TTL_MS, resolveLinePushRetryKey } from "./send-retry.js";
 
 function lineReceipt(messageId: string) {
   return createLineSendReceipt({ messageId, chatId: "c1", kind: "text" });
@@ -120,12 +120,19 @@ describe("line message adapter capability contracts", () => {
             payloads: [{ text: "hello" }],
           });
           // The replay re-enters the recorded part's fan-out under that part's
-          // durable identity, which is what regenerates the key LINE 409s on.
+          // durable identity, which is what regenerates the key LINE 409s on. It also
+          // carries the deadline that identity stops being deduplicated at, which a
+          // live send has no reason to know and does not set.
           expect(mocks.pushMessageLine).toHaveBeenCalledWith(
             "line:user:U123",
             "hello",
             expect.objectContaining({
-              durableSend: { deliveryQueueId: "queue-entry-1", partIndex: 0, pushIndex: 0 },
+              durableSend: {
+                deliveryQueueId: "queue-entry-1",
+                partIndex: 0,
+                pushIndex: 0,
+                retryKeyExpiresAtMs: now + LINE_RETRY_KEY_TTL_MS,
+              },
             }),
           );
           expect(reconciliation).toMatchObject({ status: "sent", messageId: "m-text" });

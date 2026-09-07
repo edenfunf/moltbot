@@ -325,6 +325,29 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 
+  // Entering the window is not enough: the retry backoff between attempts can outlast
+  // it. Once LINE has stopped deduplicating the key, another attempt is a second
+  // delivery, so the replay has to stop mid-backoff rather than finish its retries.
+  it("stops a replay whose backoff outlives the retry-key window", async () => {
+    vi.useFakeTimers();
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    fetchMock.mockClear();
+    // The first attempt fails retryably and moves the clock past the deadline, so the
+    // runner backs off into a window LINE no longer deduplicates.
+    fetchMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(NOW + LINE_RETRY_KEY_TTL_MS);
+      return jsonResponse({ message: "upstream" }, 503);
+    });
+
+    const reconciling = reconcile({ platformSendStartedAt: NOW });
+    await vi.runAllTimersAsync();
+    const result = await reconciling;
+
+    expect(result).toMatchObject({ status: "unresolved", retryable: false });
+    // Exactly the one attempt that was still inside the window.
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("refuses to replay once LINE has forgotten the retry keys", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockClear();

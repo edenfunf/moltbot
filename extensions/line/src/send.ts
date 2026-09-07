@@ -19,7 +19,11 @@ import { resolveLineChannelAccessToken } from "./channel-access-token.js";
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { recordLineSentMessages } from "./outbound-message-log.js";
 import { createLineSendReceipt } from "./send-receipt.js";
-import { resolveLinePushRetryKey, runLinePushWithRetries } from "./send-retry.js";
+import {
+  LineRetryKeyExpiredError,
+  resolveLinePushRetryKey,
+  runLinePushWithRetries,
+} from "./send-retry.js";
 import type { LineChannelData, LineOutboundMediaKind, LineSendResult } from "./types.js";
 
 type Message = messagingApi.Message;
@@ -120,6 +124,13 @@ type LineDurableSendRef = {
   partIndex?: number;
   /** Index of this push within the part it belongs to. */
   pushIndex?: number;
+  /**
+   * Instant LINE stops deduplicating this retry key. Only a replay sets it: a live
+   * send just minted the key, so it cannot be stale. Checked before every attempt
+   * because the retry backoff can outlive the window the reconciler entered under,
+   * and a replay past it is a second delivery rather than a deduplicated one.
+   */
+  retryKeyExpiresAtMs?: number;
 };
 
 type LineClientOpts = Pick<LineSendOpts, "cfg" | "channelAccessToken" | "accountId">;
@@ -395,7 +406,14 @@ async function pushLineMessages(
   await opts.onDurablePush?.({ retryKey, messages: normalizedMessages });
   await opts.onPlatformSendDispatch?.();
 
+  const retryKeyExpiresAtMs = opts.durableSend?.retryKeyExpiresAtMs;
   const response = await runLinePushWithRetries(async () => {
+    // Re-read per attempt, not once: the backoff between attempts can outlast the
+    // window the caller entered under, and a request that lands after LINE forgets
+    // the key is delivered again instead of deduplicated.
+    if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
+      throw new LineRetryKeyExpiredError();
+    }
     try {
       return await sendLineProviderMessages(
         "push",
