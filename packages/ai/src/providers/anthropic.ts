@@ -1,7 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { Stream } from "@anthropic-ai/sdk/core/streaming.js";
 import type {
-  CacheControlEphemeral,
   MessageCreateParamsStreaming,
   MessageParam,
   RawMessageStreamEvent,
@@ -23,16 +22,15 @@ import {
   buildAnthropicGenerationParams,
 } from "../transports/anthropic-messages.js";
 import {
-  applyAnthropicCacheControlToMessages,
+  applyAnthropicRequestCacheControl,
+  buildAnthropicSystemBlocks,
+  resolveAnthropicCacheOptions,
   applyAnthropicContextManagementToRequest,
   isDirectAnthropicModel,
   resolveAnthropicContextManagementBetaHeader,
 } from "../transports/anthropic-payload-policy.js";
 import { consumeAnthropicStream } from "../transports/anthropic-stream-reducer.js";
-import {
-  buildAnthropicSystemBlocks,
-  countNativeCacheControlMarkers,
-} from "../transports/anthropic-system-blocks.js";
+import { countNativeCacheControlMarkers } from "../transports/anthropic-system-blocks.js";
 // Anthropic provider adapts Anthropic streams and tool calls for the runtime.
 import { createAssistantOutput } from "../transports/assistant-output.js";
 import { resolveOpencodeSessionHeaders } from "../transports/session-affinity.js";
@@ -43,9 +41,7 @@ import {
 } from "../transports/transport-stream-shared.js";
 import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../transports/transport-utils.js";
 import type {
-  AnthropicMessagesCompat,
   AssistantMessageEvent,
-  CacheRetention,
   Context,
   Model,
   SimpleStreamOptions,
@@ -90,27 +86,9 @@ import {
   clampMaxTokensToModel,
 } from "./simple-options.js";
 
-const ANTHROPIC_CACHE_CONTROL_LIMIT = 4;
-
 type AnthropicCompactionOptions = AnthropicOptions & {
   authProfileId?: string;
 };
-
-function getCacheControl(
-  model: Model<"anthropic-messages">,
-  cacheRetention?: CacheRetention,
-): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-  const retention = resolveCacheRetention(cacheRetention);
-  if (retention === "none") {
-    return { retention };
-  }
-  const ttl =
-    retention === "long" && getAnthropicCompat(model).supportsLongCacheRetention ? "1h" : undefined;
-  return {
-    retention,
-    cacheControl: { type: "ephemeral", ...(ttl && { ttl }) },
-  };
-}
 
 export type {
   AnthropicEffort,
@@ -122,17 +100,14 @@ const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 const ANTHROPIC_MIN_THINKING_BUDGET_TOKENS = 1024;
 
-function getAnthropicCompat(model: Model<"anthropic-messages">): Required<AnthropicMessagesCompat> {
-  // Auto-detect session affinity and cache control support from provider
+function getAnthropicCompat(model: Model<"anthropic-messages">) {
   const isFireworks = model.provider === "fireworks";
   const isCloudflareAiGatewayAnthropic =
     model.provider === "cloudflare-ai-gateway" && model.baseUrl.includes("anthropic");
   return {
     supportsEagerToolInputStreaming: model.compat?.supportsEagerToolInputStreaming ?? !isFireworks,
-    supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? !isFireworks,
     sendSessionAffinityHeaders:
       model.compat?.sendSessionAffinityHeaders ?? (isFireworks || isCloudflareAiGatewayAnthropic),
-    supportsCacheControlOnTools: model.compat?.supportsCacheControlOnTools ?? !isFireworks,
     allowEmptySignature: model.compat?.allowEmptySignature ?? false,
   };
 }
@@ -642,7 +617,10 @@ async function buildParams(
 }> {
   const mandatoryAdaptiveThinking = requiresClaudeAdaptiveThinking(model);
   const replayThinkingEnabled = mandatoryAdaptiveThinking || options?.thinkingEnabled === true;
-  const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+  const { cacheControl, supportsCacheControlOnTools } = resolveAnthropicCacheOptions(
+    model,
+    options?.cacheRetention,
+  );
   const system = buildAnthropicSystemBlocks(context.systemPrompt, isOAuthTokenResult, cacheControl);
   const compat = getAnthropicCompat(model);
   const convertedTools = context.tools
@@ -650,17 +628,10 @@ async function buildParams(
         context.tools,
         isOAuthTokenResult,
         compat.supportsEagerToolInputStreaming,
-        compat.supportsCacheControlOnTools ? cacheControl : undefined,
       )
     : undefined;
   const tools = convertedTools?.tools;
   const toolProjection = convertedTools?.projection;
-  const systemCacheControlCount = countNativeCacheControlMarkers(system);
-  const toolCacheControlCount = countNativeCacheControlMarkers(tools);
-  const messageCacheControlLimit = Math.max(
-    0,
-    ANTHROPIC_CACHE_CONTROL_LIMIT - systemCacheControlCount - toolCacheControlCount,
-  );
   const replayPlan = buildAnthropicReplayPlan(context.messages, model, {
     enabled: !isOAuthTokenResult && options?.anthropicServerCompaction === true,
     authProfileId: options?.authProfileId,
@@ -684,16 +655,6 @@ async function buildParams(
     stream: true,
   };
 
-  if (cacheControl) {
-    // Anthropic-family carriers are append-only, so they are stable cache anchors too.
-    applyAnthropicCacheControlToMessages(
-      params.messages,
-      cacheControl,
-      messageCacheControlLimit,
-      new Set(),
-    );
-  }
-
   if (system) {
     params.system = system;
   }
@@ -709,6 +670,8 @@ async function buildParams(
     params,
     buildAnthropicGenerationParams({ model, options, tools, toolProjection, profile: "provider" }),
   );
+
+  applyAnthropicRequestCacheControl(params, cacheControl, supportsCacheControlOnTools);
 
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
 }

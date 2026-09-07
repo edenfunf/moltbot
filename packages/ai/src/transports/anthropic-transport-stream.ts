@@ -23,7 +23,6 @@ import {
 } from "../providers/anthropic-auth-headers.js";
 import {
   applyClaudeRequestContract,
-  ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK,
   ANTHROPIC_CLAUDE_CODE_VERSION,
   defaultsClaudeAdaptiveThinking,
   prepareClaudeNoPrefillRequestContext,
@@ -57,11 +56,12 @@ import {
   buildAnthropicGenerationParams,
 } from "./anthropic-messages.js";
 import {
-  applyAnthropicPayloadPolicyToParams,
+  applyAnthropicRequestCacheControl,
+  buildAnthropicSystemBlocks,
   applyAnthropicContextManagementToRequest,
   isDirectAnthropicModel,
   resolveAnthropicContextManagementBetaHeader,
-  resolveAnthropicPayloadPolicy,
+  resolveAnthropicCacheOptions,
 } from "./anthropic-payload-policy.js";
 import { consumeAnthropicStream, type AnthropicStreamBlock } from "./anthropic-stream-reducer.js";
 import { createAssistantOutput } from "./assistant-output.js";
@@ -78,7 +78,6 @@ import {
   finalizeTransportStream,
   mergeTransportHeaders,
   notifyProviderHttpResponse,
-  sanitizeTransportPayloadText,
 } from "./transport-stream-shared.js";
 import {
   createAbortError as createNamedAbortError,
@@ -570,15 +569,9 @@ async function buildAnthropicParams(
       `Anthropic Messages transport requires a positive maxTokens value for ${model.provider}/${model.id}`,
     );
   }
-  const payloadPolicy = resolveAnthropicPayloadPolicy(
-    {
-      provider: model.provider,
-      api: model.api,
-      baseUrl: model.baseUrl,
-      cacheRetention: options?.cacheRetention,
-      enableCacheControl: true,
-    },
+  const { cacheControl, supportsCacheControlOnTools } = resolveAnthropicCacheOptions(
     model,
+    options?.cacheRetention,
   );
   const replayPlan = buildAnthropicReplayPlan(context.messages, model, {
     enabled: !isOAuthToken && options?.anthropicServerCompaction === true,
@@ -608,33 +601,9 @@ async function buildAnthropicParams(
   if (!isOAuthToken && useAnthropicServerSideFallback(model)) {
     params.fallbacks = ANTHROPIC_SERVER_SIDE_FALLBACKS;
   }
-  if (isOAuthToken) {
-    params.system = [
-      // Anthropic requires this first block to route Claude subscription OAuth billing.
-      {
-        type: "text",
-        text: ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK,
-      },
-      {
-        type: "text",
-        text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      },
-      ...(context.systemPrompt
-        ? [
-            {
-              type: "text",
-              text: sanitizeTransportPayloadText(context.systemPrompt),
-            },
-          ]
-        : []),
-    ];
-  } else if (context.systemPrompt) {
-    params.system = [
-      {
-        type: "text",
-        text: sanitizeTransportPayloadText(context.systemPrompt),
-      },
-    ];
+  const system = buildAnthropicSystemBlocks(context.systemPrompt, isOAuthToken, cacheControl);
+  if (system) {
+    params.system = system;
   }
   const convertedTools = context.tools
     ? convertAnthropicTools(context.tools, isOAuthToken)
@@ -651,7 +620,7 @@ async function buildAnthropicParams(
     }),
   );
   // Anthropic-family carriers are append-only, so they are stable cache anchors too.
-  applyAnthropicPayloadPolicyToParams(params, payloadPolicy, new Set());
+  applyAnthropicRequestCacheControl(params, cacheControl, supportsCacheControlOnTools);
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
 }
 
