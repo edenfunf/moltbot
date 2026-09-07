@@ -523,38 +523,56 @@ messages above.
 
 #### When the record itself cannot be written
 
-Two things can fail before a send is recorded, and they end differently. If the **queue row** cannot be written
-the reply still goes out live, and `openclaw logs` carries
-`outbound queue write failed; continuing without durability`. That send has no queue
-row, so nothing will ever replay it and nothing can reconcile it either: if it is
-interrupted, it is simply lost. If the **recorded plan** cannot be stored the reply
-fails, and it is not silent about the incoming message: the LINE event that prompted
-it is dead-lettered rather than answered, under the reason
-`delivery-side-effects-committed`. As noted earlier on this page, that reason must
-never be resubmitted — the turn was already adopted, so re-enqueuing repeats the
-committed work. Fix the cause and let the sender ask again. What you see depends on
-which half of the store rejected it: a validation problem is
-reported as `LINE durable send plan part N cannot be recorded: ...`, while the plan
-store's own refusals surface unchanged and mention neither LINE nor the part —
+Two things can fail before a send is recorded, and they end differently.
+
+If the **queue row** cannot be written, what happens depends on how the caller asked
+for the send. A LINE agent reply is best-effort, so it still goes out live and
+`openclaw logs` carries `outbound queue write failed; continuing without durability`.
+That send has no queue row, so nothing will ever replay it and nothing can reconcile
+it: if it is interrupted, it is simply lost. Callers that ask for a durable send
+outright — the `ask_user` prompt and the exec-approval prompt among them — get no such
+fallback and no such log line. Their send fails instead.
+
+If the **recorded plan** cannot be stored, that part of the reply fails, and it is not
+silent about the incoming message: the LINE event that prompted it is dead-lettered
+rather than answered, under the reason `delivery-side-effects-committed`. As noted
+earlier on this page, that reason must never be resubmitted — the turn was already
+adopted, so re-enqueuing repeats the committed work. Fix the cause and let the sender
+ask again. What you see depends on which half of the store rejected it: a validation
+problem is reported as `LINE durable send plan part N cannot be recorded: ...`, while
+the plan store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
 the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
-limit` when this one reply's record is itself too large, and other store errors when
-the state directory will not take the write. Nothing is sent in that case: the record
-lands before any push does, so a reply whose record is refused is withheld whole
-rather than half delivered. The namespace limits clear as sends
-settle; the per-entry limit does not — a reply whose record cannot fit will never fit,
-so that one is permanently undeliverable. One record covers one delivery part, so the
-lever that would split a too-large record into several smaller ones is the text chunk
-limit core plans parts with. LINE does not expose that limit as a setting today, which
-is why this one has no operator remedy: the reply has to get smaller at the source.
+limit` when this one part's record is itself too large, and other store errors when the
+state directory will not take the write.
 
-One consequence worth knowing before it bites. The plan namespace refuses new entries when full
-rather than evicting, with records kept about an hour past their
+**A refused record does not always mean nothing was sent.** A reply is split into
+parts — one per text chunk, one per media file — and each part records itself just
+before its own pushes leave. Within one part that ordering is airtight: the record
+lands first, so a part whose record is refused sends nothing. Across parts it is not.
+If the store fills between part 2 and part 3, parts 1 and 2 are already on the
+recipient's phone and the rest never arrives. The turn fails and dead-letters, and
+because that dead letter must not be resubmitted, nothing retries it. The recipient
+keeps a truncated reply with no notice that it was cut off. Read a namespace-limit
+message as "some of this reply may already have been delivered" and check the
+conversation before doing anything by hand.
+
+The namespace limits clear as sends settle; the per-entry limit does not — a part whose
+record cannot fit will never fit, so that part is permanently undeliverable. It is
+worth knowing which replies can get there. A text reply is chunked into parts of at
+most the channel's message length, so each of its records stays small. A reply carrying
+structured content — a card, quick replies, a location — is handed to the channel whole
+as a single part, and every push it fans out into is recorded together, so that is the
+shape whose record can grow. No setting splits it: the chunk limit only plans parts for
+the text path, and LINE does not expose it as a setting anyway.
+
+One more consequence worth knowing before it bites. The plan namespace refuses new
+entries when full rather than evicting, with records kept about an hour past their
 twenty-four-hour window and cleared only as each send settles. The namespace is shared
 by the whole LINE plugin, not divided per account: one that fills up stops recorded
-replies for **every** LINE account on this Gateway until it drains, and there is no
-CLI or doctor command to inspect or clear it. Watch for the limit messages above; they
-are the only warning, and they arrive after replies have already started failing.
+replies for **every** LINE account on this Gateway until it drains, and there is no CLI
+or doctor command to inspect or clear it. Watch for the limit messages above; they are
+the only warning, and they arrive after replies have already started failing.
 
 ## Related
 
