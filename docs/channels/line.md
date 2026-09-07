@@ -455,64 +455,75 @@ link-local, and private-network targets.
 
 ### Outbound replies that could not be reconciled
 
-Some LINE replies are sent through a durable queue that records each push before it
-goes out, so a reply interrupted between its push and its result can be recovered:
-the recorded requests are reissued under the same retry keys, and a push LINE already
-took answers 409 with its original receipt while one that never landed goes out now.
-This runs on any retry of the same queued reply, not only after a restart.
+Some LINE sends are recorded before they go out: each push is written down first, so a
+send interrupted between its push and its result can be recovered by reissuing the
+recorded requests under the same retry keys — a push LINE already took answers 409
+with its original receipt, and one that never landed goes out now. This runs on any
+retry of the same queued send, not only after a restart.
 
-Which replies take this path is decided in two places, so it is wider than the agent's
-own replies. For a turn's auto-replies, only plain-text final blocks after the reply
-token is spent are queued — the turn's first reply, non-final blocks, and replies
-carrying media or LINE-specific rich content are sent inline. But every single-payload
-LINE send gets a durable identity, so sends made through the message tool, the CLI, or
-a cron job — including media and Flex cards — are recorded too and can produce the
-messages below.
+Not every send is recorded. Whether one is depends on the caller that queued it, and
+the observable rule is simple: a send that was never recorded reports
+`LINE delivery carried no durable record, so a replay could not be deduplicated` when
+it needs reconciling. Seeing that message is how you know this send was not on the
+recorded path; it is not itself a fault.
 
 When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
 carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
-fire exactly when OpenClaw cannot tell whether LINE took the reply, and it settles
-them as `unknown` rather than `failed` for that reason. Check the conversation before
+fire exactly when OpenClaw cannot tell whether LINE took the send, and it settles them
+as `unknown` rather than `failed` for that reason. Check the conversation before
 re-sending anything by hand; a blind resend is how the recipient gets two copies.
-None of these dead-letter the incoming event, so
-`openclaw channels dead-letters resubmit` is the wrong tool — the reply was
-interrupted, not the message that prompted it.
+These particular outcomes do not dead-letter the incoming event, so
+`openclaw channels dead-letters resubmit` is the wrong tool for them.
 
 - **`LINE retry key expired before the queued send could be reconciled`:** LINE forgets
-  a retry key 24 hours after the reply was first handed to it, so a replay after that
+  a retry key 24 hours after the send was first handed to it, so a replay after that
   window could no longer be deduplicated. Expect this only after an outage longer than
   a day — sooner means the host clock moved.
 - **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
-  the reply went out through a path that carries no per-push identity, so its pushes
-  used keys LINE will not deduplicate.
+  as above — this send was not on the recorded path, so its pushes used keys LINE will
+  not deduplicate.
 - **`LINE durable send plan part N no longer reproduces its recorded push M`,
   `... reproduced X of its Y recorded pushes`, and
-  `LINE ambiguous delivery is missing recorded parts: ...`:** the reply was
-  re-rendered on retry and no longer matches what was recorded, so resending would
-  hide different content behind a key LINE may already have answered. The cause is
-  something that changed how the reply is split or ordered between the interrupted
-  send and the retry — in practice an upgrade across the interruption. Note that a
-  push is recorded just before it is sent, so a recorded push is not proof LINE saw
-  it: a first attempt refused with a 4xx also leaves one behind.
+  `LINE ambiguous delivery is missing recorded parts: ...`:** the send was re-rendered
+  on retry and no longer matches what was recorded, so resending would hide different
+  content behind a key LINE may already have answered. The cause is something that
+  changed how the reply splits or orders between the interrupted send and the retry —
+  in practice an upgrade across the interruption. A push is recorded just before it is
+  sent, so a recorded push is not proof LINE saw it: a first attempt refused with a 4xx
+  also leaves one behind.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
   `key is invalid`, `has no part count`, `part topology is inconsistent`,
   `requires a queue id`, `... must be a non-negative integer`,
   `disappeared during reconciliation`) mean the stored evidence is not trustworthy
-  enough to replay from. Recovery declines for the same reason: partial evidence can
-  duplicate an accepted push or drop one LINE never received.
+  enough to replay from, so recovery declines rather than risk duplicating an accepted
+  push or dropping one LINE never received.
 
-A reply that cannot be recorded is normally not sent, and there are two distinct ways
-that happens. If the **queue row** cannot be written, the reply fails before any push:
-because these replies are reconcilable, the queue treats persistence as required
-rather than best-effort, since an unrecorded push is the one a later replay would
-duplicate. The person on LINE sees nothing and the trace is a `line ... reply failed`
-line in `openclaw logs`. If the **recorded plan** cannot be stored, the failure names
-the part — `LINE durable send plan part N cannot be recorded: ...` — and the rest of
-that message says which of the two it was: a validation complaint means the plan
-itself was rejected, while `Plugin blob namespace reached its stored row limit.` or
-`... stored byte limit.` means the plan namespace is full, and other store errors mean
-the state directory would not take the write. Only those last two are a disk or
-state-directory problem.
+#### When the record itself cannot be written
+
+This is a different failure from the ones above, and it is not silent about the
+incoming message: the reply fails, and the LINE event that prompted it is
+dead-lettered rather than answered.
+
+Because recorded sends are reconcilable, the outbound queue treats persistence as
+required rather than best-effort — an unrecorded push is the one a later replay would
+duplicate. Two things can fail. If the **queue row** cannot be written the send fails
+before any push, and the person on LINE sees nothing; the trace is a
+`line ... reply failed` line in `openclaw logs`. If the **recorded plan** cannot be
+stored, what you see depends on which half rejected it: a validation problem is
+reported as `LINE durable send plan part N cannot be recorded: ...`, while the plan
+store's own refusals surface unchanged and mention neither LINE nor the part —
+`Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
+the plan namespace is full, and other store errors when the state directory will not
+take the write.
+
+Two consequences worth knowing before they bite. Recording happens push by push, so a
+send that fans out into several pushes can fail partway: the earlier pushes have
+already reached the recipient and only the remainder is withheld, leaving a truncated
+reply that no log line counts. And the plan namespace refuses new entries when full
+rather than evicting, with records kept about a day past their window and cleared only
+as each send settles — so a namespace that fills up stops the account from replying
+until it drains, and there is no CLI or doctor command to inspect or clear it. Watch
+for the limit messages above; they are the only warning.
 
 ## Related
 

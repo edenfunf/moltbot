@@ -354,6 +354,31 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  // The plan store refuses a new entry once its namespace is full rather than evicting
+  // one, and that refusal reaches the operator unchanged: it names neither LINE nor the
+  // part, which is what the troubleshooting docs have to say.
+  it("surfaces a full plan namespace as the store's own refusal", async () => {
+    const store = createLineBlobStoreState();
+    setLineRuntime({
+      state: {
+        openBlobStore: (options: { namespace: string }) =>
+          store.state.openBlobStore({
+            ...options,
+            maxEntries: 0,
+            overflowPolicy: "reject-new",
+          }),
+      },
+      channel: {
+        text: { chunkMarkdownText: (text: string) => [text], resolveTextChunkLimit: () => 5000 },
+      },
+    } as unknown as PluginRuntime);
+
+    await expect(sendDurableFlexPart()).rejects.toThrow(
+      "Plugin blob namespace reached its stored row limit.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("refuses to replay once LINE has forgotten the retry keys", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockClear();

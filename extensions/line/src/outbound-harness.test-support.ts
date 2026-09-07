@@ -23,7 +23,12 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
   // store handle for every operation: holding them on the handle would drop each
   // entry's deadline the moment the store that recorded it went out of scope.
   const namespaceExpiries = new Map<string, Map<string, number>>();
-  return (options: { namespace: string; defaultTtlMs?: number }) => {
+  return (options: {
+    namespace: string;
+    defaultTtlMs?: number;
+    maxEntries?: number;
+    overflowPolicy?: "reject-new" | "evict-oldest";
+  }) => {
     const blobs = namespaces.get(options.namespace) ?? new Map<string, Uint8Array>();
     namespaces.set(options.namespace, blobs);
     // The store this stands in for drops an entry once its TTL passes. Keeping
@@ -46,6 +51,17 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
       return blobs.has(key);
     };
     const put = (key: string, bytes: Uint8Array, ttlMs?: number) => {
+      // Production refuses a new entry once the namespace is full rather than
+      // evicting one, and that refusal is what an operator actually sees. A stand-in
+      // with no ceiling makes every full-namespace assertion pass by construction.
+      if (
+        options.overflowPolicy === "reject-new" &&
+        options.maxEntries !== undefined &&
+        !blobs.has(key) &&
+        blobs.size >= options.maxEntries
+      ) {
+        throw new Error("Plugin blob namespace reached its stored row limit.");
+      }
       blobs.set(key, bytes);
       const effectiveTtlMs = ttlMs ?? options.defaultTtlMs;
       if (effectiveTtlMs === undefined) {
