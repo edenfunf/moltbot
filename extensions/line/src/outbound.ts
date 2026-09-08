@@ -59,6 +59,17 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     const sendOptions = { verbose: false, cfg, accountId: accountId ?? undefined };
 
     let lastResult: LineSendResult | null = null;
+    const deliveredMessageIds: string[] = [];
+    // Whatever already reached the chat travels with every later failure; a bare
+    // rejection reads as a delivery that never started and invites a replay.
+    const asPartialDelivery = (error: unknown) =>
+      createChannelPartialDeliveryError(error, {
+        messageIds: [...deliveredMessageIds],
+        ...(lastResult && deliveredMessageIds.length === lastResult.receipt.parts.length
+          ? { receipt: lastResult.receipt }
+          : {}),
+        visibleReplySent: true,
+      });
     const recordResult = async (
       resultPromise: Promise<LineSendResult>,
     ): Promise<LineSendResult> => {
@@ -66,12 +77,15 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       try {
         result = await resultPromise;
       } catch (error) {
-        // Accepted payload parts keep their receipt and must not wait for quota diagnosis.
-        const refusal =
-          lastResult !== null || isChannelPartialDeliveryError(error)
-            ? undefined
-            : await explainLineRefusal({ error, cfg, accountId });
-        throw refusal?.retryable !== undefined
+        if (isChannelPartialDeliveryError(error)) {
+          throw error;
+        }
+        if (lastResult !== null) {
+          // Accepted parts keep their receipt and must not wait for quota diagnosis.
+          throw asPartialDelivery(error);
+        }
+        const refusal = await explainLineRefusal({ error, cfg, accountId });
+        throw refusal.retryable !== undefined
           ? new PlatformMessageNotDispatchedError(refusal.reason, {
               cause: error,
               retryable: refusal.retryable,
@@ -79,6 +93,7 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
           : error;
       }
       lastResult = result;
+      deliveredMessageIds.push(...listMessageReceiptPlatformIds(result.receipt));
       try {
         await onDeliveryResult?.(createEmptyChannelResult("line", { ...result }));
       } catch (error) {
@@ -199,15 +214,7 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       if (!completedResult) {
         throw deliveryError;
       }
-      // The rest of the reply is already in the chat, so a media URL LINE will
-      // not carry must not be reported as a delivery that never started.
-      throw createChannelPartialDeliveryError(deliveryError, {
-        messageIds: completedResult.receipt
-          ? listMessageReceiptPlatformIds(completedResult.receipt)
-          : [],
-        ...(completedResult.receipt ? { receipt: completedResult.receipt } : {}),
-        visibleReplySent: true,
-      });
+      throw asPartialDelivery(deliveryError);
     }
     if (!completedResult) {
       throw new Error("Message must be non-empty for LINE sends");

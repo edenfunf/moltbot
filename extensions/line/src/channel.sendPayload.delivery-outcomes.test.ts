@@ -1,5 +1,8 @@
 import { HTTPFetchError } from "@line/bot-sdk";
-import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  createChannelPartialDeliveryError,
+  isChannelPartialDeliveryError,
+} from "openclaw/plugin-sdk/channel-inbound";
 import { resolveRequestUrl } from "openclaw/plugin-sdk/request-url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../api.js";
@@ -202,15 +205,28 @@ describe("line outbound delivery outcomes", () => {
 
     // Six cards need a second request; the first one's receipt is already
     // accepted, so its refusal must not wait on a quota lookup.
-    await expect(
-      lineOutboundAdapter.sendPayload!({
-        to: "line:user:U123",
-        text: Array.from({ length: 6 }, () => card).join("\n\n"),
-        payload: { text: Array.from({ length: 6 }, () => card).join("\n\n") },
-        ...LINE_QUOTA_ACCOUNT,
-        onDeliveryResult,
-      }),
-    ).rejects.toBe(rejection);
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text: Array.from({ length: 6 }, () => card).join("\n\n"),
+      payload: { text: Array.from({ length: 6 }, () => card).join("\n\n") },
+      ...LINE_QUOTA_ACCOUNT,
+      onDeliveryResult,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    // Five messages are already in the chat, so the refusal of the second
+    // request has to carry them rather than read as a send that never started.
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    if (!isChannelPartialDeliveryError(failure)) {
+      throw new Error("expected a partial LINE delivery error");
+    }
+    expect(failure.deliveryResult).toMatchObject({
+      messageIds: ["m-first-batch"],
+      visibleReplySent: true,
+    });
+    expect((failure as Error).cause).toBe(rejection);
 
     expect(mocks.pushMessagesLine).toHaveBeenCalledTimes(2);
     expect(events).toEqual(["batch-receipt", "batch-refused"]);

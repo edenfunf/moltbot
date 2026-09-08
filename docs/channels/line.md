@@ -426,23 +426,26 @@ link-local, and private-network targets.
   429 can also reflect rate limits or temporary message reservations. Ordinary
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
-  A reply is pushed five messages at a time, and LINE counts one message per request per
-  recipient whatever that request carries, so a reply that renders as several bubbles costs
-  one message per five bubbles rather than one each. A plain text reply — one with no card,
-  quick replies, or location — is split into chunks before it reaches the channel, so it
-  still costs one message per chunk, and its media URLs still cost one each.
+  LINE counts one message per request per recipient whatever that request carries. A reply
+  that carries a card, quick replies, a location, or other channel-specific content is
+  pushed five messages per request, so it costs one message per five of its parts instead of
+  one per part. A reply without any of that is divided before it reaches the channel: a
+  text-only one costs one message per chunk, and one with media costs one per media message.
+  In a group every one of those counts is multiplied by the number of members.
 - **A whole reply is missing:** LINE validates a push request as a unit, so one message
-  object it refuses takes the rest of that request with it — up to five messages, because a
-  reply is pushed five at a time. The failure carries only the status; run the Gateway with
-  `--verbose` to also record LINE’s own explanation, which names the rejected position
-  inside that request:
+  object it refuses takes the rest of that request with it — up to five messages. Run the
+  Gateway with `--verbose` to record LINE’s own explanation of a refused batch, which names
+  the rejected position inside that request:
 
   ```text
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
   ```
 
-  Content OpenClaw renders itself is bounded before it is sent, so a refusal points at a
-  `channelData.line` value the reply supplied.
+  Count that position through the order a reply is assembled in: the card, template, or
+  location first, then the text, then the media — except when quick replies are attached to
+  a reply that ends in text, where the media moves ahead of the text so the buttons ride the
+  last message. Media sent on its own does not take the batched path, so a refusal there is
+  logged without LINE’s explanation.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
