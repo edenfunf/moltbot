@@ -83,22 +83,25 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       try {
         result = await resultPromise;
       } catch (error) {
-        if (isChannelPartialDeliveryError(error)) {
-          // The failure carries its own delivery evidence; the requests accepted
-          // before it have to survive alongside it, not be replaced by it.
-          throw accepted.length === 0 ? error : asPartialDelivery(error, error.deliveryResult);
+        if (accepted.length > 0) {
+          // Accepted requests keep their receipts and must not wait for quota
+          // diagnosis; a failure carrying evidence of its own joins them rather
+          // than replacing them.
+          throw asPartialDelivery(
+            error,
+            isChannelPartialDeliveryError(error) ? error.deliveryResult : undefined,
+          );
         }
-        if (lastResult !== null) {
-          // Accepted parts keep their receipt and must not wait for quota diagnosis.
-          throw asPartialDelivery(error);
+        const refusal = isChannelPartialDeliveryError(error)
+          ? undefined
+          : await explainLineRefusal({ error, cfg, accountId });
+        if (refusal?.retryable !== undefined) {
+          throw new PlatformMessageNotDispatchedError(refusal.reason, {
+            cause: error,
+            retryable: refusal.retryable,
+          });
         }
-        const refusal = await explainLineRefusal({ error, cfg, accountId });
-        throw refusal.retryable !== undefined
-          ? new PlatformMessageNotDispatchedError(refusal.reason, {
-              cause: error,
-              retryable: refusal.retryable,
-            })
-          : error;
+        throw error;
       }
       lastResult = result;
       accepted.push(result);
