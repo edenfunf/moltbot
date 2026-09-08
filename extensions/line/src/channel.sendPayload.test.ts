@@ -9,7 +9,11 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import type { OpenClawConfig } from "../api.js";
 import { resolveLineAccount } from "./accounts.js";
 import { linePlugin } from "./channel.js";
-import { createRuntime, lineResult } from "./channel.sendPayload.test-support.js";
+import {
+  createCredentialBearingHttpUrl,
+  createRuntime,
+  sentMessages,
+} from "./channel.sendPayload.test-support.js";
 import { lineConfigAdapter } from "./config-adapter.js";
 import { resolveLineGroupRequireMention } from "./group-policy.js";
 import { lineOutboundAdapter } from "./outbound.js";
@@ -42,28 +46,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
-
-type LineWireMessage = {
-  type: string;
-  text?: string;
-  altText?: string;
-  originalContentUrl?: string;
-  quickReply?: unknown;
-};
-
-// One payload now travels as batched provider requests, so the observable wire
-// shape is the ordered message list those requests carried.
-function sentMessages(mocks: { pushMessagesLine: ReturnType<typeof vi.fn> }): LineWireMessage[] {
-  return mocks.pushMessagesLine.mock.calls.flatMap((call) => call[1] as LineWireMessage[]);
-}
-
-function createCredentialBearingHttpUrl(): string {
-  const url = new URL("http://example.com/image.jpg");
-  url.username = ["line", "user"].join("-");
-  url.password = ["line", "fixture"].join("-");
-  url.searchParams.set("auth", ["line", "query"].join("-"));
-  return url.href;
-}
 
 describe("line outbound sendPayload", () => {
   it.each([
@@ -272,44 +254,6 @@ describe("line outbound sendPayload", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("publishes an accepted batch receipt before a later batch fails", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-    const cfg = {
-      channels: { line: { channelAccessToken: "line-fixture-token" } },
-    } as OpenClawConfig;
-    const laterFailure = new Error("second LINE batch send failed");
-    const fetch = vi.fn();
-    vi.stubGlobal("fetch", fetch);
-    mocks.pushMessagesLine
-      .mockResolvedValueOnce(lineResult("m-first-batch"))
-      .mockRejectedValueOnce(laterFailure);
-    const onDeliveryResult = vi.fn();
-    const card = ["```js", "card()", "```"].join("\n");
-
-    // Six cards overflow the five-message request cap, so the payload needs a
-    // second request and the first one's receipt must already be published.
-    await expect(
-      lineOutboundAdapter.sendText!({
-        to: "line:user:U123",
-        text: Array.from({ length: 6 }, () => card).join("\n\n"),
-        accountId: "default",
-        cfg,
-        onDeliveryResult,
-      }),
-    ).rejects.toThrow("second LINE batch send failed");
-
-    expect(mocks.pushMessagesLine.mock.calls.map((call) => call[1].length)).toEqual([5, 1]);
-    expect(onDeliveryResult).toHaveBeenCalledOnce();
-    expect(onDeliveryResult).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messageId: "m-first-batch",
-        receipt: expect.objectContaining({ platformMessageIds: ["m-first-batch"] }),
-      }),
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
   it("sends flex message without dropping text", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
@@ -345,35 +289,6 @@ describe("line outbound sendPayload", () => {
       ],
       { verbose: false, accountId: "default", cfg },
     );
-  });
-
-  it("spends one monthly message on a card, its text, and its media", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-    mocks.resolveTextChunkLimit.mockReturnValue(5000);
-    mocks.chunkMarkdownText.mockImplementation((text: string) =>
-      chunkMarkdownTextForLine(text, 5000),
-    );
-    const cfg = { channels: { line: {} } } as OpenClawConfig;
-    const text = "Before\n\n| Name | Value |\n|---|---|\n| Item | one |\n\nAfter";
-
-    await lineOutboundAdapter.sendPayload!({
-      to: "line:user:U123",
-      text,
-      payload: { text, mediaUrl: "https://example.com/photo.png" },
-      accountId: "default",
-      cfg,
-    });
-
-    // LINE bills the request, not the message objects it carries, so a reply
-    // made of four parts must not spend four of the account's monthly messages.
-    expect(mocks.pushMessagesLine).toHaveBeenCalledOnce();
-    expect(sentMessages(mocks).map((message) => message.type)).toEqual([
-      "text",
-      "flex",
-      "text",
-      "image",
-    ]);
   });
 
   it("reports each platform result for text and media payloads", async () => {
@@ -852,83 +767,6 @@ describe("line outbound sendPayload", () => {
     ).rejects.toThrow(new Error("LINE outbound media URL must use HTTPS"));
 
     expect(mocks.pushMessagesLine).not.toHaveBeenCalled();
-  });
-
-  it("delivers the text a rejected media URL came with, and still surfaces the rejection", async () => {
-    // Media is built before the first request now, so a URL LINE will not carry
-    // must not take the words and buttons that travelled with it.
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-    const cfg = { channels: { line: {} } } as OpenClawConfig;
-
-    const failure = await lineOutboundAdapter.sendPayload!({
-      to: "line:user:U123",
-      text: "Here is the chart.",
-      payload: {
-        text: "Here is the chart.",
-        mediaUrl: createCredentialBearingHttpUrl(),
-        channelData: { line: { quickReplies: ["Continue"] } },
-      },
-      accountId: "default",
-      cfg,
-    }).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-
-    expect(isChannelPartialDeliveryError(failure)).toBe(true);
-    expect(String((failure as Error).cause)).toContain("must use HTTPS");
-    expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
-      "line:user:U123",
-      [
-        {
-          type: "text",
-          text: "Here is the chart.",
-          quickReply: { items: ["Continue"] },
-        },
-      ],
-      { verbose: false, accountId: "default", cfg },
-    );
-  });
-
-  it("keeps the media LINE will carry when a sibling URL is refused", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-    const cfg = { channels: { line: {} } } as OpenClawConfig;
-
-    const failure = await lineOutboundAdapter.sendPayload!({
-      to: "line:user:U123",
-      text: "Two charts.",
-      payload: {
-        text: "Two charts.",
-        mediaUrls: [createCredentialBearingHttpUrl(), "https://example.com/second.png"],
-      },
-      accountId: "default",
-      cfg,
-    }).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-
-    // One refused URL must not take the other media or the text with it, and the
-    // failure has to carry the evidence that part of the reply is already visible.
-    expect(sentMessages(mocks)).toEqual([
-      { type: "text", text: "Two charts." },
-      {
-        type: "image",
-        originalContentUrl: "https://example.com/second.png",
-        previewImageUrl: "https://example.com/second.png",
-      },
-    ]);
-    expect(isChannelPartialDeliveryError(failure)).toBe(true);
-    if (!isChannelPartialDeliveryError(failure)) {
-      throw new Error("expected a partial LINE delivery error");
-    }
-    expect(failure.deliveryResult).toMatchObject({
-      messageIds: ["m-batch"],
-      visibleReplySent: true,
-    });
-    expect(String((failure as Error).cause)).toContain("must use HTTPS");
   });
 
   it("keeps trackingId for user quick-reply inline video media", async () => {

@@ -12,6 +12,30 @@ type LineRuntimeMocks = {
   resolveTextChunkLimit: ReturnType<typeof vi.fn>;
 };
 
+export type LineWireMessage = {
+  type: string;
+  text?: string;
+  altText?: string;
+  originalContentUrl?: string;
+  quickReply?: unknown;
+};
+
+// One payload now travels as batched provider requests, so the observable wire
+// shape is the ordered message list those requests carried.
+export function sentMessages(mocks: {
+  pushMessagesLine: ReturnType<typeof vi.fn>;
+}): LineWireMessage[] {
+  return mocks.pushMessagesLine.mock.calls.flatMap((call) => call[1] as LineWireMessage[]);
+}
+
+export function createCredentialBearingHttpUrl(): string {
+  const url = new URL("http://example.com/image.jpg");
+  url.username = ["line", "user"].join("-");
+  url.password = ["line", "fixture"].join("-");
+  url.searchParams.set("auth", ["line", "query"].join("-"));
+  return url.href;
+}
+
 export function lineResult(messageId: string, chatId = "c1") {
   return {
     messageId,
