@@ -441,13 +441,15 @@ link-local, and private-network targets.
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
   ```
 
-  To find that position, count the reply as it is assembled: a card, template, or location
-  from `channelData.line` comes first, then the reply text — which OpenClaw splits into its
-  own messages, turning each Markdown table and fenced code block that fits a card into one,
-  and leaving the rest as text — and then the media. When quick replies are attached and any
-  of that text survives as text, the media moves ahead of it so the buttons ride the last
-  message. A media URL the reply pipeline sends on its own does not travel this path, so a
-  refusal there is logged without LINE’s explanation.
+  That position counts inside the named request, not from the start of the reply: a reply is
+  pushed five messages at a time, so its sixth part is `messages[0]` of a second request. To
+  map a position onto what the reply contained, count it as OpenClaw assembles it: a card,
+  template, or location from `channelData.line` comes first, then the reply text — each
+  Markdown table and fenced code block that fits a card becomes one, an empty fenced block is
+  dropped, and everything else stays text — and then the media. When quick replies are
+  attached and any of that text survives as text, the media moves ahead of it so the buttons
+  ride the last message. A media URL the reply pipeline sends on its own does not travel this
+  path, so a refusal there is logged without LINE’s explanation.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
