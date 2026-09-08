@@ -44,9 +44,26 @@ export function lineResult(messageId: string, chatId = "c1") {
   };
 }
 
+// LINE answers a push with one sent-message id per message object, so a double
+// that returns a single id for a five-message request is a state the platform
+// cannot produce — and it would hide anything that reads ids across requests.
+export function lineBatchResult(messageCount: number, prefix = "m-batch", chatId = "c1") {
+  const messageIds = Array.from({ length: Math.max(1, messageCount) }, (_, index) =>
+    index === 0 ? prefix : `${prefix}-${index + 1}`,
+  );
+  const messageId = messageIds[0] ?? prefix;
+  return {
+    messageId,
+    chatId,
+    receipt: createLineSendReceipt({ messageId, messageIds, chatId, kind: "text" }),
+  };
+}
+
 export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMocks } {
   const pushMessageLine = vi.fn(async () => lineResult("m-text"));
-  const pushMessagesLine = vi.fn(async () => lineResult("m-batch"));
+  const pushMessagesLine = vi.fn(async (_to: string, messages: readonly unknown[]) =>
+    lineBatchResult(messages.length),
+  );
   const createQuickReplyItems = vi.fn((labels: string[]) => ({ items: labels }));
   const buildTemplateMessageFromPayload = vi.fn(() => ({ type: "buttons" }));
   const chunkMarkdownText = vi.fn((text: string) => [text]);

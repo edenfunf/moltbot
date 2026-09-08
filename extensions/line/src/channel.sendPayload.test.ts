@@ -148,7 +148,7 @@ describe("line outbound sendPayload", () => {
     ]);
   });
 
-  it("keeps a degraded location in the quick-reply inline batch", async () => {
+  it("keeps a degraded location in the quick-reply batch", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
 
@@ -323,7 +323,7 @@ describe("line outbound sendPayload", () => {
     expect(onDeliveryResult.mock.calls.map(([result]) => result.messageId)).toEqual(["m-batch"]);
   });
 
-  it("preserves every provider receipt and conversation for an inline LINE batch", async () => {
+  it("preserves every provider receipt and conversation for a batched LINE send", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -643,7 +643,7 @@ describe("line outbound sendPayload", () => {
     expect(mocks.chunkMarkdownText).toHaveBeenCalledWith("Hello world", 123);
   });
 
-  it("omits trackingId for non-user quick-reply inline video media", async () => {
+  it("omits trackingId for non-user quick-reply video media", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -716,7 +716,7 @@ describe("line outbound sendPayload", () => {
     });
   });
 
-  it("sends inline quick-reply media as the kind its URL proves", async () => {
+  it("sends quick-reply media as the kind its URL proves", async () => {
     // The inline batch used to force every generic media URL onto the image
     // route, so an audio clip arrived as an empty image bubble.
     const { runtime, mocks } = createRuntime();
@@ -769,7 +769,7 @@ describe("line outbound sendPayload", () => {
     expect(mocks.pushMessagesLine).not.toHaveBeenCalled();
   });
 
-  it("keeps trackingId for user quick-reply inline video media", async () => {
+  it("keeps trackingId for user quick-reply video media", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -810,7 +810,7 @@ describe("line outbound sendPayload", () => {
     );
   });
 
-  it("rejects quick-reply inline video media without previewImageUrl", async () => {
+  it("rejects quick-reply video media without previewImageUrl", async () => {
     const { runtime } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -873,7 +873,7 @@ describe("line outbound sendPayload", () => {
             originalContentUrl: "https://example.com/image.jpg",
             previewImageUrl: "https://example.com/image.jpg",
           });
-          expect(result?.receipt.platformMessageIds).toEqual(["m-batch"]);
+          expect(result?.receipt.platformMessageIds).toEqual(["m-batch", "m-batch-2"]);
         },
         messageSendingHooks: () => {
           expect(linePlugin.message?.send?.text).toBeTypeOf("function");

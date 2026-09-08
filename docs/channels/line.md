@@ -433,19 +433,20 @@ link-local, and private-network targets.
   text-only one costs one message per chunk, and one with media costs one per media message.
   In a group every one of those counts is multiplied by the number of members.
 - **A whole reply is missing:** LINE validates a push request as a unit, so one message
-  object it refuses takes the rest of that request with it — up to five messages. Run the
-  Gateway with `--verbose` to record LINE’s own explanation of a refused batch, which names
-  the rejected position inside that request:
+  object it refuses takes the rest of that request with it, and the parts still queued
+  behind it are never sent either. Run the Gateway with `--verbose` to record LINE’s own
+  explanation of a refused batch, which names the rejected position inside that request:
 
   ```text
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
   ```
 
-  Count that position through the order a reply is assembled in: the card, template, or
-  location first, then the text, then the media — except when quick replies are attached to
-  a reply that ends in text, where the media moves ahead of the text so the buttons ride the
-  last message. Media sent on its own does not take the batched path, so a refusal there is
-  logged without LINE’s explanation.
+  To find that position, count the reply as it is assembled: a card, template, or location
+  from `channelData.line` comes first, then the reply text — which OpenClaw splits into its
+  own messages, turning each Markdown table and fenced code block into a card of its own —
+  and then the media. Quick replies move the media ahead of that text so the buttons ride
+  the last message. A media URL the reply pipeline sends on its own does not travel this
+  path, so a refusal there is logged without LINE’s explanation.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.

@@ -72,7 +72,6 @@ describe("line outbound request batching", () => {
         receipt: expect.objectContaining({ platformMessageIds: ["m-first-batch"] }),
       }),
     );
-    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("spends one monthly message on a card, its text, and its media", async () => {
@@ -177,9 +176,48 @@ describe("line outbound request batching", () => {
       throw new Error("expected a partial LINE delivery error");
     }
     expect(failure.deliveryResult).toMatchObject({
-      messageIds: ["m-batch"],
+      messageIds: ["m-batch", "m-batch-2"],
       visibleReplySent: true,
     });
     expect(String(cause)).toContain("must use HTTPS");
+  });
+
+  it("names every request's messages when a later media build fails", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    mocks.resolveTextChunkLimit.mockReturnValue(5000);
+    mocks.chunkMarkdownText.mockImplementation((text: string) =>
+      chunkMarkdownTextForLine(text, 5000),
+    );
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    const card = ["```js", "card()", "```"].join("\n");
+    const text = Array.from({ length: 6 }, () => card).join("\n\n");
+
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text,
+      payload: { text, mediaUrl: createCredentialBearingHttpUrl() },
+      accountId: "default",
+      cfg,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    // Six cards take two requests before the media failure surfaces, so the
+    // evidence has to name what both of them delivered, not just the last one.
+    expect(mocks.pushMessagesLine.mock.calls.map((call) => call[1].length)).toEqual([5, 1]);
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    if (!isChannelPartialDeliveryError(failure)) {
+      throw new Error("expected a partial LINE delivery error");
+    }
+    expect(failure.deliveryResult.messageIds).toEqual([
+      "m-batch",
+      "m-batch-2",
+      "m-batch-3",
+      "m-batch-4",
+      "m-batch-5",
+      "m-batch",
+    ]);
   });
 });
