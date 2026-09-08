@@ -112,7 +112,11 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
         _metadata?: unknown,
         entryOptions?: { ttlMs?: number },
       ) => {
-        if (live(key)) {
+        // Production refuses an expired row too: its existence check does not filter on
+        // the deadline, because "expired rows remain owner-managed until explicitly
+        // claimed" (plugin-blob-store.sqlite.ts). A stand-in that treated them as free
+        // would let a caller drop its own expiry sweep and still pass.
+        if (blobs.has(key)) {
           return false;
         }
         put(key, bytes, entryOptions?.ttlMs);
