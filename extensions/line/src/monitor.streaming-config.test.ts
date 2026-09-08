@@ -195,6 +195,39 @@ describe("the channel-scoped block streaming choice", () => {
     expect(replyOptions?.disableBlockStreaming).toBeUndefined();
   });
 
+  it("keeps a channel-wide disable when an account only tunes coalescing", async () => {
+    // Account config is merged shallowly, so the account's streaming object replaces
+    // the channel's outright. Reading only the merged view would lose the disable and
+    // hand the turn back to an agent default of "on".
+    const replyOptions = await replyOptionsFor({
+      turnConfig: {
+        channels: {
+          line: {
+            streaming: { block: { enabled: false } },
+            accounts: { default: { streaming: { block: { coalesce: { idleMs: 1000 } } } } },
+          },
+        },
+      } as OpenClawConfig,
+    });
+
+    expect(replyOptions?.disableBlockStreaming).toBe(true);
+  });
+
+  it("keeps a channel-wide enable when an account only sets a chunk mode", async () => {
+    const replyOptions = await replyOptionsFor({
+      turnConfig: {
+        channels: {
+          line: {
+            streaming: { block: { enabled: true } },
+            accounts: { default: { streaming: { chunkMode: "newline" } } },
+          },
+        },
+      } as OpenClawConfig,
+    });
+
+    expect(replyOptions?.disableBlockStreaming).toBe(false);
+  });
+
   it("reads the choice from the turn's own config, not the one the provider started with", async () => {
     // LINE resolves config per event so a hot-applied change reaches the next turn.
     // Reading the startup snapshot here would silently pin the streaming choice to

@@ -192,11 +192,16 @@ export async function monitorLineProvider(
       // A group's configured skill scope only applies if the turn answering it carries it.
       // An empty filter is a real scope ("no skills"), so presence decides, not length.
       const skillFilter = ctx.skillFilter;
-      // Read the account off this turn's own config: LINE resolves it per event so a
-      // hot-applied change reaches the next turn, and the streaming choice must too.
-      const blockStreaming = resolveChannelStreamingBlockEnabled(
-        resolveLineAccount({ cfg: turnConfig, accountId: route.accountId }).config,
-      );
+      // Read this turn's own config: LINE resolves it per event so a hot-applied
+      // change reaches the next turn, and the streaming choice must too.
+      // Ask each scope separately. Core reads coalescing that way and lets an account
+      // override only the fields it names; an account config is merged shallowly, so
+      // reading the merged view alone would let an account that tunes nothing but
+      // coalescing erase the channel's explicit enable or disable.
+      const blockStreaming =
+        resolveChannelStreamingBlockEnabled(
+          resolveLineAccount({ cfg: turnConfig, accountId: route.accountId }).config,
+        ) ?? resolveChannelStreamingBlockEnabled(turnConfig.channels?.line);
       // Only an explicit channel choice may speak here. Left unset the field stays
       // undefined, which is how core reads "no opinion" and keeps the agent default.
       const disableBlockStreaming =
