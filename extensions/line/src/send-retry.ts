@@ -112,6 +112,10 @@ export function resolveLineNonDispatchRetryable(error: unknown): boolean | undef
 }
 
 function isRetryableLinePushError(error: unknown): boolean {
+  // Redundant today — this error carries no code, so the transport check below would
+  // also refuse it — but the refusal is the point, not the route to it. Past the retry
+  // key's window a replay is a second delivery, and that must not depend on an error
+  // shape happening never to look transient.
   if (error instanceof LineRetryKeyExpiredError) {
     return false;
   }

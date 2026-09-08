@@ -513,7 +513,7 @@ These particular outcomes do not dead-letter the incoming event, so
   that state, so it refuses rather than resend parts the recipient may already have. The
   named indexes are the parts with no record.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
-  `key is invalid`, `has no part count`, `part topology is inconsistent`,
+  `key is invalid`, `part topology is inconsistent`,
   `requires a queue id`, `... must be a non-negative integer`,
   `disappeared during reconciliation`) mean the stored evidence is not trustworthy
   enough to replay from, so recovery declines rather than risk duplicating an accepted
