@@ -169,6 +169,36 @@ describe("LINE unknown-send reconciliation", () => {
     ).toEqual(["replayed-1", "replayed-2"]);
   });
 
+  it("marks the platform dispatch once, before the first push of a fanned-out part", async () => {
+    const events: string[] = [];
+    const onPlatformSendDispatch = vi.fn(async () => {
+      events.push("dispatch");
+    });
+    fetchMock.mockImplementation(async () => {
+      events.push("push");
+      return jsonResponse({ sentMessages: [{ id: "delivered-1" }] });
+    });
+
+    await linePlugin.outbound?.sendPayload?.({
+      cfg: CFG,
+      to: TARGET,
+      text: "hello",
+      payload: {
+        text: "hello",
+        channelData: { line: { flexMessage: { altText: "alt", contents: { type: "bubble" } } } },
+      },
+      deliveryQueueId: QUEUE_ID,
+      deliveryPartIndex: 0,
+      deliveryPartCount: 1,
+      onPlatformSendDispatch,
+    });
+
+    // The marker is what makes the queue entry recoverable: a crash after it is
+    // reconciled against LINE, while a crash before it looks like a send that never
+    // started. It has to precede the first request, and a part that fans out into
+    // several pushes is still one payload crossing the boundary, so it fires once.
+    expect(events).toEqual(["dispatch", "push", "push"]);
+  });
   it.each([
     [
       "a card, media and text",

@@ -477,9 +477,9 @@ something this channel cannot do** — a reply-to, a thread, or a silent send. L
 declares none of those three, so a send carrying one gets no durable record, exactly as
 if it had not been queued. None of these callers has an inbound LINE event behind it,
 so a failure leaves nothing in `openclaw channels dead-letters list`. Where it does show
-up depends on the caller: most only log, but a failed `ask_user` prompt cancels the tool
-and the agent says it could not reach anyone, and a failed exec-approval prompt leaves a
-command waiting for an approval that was never asked for.
+up depends on the caller: most only log, but a failed `ask_user` prompt cancels the
+question and hands the agent a tool error in place of an answer, and a failed
+exec-approval prompt leaves a command waiting for an approval that was never asked for.
 
 The observable rule is simple: a send that was never recorded reports
 `LINE delivery carried no durable record, so a replay could not be deduplicated` when
@@ -562,8 +562,8 @@ rather than a storage fault. `LINE durable send plan part N was recorded for a d
 recipient` and `... for a different fan-out` mean a record already exists under this
 delivery's key but does not describe this send. The fan-out one is the reachable one:
 if the reply now splits into a different number of parts than the attempt that recorded
-it — a chunk-limit change, or an upgrade between attempts — every retry re-renders the
-same new shape and is refused again, so that reply never goes out. Send it again as a
+it — an upgrade between attempts that changes how a reply is split — every retry
+re-renders the same new shape and is refused again, so that reply never goes out. Send it again as a
 new message rather than waiting. `... disappeared while being recorded` means the record
 was claimed and then vanished before it could be read back; nothing was sent.
 

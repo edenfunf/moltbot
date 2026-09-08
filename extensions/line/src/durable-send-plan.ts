@@ -29,9 +29,8 @@ type LineDurablePush = {
  * The whole fan-out is decided before any of it is sent — no LINE message in a
  * part depends on the result of an earlier one — so the record can be complete
  * rather than accumulated. A replay reissues these recorded requests instead of
- * re-rendering the reply, which is what keeps a chunk-limit change across the
- * interruption from putting different content behind a key LINE has already
- * answered. Message normalization still runs on the way out, so this does not by
+ * re-rendering the reply, which is what keeps an upgrade across the interruption
+ * from putting different content behind a key LINE has already answered. Message normalization still runs on the way out, so this does not by
  * itself pin the bytes across a change to that step.
  */
 type LineDurableSendPlan = {
@@ -184,12 +183,16 @@ export async function recordLineDurableSendPlan(params: {
       `LINE durable send plan part ${params.partIndex} cannot be recorded: ${parsed.error.message}`,
     );
   }
+  // Everything below stores and compares the parsed plan, not the input: the schema
+  // trims `to`, so keeping the raw one would compare a trimmed record against an
+  // untrimmed argument on the claim-conflict path.
+  const recordable = parsed.data;
   await store.deleteExpired();
   // Claim atomically rather than checking then writing: two attempts at the same part
   // can race, and a lost race that still wrote would put re-rendered content behind
   // keys the winner already used.
-  if (await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(plan)), {})) {
-    return plan;
+  if (await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})) {
+    return recordable;
   }
   const existing = await store.lookup(key);
   if (!existing) {
@@ -200,14 +203,14 @@ export async function recordLineDurableSendPlan(params: {
     );
   }
   const recorded = decodePlan(existing.bytes);
-  if (recorded.to !== params.to) {
+  if (recorded.to !== recordable.to) {
     // The keys are derived from the delivery, so a record under this key that names a
     // different recipient is not this send's record and must not be replayed to it.
     throw new LineDurableSendPlanError(
       `LINE durable send plan part ${params.partIndex} was recorded for a different recipient`,
     );
   }
-  if (recorded.partCount !== params.partCount) {
+  if (recorded.partCount !== recordable.partCount) {
     // Same reasoning one dimension over. A retry that now plans a different number of
     // parts would pair this stored part with parts the record never described, and the
     // mismatch only surfaces later as an inconsistent topology that cannot be settled.
@@ -252,9 +255,13 @@ export async function loadLineDurableSendPlans(queueId: string): Promise<LineDur
 }
 
 function assertCompletePartTopology(plans: readonly LineDurableSendPlan[]): void {
-  // The caller answers an empty record before it gets here and the schema refuses a
-  // non-positive count, so there is always a first plan and its count is at least one.
-  const partCount = plans[0]!.partCount;
+  const [first] = plans;
+  if (!first) {
+    // Unreachable: the caller answers an empty record before it gets here. Kept as a
+    // guard rather than an assertion marker so the type holds without one.
+    throw new LineDurableSendPlanError("LINE durable send plan has no recorded parts");
+  }
+  const partCount = first.partCount;
   if (plans.some((plan) => plan.partCount !== partCount)) {
     throw new LineDurableSendPlanError("LINE durable send plan part topology is inconsistent");
   }
