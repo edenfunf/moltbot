@@ -873,7 +873,7 @@ describe("line outbound sendPayload", () => {
             originalContentUrl: "https://example.com/image.jpg",
             previewImageUrl: "https://example.com/image.jpg",
           });
-          expect(result?.receipt.platformMessageIds).toEqual(["m-batch", "m-batch-2"]);
+          expect(result?.receipt.platformMessageIds).toEqual(["m-batch-r2", "m-batch-r2-2"]);
         },
         messageSendingHooks: () => {
           expect(linePlugin.message?.send?.text).toBeTypeOf("function");

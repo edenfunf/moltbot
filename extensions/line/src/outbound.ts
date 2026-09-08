@@ -1,12 +1,12 @@
 import type { messagingApi } from "@line/bot-sdk";
 import {
+  createAcceptedChannelDeliveryResult,
   createChannelPartialDeliveryError,
   isChannelPartialDeliveryError,
 } from "openclaw/plugin-sdk/channel-inbound";
 // Line plugin module implements outbound behavior.
 import {
   defineChannelMessageAdapter,
-  listMessageReceiptPlatformIds,
   type ChannelMessageSendResult,
   type MessageReceiptPartKind,
 } from "openclaw/plugin-sdk/channel-outbound";
@@ -59,17 +59,16 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     const sendOptions = { verbose: false, cfg, accountId: accountId ?? undefined };
 
     let lastResult: LineSendResult | null = null;
-    const deliveredMessageIds: string[] = [];
+    const accepted: LineSendResult[] = [];
     // Whatever already reached the chat travels with every later failure; a bare
     // rejection reads as a delivery that never started and invites a replay.
     const asPartialDelivery = (error: unknown) =>
-      createChannelPartialDeliveryError(error, {
-        messageIds: [...deliveredMessageIds],
-        ...(lastResult && deliveredMessageIds.length === lastResult.receipt.parts.length
-          ? { receipt: lastResult.receipt }
-          : {}),
-        visibleReplySent: true,
-      });
+      createChannelPartialDeliveryError(
+        error,
+        createAcceptedChannelDeliveryResult({
+          deliveryResults: accepted.map((result) => ({ receipt: result.receipt })),
+        }),
+      );
     const recordResult = async (
       resultPromise: Promise<LineSendResult>,
     ): Promise<LineSendResult> => {
@@ -93,16 +92,12 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
           : error;
       }
       lastResult = result;
-      deliveredMessageIds.push(...listMessageReceiptPlatformIds(result.receipt));
+      accepted.push(result);
       try {
         await onDeliveryResult?.(createEmptyChannelResult("line", { ...result }));
       } catch (error) {
         // Observers run after provider acceptance; losing this receipt invites duplicate delivery.
-        throw createChannelPartialDeliveryError(error, {
-          messageIds: listMessageReceiptPlatformIds(result.receipt),
-          receipt: result.receipt,
-          visibleReplySent: true,
-        });
+        throw asPartialDelivery(error);
       }
       return result;
     };
@@ -178,7 +173,7 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       trackingId: lineData.trackingId,
     };
     const mediaMessages: messagingApi.Message[] = [];
-    let deliveryError: unknown;
+    let deliveryError: Error | undefined;
     for (const rawUrl of resolveOutboundMediaUrls(payload)) {
       const url = rawUrl?.trim();
       if (!url) {
@@ -188,7 +183,10 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         mediaMessages.push(await buildLineMediaMessage(url, mediaOptions, to));
       } catch (error) {
         // Media LINE will not carry must not take the text that came with it.
-        deliveryError ??= error;
+        deliveryError ??=
+          error instanceof Error
+            ? error
+            : new Error("LINE outbound media could not be prepared", { cause: error });
       }
     }
 

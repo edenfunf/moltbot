@@ -6,7 +6,6 @@ import type { OpenClawConfig } from "../api.js";
 import {
   createCredentialBearingHttpUrl,
   createRuntime,
-  lineResult,
   sentMessages,
 } from "./channel.sendPayload.test-support.js";
 import { lineOutboundAdapter } from "./outbound.js";
@@ -37,43 +36,6 @@ afterEach(() => {
 // LINE counts one message per request per recipient whatever the request
 // carries, so what a reply costs is the number of requests it takes.
 describe("line outbound request batching", () => {
-  it("publishes an accepted batch receipt before a later batch fails", async () => {
-    const { runtime, mocks } = createRuntime();
-    setLineRuntime(runtime);
-    const cfg = {
-      channels: { line: { channelAccessToken: "line-fixture-token" } },
-    } as OpenClawConfig;
-    const laterFailure = new Error("second LINE batch send failed");
-    const fetch = vi.fn();
-    vi.stubGlobal("fetch", fetch);
-    mocks.pushMessagesLine
-      .mockResolvedValueOnce(lineResult("m-first-batch"))
-      .mockRejectedValueOnce(laterFailure);
-    const onDeliveryResult = vi.fn();
-    const card = ["```js", "card()", "```"].join("\n");
-
-    // Six cards overflow the five-message request cap, so the payload needs a
-    // second request and the first one's receipt must already be published.
-    await expect(
-      lineOutboundAdapter.sendText!({
-        to: "line:user:U123",
-        text: Array.from({ length: 6 }, () => card).join("\n\n"),
-        accountId: "default",
-        cfg,
-        onDeliveryResult,
-      }),
-    ).rejects.toThrow("second LINE batch send failed");
-
-    expect(mocks.pushMessagesLine.mock.calls.map((call) => call[1].length)).toEqual([5, 1]);
-    expect(onDeliveryResult).toHaveBeenCalledOnce();
-    expect(onDeliveryResult).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messageId: "m-first-batch",
-        receipt: expect.objectContaining({ platformMessageIds: ["m-first-batch"] }),
-      }),
-    );
-  });
-
   it("spends one monthly message on a card, its text, and its media", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
@@ -217,7 +179,34 @@ describe("line outbound request batching", () => {
       "m-batch-3",
       "m-batch-4",
       "m-batch-5",
-      "m-batch",
+      "m-batch-r2",
     ]);
+  });
+
+  it("sends nothing more once the first request is refused", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    mocks.resolveTextChunkLimit.mockReturnValue(5000);
+    mocks.chunkMarkdownText.mockImplementation((text: string) =>
+      chunkMarkdownTextForLine(text, 5000),
+    );
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    const card = ["```js", "card()", "```"].join("\n");
+    const text = Array.from({ length: 6 }, () => card).join("\n\n");
+    mocks.pushMessagesLine.mockRejectedValueOnce(new Error("LINE refused the first batch"));
+
+    await expect(
+      lineOutboundAdapter.sendPayload!({
+        to: "line:user:U123",
+        text,
+        payload: { text },
+        accountId: "default",
+        cfg,
+      }),
+    ).rejects.toThrow("LINE refused the first batch");
+
+    // A refusal ends the payload: the parts queued behind it never reach LINE,
+    // which is what the reply costs when its first request is the one refused.
+    expect(mocks.pushMessagesLine).toHaveBeenCalledOnce();
   });
 });

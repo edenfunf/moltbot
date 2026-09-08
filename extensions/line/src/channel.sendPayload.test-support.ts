@@ -1,10 +1,10 @@
-import { vi } from "vitest";
+import { type Mock, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../api.js";
 import { createLineSendReceipt } from "./send-receipt.js";
 
 type LineRuntimeMocks = {
   pushMessageLine: ReturnType<typeof vi.fn>;
-  pushMessagesLine: ReturnType<typeof vi.fn>;
+  pushMessagesLine: Mock<typeof import("./send.js").pushMessagesLine>;
   createQuickReplyItems: ReturnType<typeof vi.fn>;
   buildTemplateMessageFromPayload: ReturnType<typeof vi.fn>;
   chunkMarkdownText: ReturnType<typeof vi.fn>;
@@ -61,8 +61,17 @@ export function lineBatchResult(messageCount: number, prefix = "m-batch", chatId
 
 export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMocks } {
   const pushMessageLine = vi.fn(async () => lineResult("m-text"));
-  const pushMessagesLine = vi.fn(async (_to: string, messages: readonly unknown[]) =>
-    lineBatchResult(messages.length),
+  let batchIndex = 0;
+  // Ids are unique per request as well as per message; reusing one across
+  // requests would hide anything that reads them across a whole payload.
+  const pushMessagesLine = vi.fn<typeof import("./send.js").pushMessagesLine>(
+    async (_to, messages) => {
+      batchIndex += 1;
+      return lineBatchResult(
+        messages.length,
+        batchIndex === 1 ? "m-batch" : `m-batch-r${batchIndex}`,
+      );
+    },
   );
   const createQuickReplyItems = vi.fn((labels: string[]) => ({ items: labels }));
   const buildTemplateMessageFromPayload = vi.fn(() => ({ type: "buttons" }));
