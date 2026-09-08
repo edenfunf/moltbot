@@ -44,9 +44,10 @@ export function resolveLineDurableReplyOptions(params: {
   }
   return {
     to: params.to,
-    // LINE cannot quote a message id, so this send replies to nothing. Saying so
-    // explicitly stops core resolving the inbound quote id from the turn context and
-    // requiring a `replyTo` capability the send would not use.
+    // LINE cannot quote a message id, so this send replies to nothing. Core would
+    // otherwise take the reply-to from the turn context (`ReplyToIdFull`), which
+    // LINE leaves unset today but #134220 fills in from an inbound quote — and that
+    // would require a `replyTo` capability this send does not use and cannot honour.
     replyToId: null,
   };
 }

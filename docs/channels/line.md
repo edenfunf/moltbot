@@ -145,9 +145,10 @@ cannot be written.
 
 ### When a send could not be reconciled
 
-Some LINE sends are recorded before they go out: every push the reply will make is
-written down before the first of them leaves, so a send interrupted anywhere in that
-fan-out can be recovered by reissuing the recorded requests under the same retry keys
+Some LINE sends are recorded before they go out. A reply is split into parts, and each
+part writes down every push it will make before the first of them leaves, so a send
+interrupted inside a part can be recovered by reissuing the recorded requests under the
+same retry keys
 — a push LINE already took answers 409 with its original receipt, and one that never
 landed goes out now. This runs on any retry of the same queued send, not only after a
 restart, and the record always wins over what the reply would render today.
