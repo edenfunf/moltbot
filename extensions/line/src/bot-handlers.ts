@@ -184,7 +184,14 @@ async function resolveLineEventAdmission(
   const senderId = userId ?? "";
   const groupConfig = resolveLineGroupConfigEntry(account.config.groups, { groupId, roomId });
   const rawText = resolveEventRawText(event);
-  const requireMention = isGroup ? groupConfig?.requireMention !== false : false;
+  const groupRequiresMention = isGroup ? groupConfig?.requireMention !== false : false;
+  // LINE carries mention data on text only, so a group that has always had its
+  // photos and files answered keeps that until it opts in.
+  const requireMention =
+    groupRequiresMention &&
+    (event.type !== "message" ||
+      event.message.type === "text" ||
+      groupConfig?.requireMentionOnAllMessageTypes === true);
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   const { groupPolicy: runtimeGroupPolicy, providerMissingFallbackApplied } =
     resolveAllowlistProviderRuntimeGroupPolicy({
@@ -219,9 +226,10 @@ async function resolveLineEventAdmission(
     const wasMentionedByPattern =
       event.message.type === "text" ? matchesMentionPatterns(rawText, mentionRegexes) : false;
     return {
-      // A LINE group always lets a member address the bot, so the gate covers
-      // every message it carries. Keying this on the message type made it a
-      // no-op for attachments and stickers, which carry no mention object.
+      // Whether this message addressed the bot is knowable for every kind: a
+      // LINE group always lets a member address the bot, and a kind that carries
+      // no mention object did not. Keying this on the message type instead made
+      // the gate a no-op for attachments and stickers.
       canDetectMention: true,
       wasMentioned: wasMentionedByNative || wasMentionedByPattern,
       explicitlyMentionedBot: wasMentionedByNative,

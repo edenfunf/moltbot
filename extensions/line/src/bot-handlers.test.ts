@@ -219,6 +219,7 @@ function createLineWebhookTestContext(params: {
   allowFrom?: LineAccountConfig["allowFrom"];
   groupAllowFrom?: LineAccountConfig["groupAllowFrom"];
   requireMention?: boolean;
+  requireMentionOnAllMessageTypes?: boolean;
   groupHistories?: Map<string, HistoryEntry[]>;
   historyLimit?: number;
   accessGroups?: Record<string, { type: "message.senders"; members: Record<string, string[]> }>;
@@ -249,7 +250,18 @@ function createLineWebhookTestContext(params: {
         ...lineConfig,
         ...(params.requireMention === undefined
           ? {}
-          : { groups: { "*": { requireMention: params.requireMention } } }),
+          : {
+              groups: {
+                "*": {
+                  requireMention: params.requireMention,
+                  ...(params.requireMentionOnAllMessageTypes === undefined
+                    ? {}
+                    : {
+                        requireMentionOnAllMessageTypes: params.requireMentionOnAllMessageTypes,
+                      }),
+                },
+              },
+            }),
       },
     },
     runtime: createRuntime(),
@@ -1547,6 +1559,42 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).not.toHaveBeenCalled();
   });
 
+  // The gate reaches attachments only when the group asks for it, so a group that
+  // has always had its photos answered keeps that until it sets the opt-in.
+  it("answers an unaddressed group photo when the group has not opted into the wider gate", async () => {
+    downloadLineMediaMock.mockResolvedValueOnce({
+      path: "/tmp/line-media/shipped.jpg",
+      contentType: "image/jpeg",
+    });
+    const processMessage = vi.fn();
+    const groupHistories = new Map<string, HistoryEntry[]>();
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: true,
+      groupHistories,
+    });
+
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "m-shipped-img",
+            type: "image",
+            contentProvider: { type: "line" },
+            quoteToken: "q-shipped-img",
+          },
+          timestamp: 1700000000000,
+          source: { type: "group", groupId: "group-shipped", userId: "user-img" },
+          webhookEventId: "evt-shipped-img",
+        }),
+      ],
+      context,
+    );
+
+    expect(processMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("answers a mention about the photo the group gate kept instead of answering the photo", async () => {
     downloadLineMediaMock.mockResolvedValueOnce({
       path: "/tmp/line-media/gated.jpg",
@@ -1558,6 +1606,7 @@ describe("handleLineWebhookEvents", () => {
       processMessage,
       groupPolicy: "open",
       requireMention: true,
+      requireMentionOnAllMessageTypes: true,
       groupHistories,
     });
 
@@ -1643,6 +1692,7 @@ describe("handleLineWebhookEvents", () => {
         processMessage,
         groupPolicy: "open",
         requireMention: true,
+        requireMentionOnAllMessageTypes: true,
         groupHistories,
       }),
     );
@@ -1681,6 +1731,7 @@ describe("handleLineWebhookEvents", () => {
         processMessage,
         groupPolicy: "open",
         requireMention: true,
+        requireMentionOnAllMessageTypes: true,
         groupHistories,
       }),
     );
@@ -1700,6 +1751,7 @@ describe("handleLineWebhookEvents", () => {
       processMessage,
       groupPolicy: "open",
       requireMention: true,
+      requireMentionOnAllMessageTypes: true,
       groupHistories,
     });
     const event = createTestMessageEvent({
@@ -1742,6 +1794,7 @@ describe("handleLineWebhookEvents", () => {
       processMessage,
       groupPolicy: "open",
       requireMention: true,
+      requireMentionOnAllMessageTypes: true,
       groupHistories,
     });
     const event = createTestMessageEvent({
@@ -1774,6 +1827,7 @@ describe("handleLineWebhookEvents", () => {
       processMessage,
       groupPolicy: "open",
       requireMention: true,
+      requireMentionOnAllMessageTypes: true,
       groupHistories,
       historyLimit: 0,
     });
