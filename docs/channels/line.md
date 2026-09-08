@@ -426,6 +426,17 @@ link-local, and private-network targets.
   429 can also reflect rate limits or temporary message reservations. Ordinary
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
+  LINE counts one message per request per recipient whatever that request carries, and a
+  reply is pushed five messages at a time, so a reply that renders as several bubbles spends
+  one message rather than one per bubble. Text long enough to be split into several chunks
+  still spends one per chunk, and several media URLs still spend one each.
+- **A whole reply is missing and the error names a message index:** LINE validates a push
+  request as a unit, so one message object it refuses takes the rest of that request with
+  it. The rejection names the position inside that request
+  (`A message (messages[1]) in the request body is invalid`), and a reply longer than five
+  messages spans more than one request, so count within the request rather than from the
+  start of the reply. Check the `channelData.line` value at that position; content OpenClaw
+  renders itself is bounded before it is sent.
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
   Inspect with `openclaw channels dead-letters list --channel line --account default`

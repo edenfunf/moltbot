@@ -854,6 +854,40 @@ describe("line outbound sendPayload", () => {
     expect(mocks.pushMessagesLine).not.toHaveBeenCalled();
   });
 
+  it("delivers the text a rejected media URL came with, and still surfaces the rejection", async () => {
+    // Media is built before the first request now, so a URL LINE will not carry
+    // must not take the words and buttons that travelled with it.
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+
+    await expect(
+      lineOutboundAdapter.sendPayload!({
+        to: "line:user:U123",
+        text: "Here is the chart.",
+        payload: {
+          text: "Here is the chart.",
+          mediaUrl: createCredentialBearingHttpUrl(),
+          channelData: { line: { quickReplies: ["Continue"] } },
+        },
+        accountId: "default",
+        cfg,
+      }),
+    ).rejects.toThrow(new Error("LINE outbound media URL must use HTTPS"));
+
+    expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
+      "line:user:U123",
+      [
+        {
+          type: "text",
+          text: "Here is the chart.",
+          quickReply: { items: ["Continue"] },
+        },
+      ],
+      { verbose: false, accountId: "default", cfg },
+    );
+  });
+
   it("keeps trackingId for user quick-reply inline video media", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
