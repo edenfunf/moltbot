@@ -441,8 +441,11 @@ link-local, and private-network targets.
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
   ```
 
-  That position counts inside the named request, not from the start of the reply: a reply is
-  pushed five messages at a time, so its sixth part is `messages[0]` of a second request. To
+  That position counts inside the request LINE refused, not from the start of the reply: a
+  reply is pushed five messages at a time, so its sixth part is `messages[0]` of a second
+  request. Nothing in the log tells those requests apart — only the refused one is recorded
+  — so a reply of five parts or fewer maps the position straight onto the reply, and a longer
+  one needs it counted again from each five-part boundary. To
   map a position onto what the reply contained, count it as OpenClaw assembles it: a card,
   template, or location from `channelData.line` comes first, then the reply text — each
   Markdown table and fenced code block that fits a card becomes one, an empty fenced block is
