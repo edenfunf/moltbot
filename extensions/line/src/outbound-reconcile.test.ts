@@ -293,6 +293,53 @@ describe("LINE unknown-send reconciliation", () => {
     );
   });
 
+  it("re-records a part whose previous plan has expired", async () => {
+    // The store counts an expired row as occupied — it does not filter the deadline —
+    // so the sweep before the claim is what lets the same delivery be recorded again
+    // once LINE has forgotten its keys. Without it every later attempt is refused.
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    expect(planKeys()).toHaveLength(1);
+    fetchMock.mockClear();
+
+    vi.setSystemTime(NOW + LINE_RETRY_KEY_TTL_MS + 2 * 60 * 60 * 1000);
+
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello again" });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(pushedRequests()[0]?.messages).toEqual([{ type: "text", text: "hello again" }]);
+  });
+
+  it("refuses a claim whose stored plan describes a different fan-out", async () => {
+    // A retry re-renders from live configuration. If it now plans a different number of
+    // parts, the stored plan is not this send's plan: replaying it would mix old and new
+    // parts in one delivery and wedge reconciliation on an inconsistent topology.
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    fetchMock.mockClear();
+
+    await expect(sendDurablePart({ partIndex: 0, partCount: 2, text: "hello" })).rejects.toThrow(
+      "was recorded for a different fan-out",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a claim whose stored plan names a different recipient", async () => {
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    fetchMock.mockClear();
+
+    await expect(
+      linePlugin.outbound?.sendPayload?.({
+        cfg: CFG,
+        to: "line:user:Ufedcba9876543210fedcba9876543210",
+        text: "hello",
+        payload: { text: "hello" },
+        deliveryQueueId: QUEUE_ID,
+        deliveryPartIndex: 0,
+        deliveryPartCount: 1,
+      } as never),
+    ).rejects.toThrow("was recorded for a different recipient");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("refuses to replay when a planned part was never dispatched", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 2, text: "first" });
     fetchMock.mockClear();

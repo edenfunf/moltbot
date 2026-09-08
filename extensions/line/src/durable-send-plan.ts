@@ -28,10 +28,11 @@ type LineDurablePush = {
  *
  * The whole fan-out is decided before any of it is sent — no LINE message in a
  * part depends on the result of an earlier one — so the record can be complete
- * rather than accumulated. A replay reissues these exact requests instead of
- * re-rendering the reply, which is what keeps a chunk-limit change or an upgrade
- * across the interruption from putting different content behind a key LINE has
- * already answered.
+ * rather than accumulated. A replay reissues these recorded requests instead of
+ * re-rendering the reply, which is what keeps a chunk-limit change across the
+ * interruption from putting different content behind a key LINE has already
+ * answered. Message normalization still runs on the way out, so this does not by
+ * itself pin the bytes across a change to that step.
  */
 type LineDurableSendPlan = {
   version: typeof PLAN_VERSION;
@@ -163,7 +164,7 @@ export async function recordLineDurableSendPlan(params: {
   const plan: LineDurableSendPlan = {
     version: PLAN_VERSION,
     queueId: params.queueId,
-    partIndex: requireIndex(params.partIndex, "part index"),
+    partIndex: params.partIndex,
     // Not coerced: the schema refuses a non-positive count below, before the first
     // push crosses the boundary. Substituting a value would record a topology the
     // delivery never had and let reconciliation call it complete.
@@ -206,6 +207,14 @@ export async function recordLineDurableSendPlan(params: {
       `LINE durable send plan part ${params.partIndex} was recorded for a different recipient`,
     );
   }
+  if (recorded.partCount !== params.partCount) {
+    // Same reasoning one dimension over. A retry that now plans a different number of
+    // parts would pair this stored part with parts the record never described, and the
+    // mismatch only surfaces later as an inconsistent topology that cannot be settled.
+    throw new LineDurableSendPlanError(
+      `LINE durable send plan part ${params.partIndex} was recorded for a different fan-out`,
+    );
+  }
   return recorded;
 }
 
@@ -243,12 +252,9 @@ export async function loadLineDurableSendPlans(queueId: string): Promise<LineDur
 }
 
 function assertCompletePartTopology(plans: readonly LineDurableSendPlan[]): void {
-  const partCount = plans[0]?.partCount;
-  if (!partCount) {
-    // Callers answer an empty record before they get here, and a stored part
-    // count is at least one, so this is a plan whose topology did not survive.
-    throw new LineDurableSendPlanError("LINE durable send plan has no part count");
-  }
+  // The caller answers an empty record before it gets here and the schema refuses a
+  // non-positive count, so there is always a first plan and its count is at least one.
+  const partCount = plans[0]!.partCount;
   if (plans.some((plan) => plan.partCount !== partCount)) {
     throw new LineDurableSendPlanError("LINE durable send plan part topology is inconsistent");
   }
