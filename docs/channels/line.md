@@ -258,16 +258,21 @@ the plan namespace is full, `plugin blob entry exceeds the configured 1048576 by
 limit` when this one part's record is itself too large, and other store errors when the
 state directory will not take the write.
 
-Three more come from the moment a part claims its record, and they name a conflict
+Four more come from the moment a part claims its record, and they name a conflict
 rather than a storage fault. `LINE durable send plan part N was recorded for a different
-recipient` and `... for a different fan-out` mean a record already exists under this
-delivery's key but does not describe this send. The fan-out one is the reachable one:
+recipient`, `... for a different fan-out` and `... for a different account` mean a record
+already exists under this delivery's key but does not describe this send. The account one
+is the dimension that decides deduplication: LINE remembers a retry key per channel, so a
+record claimed under one account says nothing about what another account's channel took. The fan-out one is the reachable one:
 if the reply now splits into a different number of parts than the attempt that recorded
 it — an upgrade between attempts that changes how a reply is split — the claim is
 refused. Each retry of that queued send renders the reply again from the same payload,
 so it produces the same new shape and is refused the same way, and the reply does not
 go out. Send it again as a new message rather than waiting. `... disappeared while being recorded` means the record
-was claimed and then vanished before it could be read back; nothing was sent.
+was claimed and then vanished before it could be read back; nothing was sent. One more,
+`LINE durable send plan part index must be a non-negative integer`, means a send reached
+the recorder without the part coordinates its route is supposed to carry; nothing is sent
+under a topology that was guessed at.
 
 **A refused record does not always mean nothing was sent.** A reply is split into
 parts — one per text chunk, one per media file — and each part records itself just
@@ -574,7 +579,7 @@ link-local, and private-network targets.
 A media send that carries a caption arrives as two LINE messages, the caption first
 and the media after it, because every physical send is recorded separately so an
 interrupted one can be resolved (see
-[Outbound replies that could not be reconciled](#outbound-replies-that-could-not-be-reconciled)).
+[Outbound durability](#outbound-durability)).
 They are two requests, not one, so a failure between them leaves the caption
 delivered and the media not. The caption goes through the same markdown handling as
 an agent reply, so a table in it arrives as a card rather than as literal pipes.

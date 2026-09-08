@@ -378,20 +378,32 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
   renderPresentation: ({ payload, presentation }) => renderLinePresentation(payload, presentation),
-  sendPayload: sendLinePayload,
+  // Core plans parts for text and media but not for a structured payload, because a
+  // payload is one part of one; it is stated here rather than substituted at the
+  // recorder, which must keep refusing a route that lost its real coordinates.
+  // Matrix's adapter draws the same line in the same place.
+  sendPayload: async (ctx) =>
+    await sendLinePayload({
+      ...ctx,
+      // Present and undefined on this route (`deliver-channel.ts`), so spreading a
+      // default under it would be overwritten by the absent value.
+      deliveryPartIndex: ctx.deliveryPartIndex ?? 0,
+      deliveryPartCount: ctx.deliveryPartCount ?? 1,
+    }),
   ...createAttachedChannelResultAdapter({
     channel: "line",
     // The payload owner records each physical send before the next fallible step;
     // bypassing it fabricates Flex-only ids and loses partial-delivery evidence.
+    // These two keep the coordinates core planned for them.
     sendText: async (ctx) =>
-      await lineOutboundAdapter.sendPayload!({
+      await sendLinePayload({
         ...ctx,
         payload: { text: ctx.text },
       }),
     // Media rides the same payload owner as text: it is the only path that records
     // every push of the fan-out, and splitting it would let the two routes drift.
     sendMedia: async (ctx) =>
-      await lineOutboundAdapter.sendPayload!({
+      await sendLinePayload({
         ...ctx,
         payload: { text: ctx.text, mediaUrl: ctx.mediaUrl },
       }),

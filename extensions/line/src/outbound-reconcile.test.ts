@@ -3,6 +3,7 @@ import type { ChannelMessageUnknownSendContext } from "openclaw/plugin-sdk/chann
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../api.js";
 import { linePlugin } from "./channel.js";
+import { recordLineDurableSendPlan } from "./durable-send-plan.js";
 import {
   createLineBlobStoreState,
   type LineBlobStoreFake,
@@ -390,28 +391,43 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("records a payload core planned no parts for as the single part it is", async () => {
+    // Core sets part coordinates in its text and media planners only; a structured
+    // payload — the `ask_user` prompt, an exec-approval prompt — arrives with none.
+    // Refusing it here would fail those prompts outright on a required durable send.
+    await linePlugin.outbound?.sendPayload?.({
+      cfg: CFG,
+      to: TARGET,
+      text: "pick one",
+      payload: { text: "pick one" },
+      deliveryQueueId: QUEUE_ID,
+    } as never);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [key] = planKeys();
+    expect(readPlan(key!)).toMatchObject({ partIndex: 0, partCount: 1 });
+    expect(pushedRequests()[0]?.retryKey).toBe(
+      resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 0, pushIndex: 0 }),
+    );
+  });
+
   it.each([
-    [{}, "part index must be a non-negative integer"],
-    [{ deliveryPartIndex: 0 }, "cannot be recorded"],
-  ])(
-    "refuses to record a delivery whose part topology core did not supply",
-    async (topology, message) => {
-      // Substituting "part 0 of 1" would record a topology the delivery never had and
-      // let reconciliation call a fan-out complete that it never saw the whole of.
-      await expect(
-        linePlugin.outbound?.sendPayload?.({
-          cfg: CFG,
-          to: TARGET,
-          text: "hello",
-          payload: { text: "hello" },
-          deliveryQueueId: QUEUE_ID,
-          ...topology,
-        } as never),
-      ).rejects.toThrow(message);
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(planKeys()).toHaveLength(0);
-    },
-  );
+    [{ partIndex: undefined, partCount: 1 }, "part index must be a non-negative integer"],
+    [{ partIndex: 0, partCount: undefined }, "cannot be recorded"],
+  ])("refuses to record a part whose topology its caller lost", async (topology, message) => {
+    // The default above belongs to the payload route, which knows it is one part of
+    // one. Any other route reaching the recorder without coordinates has lost them,
+    // and substituting a value there would record a topology the delivery never had.
+    await expect(
+      recordLineDurableSendPlan({
+        queueId: QUEUE_ID,
+        to: TARGET,
+        pushes: [{ retryKey: "k", messages: [{ type: "text", text: "hello" }] }],
+        ...topology,
+      }),
+    ).rejects.toThrow(message);
+    expect(planKeys()).toHaveLength(0);
+  });
 
   it("refuses to replay when a planned part was never dispatched", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 2, text: "first" });
