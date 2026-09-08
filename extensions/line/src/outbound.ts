@@ -553,6 +553,9 @@ export const lineMessageAdapter = defineChannelMessageAdapter({
     // Every queued LINE send records its pushes, so reconciliation is not limited to
     // callers that ask for it: without this, an ordinary send that crashes mid-flight
     // is dead-lettered even though the record needed to resolve it is already on disk.
+    // Declaring it here is also why no caller has to require it as a capability, which
+    // would raise durability to `required` and turn a failed queue write from a reply
+    // still delivered live into no reply at all.
     automaticUnknownSendReconciliation: true,
     capabilities: { ...lineMessageAdapterBase.durableFinal?.capabilities, afterCommit: true },
     // Every platform send inside one payload carries its own durable key, so a

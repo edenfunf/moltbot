@@ -1,5 +1,4 @@
 // Line plugin module implements monitor durable behavior.
-import { deriveDurableFinalDeliveryRequirements } from "openclaw/plugin-sdk/channel-outbound";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import type { LineChannelData } from "./types.js";
@@ -7,7 +6,6 @@ import type { LineChannelData } from "./types.js";
 type LineDurableReplyOptions = {
   to: string;
   replyToId: null;
-  requiredCapabilities: ReturnType<typeof deriveDurableFinalDeliveryRequirements>;
 };
 
 function hasLineChannelData(payload: ReplyPayload): boolean {
@@ -50,15 +48,5 @@ export function resolveLineDurableReplyOptions(params: {
     // explicitly stops core resolving the inbound quote id from the turn context and
     // requiring a `replyTo` capability the send would not use.
     replyToId: null,
-    // Reconciliation is not requested here. The adapter already declares
-    // automaticUnknownSendReconciliation, which is what earns this send its durable
-    // intent id — the retry key LINE answers with 409 when a replayed part was
-    // already accepted. Requiring it as well would only raise durability to
-    // `required`, and that turns a failed queue write from a reply delivered live
-    // with a warning into no reply at all. A live-only send leaves no queue row, so
-    // nothing ever replays it; the duplicate that would justify the cost cannot happen.
-    requiredCapabilities: deriveDurableFinalDeliveryRequirements({
-      payload: params.payload,
-    }),
   };
 }

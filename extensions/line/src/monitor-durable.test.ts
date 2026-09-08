@@ -12,16 +12,12 @@ describe("resolveLineDurableReplyOptions", () => {
         replyToken: "reply-token",
         replyTokenUsed: true,
       }),
+      // No requiredCapabilities: core derives them from this payload and the explicit
+      // null reply-to, and nothing here would answer differently. Naming them again
+      // would mirror that derivation from fewer inputs.
     ).toEqual({
       to: "U123",
       replyToId: null,
-      // No reconcileUnknownSend: the adapter's automatic reconciliation already earns
-      // this send its durable intent id, and requiring it would only make a failed
-      // queue write drop the reply instead of delivering it live.
-      requiredCapabilities: {
-        text: true,
-        messageSendingHooks: true,
-      },
     });
   });
 
