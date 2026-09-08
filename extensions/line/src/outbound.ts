@@ -402,9 +402,11 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
  * LINE has no read-only "was this accepted?" endpoint, so reconciliation reissues
  * the requests the interrupted send recorded, under the very keys it used: a push
  * LINE already accepted answers 409 with its original receipt, and one that never
- * landed is delivered now. Nothing is re-rendered — the recorded bytes are what
- * goes back out — so a reply that would render differently today still resolves
- * as the one LINE was actually asked to take.
+ * landed is delivered now. The reply is not rendered again: the recorded messages are
+ * what go back out, so a reply that would render differently today still resolves as
+ * the one LINE was actually asked to take. They do pass through the same message
+ * normalization the live send used, which is where a future change could still move
+ * them relative to the recorded request.
  */
 async function reconcileLineUnknownSend(
   ctx: ChannelMessageUnknownSendContext,
