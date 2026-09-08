@@ -417,9 +417,9 @@ link-local, and private-network targets.
 - **Channel reports as not configured after it used to work:** a `tokenFile` or
   `secretFile` that names a path OpenClaw cannot read counts as unconfigured, not as
   configured. `openclaw status` shows the account under `Degraded secrets` with the
-  config path that failed, and the Gateway logs
-  `channel startup failed: Secret owner account:line:<id> is configured but
-unavailable`. Restore the file, or point the key at one that can be read.
+  config path that failed, and the Gateway logs a startup failure naming that secret
+  owner as configured but unavailable. Restore the file, or point the key at a path
+  that can be read.
 - **No inbound events:** confirm the webhook path matches `channels.line.webhookPath`
   and that the gateway is reachable from LINE.
 - **Media download errors:** raise `channels.line.mediaMaxMb` if media exceeds the
