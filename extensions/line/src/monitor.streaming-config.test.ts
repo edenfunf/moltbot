@@ -1,4 +1,5 @@
 // Line tests cover the channel-scoped block streaming choice reaching the turn.
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,12 +7,19 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 type LineHandleWebhook = ReturnType<typeof import("./bot.js").createLineBot>["handleWebhook"];
 type LineBotOptions = Parameters<typeof import("./bot.js").createLineBot>[0];
 
-const { createLineBotMock, registerWebhookTargetWithPluginRouteMock } = vi.hoisted(() => ({
+type LineNodeWebhookHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+const {
+  createLineBotMock,
+  createLineNodeWebhookHandlerMock,
+  registerWebhookTargetWithPluginRouteMock,
+} = vi.hoisted(() => ({
   createLineBotMock: vi.fn((_options: LineBotOptions) => ({
     account: { accountId: "default" },
     handleWebhook: vi.fn<LineHandleWebhook>().mockResolvedValue("durable"),
     stop: vi.fn(async () => {}),
   })),
+  createLineNodeWebhookHandlerMock: vi.fn(() => async () => {}),
   registerWebhookTargetWithPluginRouteMock: vi.fn(),
 }));
 
@@ -40,6 +48,20 @@ vi.mock("openclaw/plugin-sdk/webhook-ingress", async () => {
   };
 });
 
+// The provider builds a real node webhook handler and hands work to the detached
+// webhook runner; leaving either unmocked keeps the worker alive after the test ends.
+vi.mock("./webhook-node.js", async () => {
+  const actual = await vi.importActual<typeof import("./webhook-node.js")>("./webhook-node.js");
+  return { ...actual, createLineNodeWebhookHandler: createLineNodeWebhookHandlerMock };
+});
+
+vi.mock("openclaw/plugin-sdk/webhook-request-guards", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/webhook-request-guards")>(
+    "openclaw/plugin-sdk/webhook-request-guards",
+  );
+  return { ...actual, runDetachedWebhookWork: vi.fn() };
+});
+
 vi.mock("./auto-reply-delivery.js", () => ({ deliverLineAutoReply: vi.fn() }));
 vi.mock("./markdown-to-line.js", () => ({ processLineMessage: vi.fn() }));
 vi.mock("./send.js", () => ({
@@ -63,6 +85,8 @@ afterAll(() => {
   vi.doUnmock("openclaw/plugin-sdk/reply-runtime");
   vi.doUnmock("openclaw/plugin-sdk/runtime-env");
   vi.doUnmock("openclaw/plugin-sdk/webhook-ingress");
+  vi.doUnmock("openclaw/plugin-sdk/webhook-request-guards");
+  vi.doUnmock("./webhook-node.js");
   vi.doUnmock("./auto-reply-delivery.js");
   vi.doUnmock("./markdown-to-line.js");
   vi.doUnmock("./send.js");
@@ -72,6 +96,7 @@ afterAll(() => {
 
 beforeEach(() => {
   createLineBotMock.mockClear();
+  createLineNodeWebhookHandlerMock.mockClear();
   // The provider unregisters its route on stop, so the double has to hand one back.
   registerWebhookTargetWithPluginRouteMock
     .mockReset()
