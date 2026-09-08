@@ -1,13 +1,10 @@
 // Line tests cover the channel-scoped block streaming choice reaching the turn.
-import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type LineHandleWebhook = ReturnType<typeof import("./bot.js").createLineBot>["handleWebhook"];
 type LineBotOptions = Parameters<typeof import("./bot.js").createLineBot>[0];
-
-type LineNodeWebhookHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
 const {
   createLineBotMock,
