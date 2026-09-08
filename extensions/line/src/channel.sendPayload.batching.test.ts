@@ -1,5 +1,8 @@
 // Line tests cover outbound request batching plugin behavior.
-import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  createChannelPartialDeliveryError,
+  isChannelPartialDeliveryError,
+} from "openclaw/plugin-sdk/channel-inbound";
 import { chunkMarkdownText as chunkMarkdownTextForLine } from "openclaw/plugin-sdk/reply-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../api.js";
@@ -10,6 +13,7 @@ import {
 } from "./channel.sendPayload.test-support.js";
 import { lineOutboundAdapter } from "./outbound.js";
 import { setLineRuntime } from "./runtime.js";
+import { createLineSendReceipt } from "./send-receipt.js";
 
 const ssrfMocks = vi.hoisted(() => ({
   resolvePinnedHostnameWithPolicy: vi.fn(),
@@ -208,5 +212,59 @@ describe("line outbound request batching", () => {
     // A refusal ends the payload: the parts queued behind it never reach LINE,
     // which is what the reply costs when its first request is the one refused.
     expect(mocks.pushMessagesLine).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the earlier requests when the failure carries delivery evidence of its own", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    mocks.resolveTextChunkLimit.mockReturnValue(5000);
+    mocks.chunkMarkdownText.mockImplementation((text: string) =>
+      chunkMarkdownTextForLine(text, 5000),
+    );
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    const card = ["```js", "card()", "```"].join("\n");
+    const text = Array.from({ length: 6 }, () => card).join("\n\n");
+    // LINE accepted the second request and its receipt then became unreadable,
+    // which the send path reports as a partial delivery of its own.
+    mocks.pushMessagesLine.mockImplementationOnce(async (_to, messages) => ({
+      messageId: "m-first",
+      chatId: "c1",
+      receipt: createLineSendReceipt({
+        messageId: "m-first",
+        messageIds: messages.map((_message, index) => `m-first-${index}`),
+        chatId: "c1",
+        kind: "text",
+      }),
+    }));
+    mocks.pushMessagesLine.mockRejectedValueOnce(
+      createChannelPartialDeliveryError(new Error("receipt unreadable"), {
+        messageIds: ["m-second"],
+        visibleReplySent: true,
+      }),
+    );
+
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text,
+      payload: { text },
+      accountId: "default",
+      cfg,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    if (!isChannelPartialDeliveryError(failure)) {
+      throw new Error("expected a partial LINE delivery error");
+    }
+    expect(failure.deliveryResult.messageIds).toEqual([
+      "m-first-0",
+      "m-first-1",
+      "m-first-2",
+      "m-first-3",
+      "m-first-4",
+      "m-second",
+    ]);
   });
 });

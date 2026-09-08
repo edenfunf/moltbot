@@ -8,6 +8,7 @@ import {
 import {
   defineChannelMessageAdapter,
   type ChannelMessageSendResult,
+  type MessageReceipt,
   type MessageReceiptPartKind,
 } from "openclaw/plugin-sdk/channel-outbound";
 import {
@@ -62,11 +63,17 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     const accepted: LineSendResult[] = [];
     // Whatever already reached the chat travels with every later failure; a bare
     // rejection reads as a delivery that never started and invites a replay.
-    const asPartialDelivery = (error: unknown) =>
+    const asPartialDelivery = (
+      error: unknown,
+      alsoDelivered?: { receipt?: MessageReceipt; messageIds?: string[] },
+    ) =>
       createChannelPartialDeliveryError(
         error,
         createAcceptedChannelDeliveryResult({
-          deliveryResults: accepted.map((result) => ({ receipt: result.receipt })),
+          deliveryResults: [
+            ...accepted.map((result) => ({ receipt: result.receipt })),
+            ...(alsoDelivered ? [alsoDelivered] : []),
+          ],
         }),
       );
     const recordResult = async (
@@ -77,7 +84,9 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         result = await resultPromise;
       } catch (error) {
         if (isChannelPartialDeliveryError(error)) {
-          throw error;
+          // The failure carries its own delivery evidence; the requests accepted
+          // before it have to survive alongside it, not be replaced by it.
+          throw accepted.length === 0 ? error : asPartialDelivery(error, error.deliveryResult);
         }
         if (lastResult !== null) {
           // Accepted parts keep their receipt and must not wait for quota diagnosis.
@@ -191,9 +200,9 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     }
 
     // Quick replies disappear as soon as a newer message arrives, so whatever
-    // must stay last carries them: media leads when the payload ends in text.
-    const endsInText = hasQuickReplies && bodyMessages.some((message) => message.type === "text");
-    const messages: messagingApi.Message[] = endsInText
+    // must stay last carries them: media leads whenever any of the body is text.
+    const bodyHasText = hasQuickReplies && bodyMessages.some((message) => message.type === "text");
+    const messages: messagingApi.Message[] = bodyHasText
       ? [...richMessages, ...mediaMessages, ...bodyMessages]
       : [...richMessages, ...bodyMessages, ...mediaMessages];
     if (hasQuickReplies && messages.length === 0 && deliveryError === undefined) {
