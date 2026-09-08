@@ -491,12 +491,12 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
         : senderId;
       // History has one sender string; keep the stable ID when display names collide.
       const sender = displayName === senderId ? senderId : `${displayName} (${senderId})`;
-      // An image is the only kind LINE serves bytes for that history can reattach:
-      // stickers reattach too, but LINE has no content endpoint for them. Nothing
-      // else is fetched for a message this group already declined to answer.
-      // Resolving before the record keeps the answered path's failure semantics: a
-      // retryable preparation error rejects the event for one replay, not a second
-      // record.
+      // Only images are fetched. LINE serves bytes for videos, audio messages and
+      // files too, but a later turn can reattach an image from history and nothing
+      // else, so those bytes would be downloaded for a message this group already
+      // declined to answer and then dropped. Resolving before the record keeps the
+      // answered path's failure semantics: a retryable preparation error rejects the
+      // event for one replay, not a second record.
       const download =
         message.type === "image" ? await downloadLineInboundMedia(event, context) : undefined;
       const media = download
