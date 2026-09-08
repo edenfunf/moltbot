@@ -136,6 +136,167 @@ Dead-lettered events stay inspectable and, depending on the failure reason,
 recoverable; see [Inbound dead letters](/cli/channels#inbound-dead-letters) and
 [Troubleshooting](#troubleshooting) below.
 
+## Outbound durability
+
+Some LINE sends are recorded before they go out so an interrupted one can be
+resolved instead of guessed at. This section says which sends those are, what the
+messages mean when recovery declines, and what it costs when the record itself
+cannot be written.
+
+### When a send could not be reconciled
+
+Some LINE sends are recorded before they go out: every push the reply will make is
+written down before the first of them leaves, so a send interrupted anywhere in that
+fan-out can be recovered by reissuing the recorded requests under the same retry keys
+— a push LINE already took answers 409 with its original receipt, and one that never
+landed goes out now. This runs on any retry of the same queued send, not only after a
+restart, and the record always wins over what the reply would render today.
+
+Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
+reply is recorded only when it is a final block, carries text without media or
+LINE-specific rich content, does not reply to one specific earlier message (LINE cannot
+quote by message id), and the event's reply token is spent or absent — so the first
+reply of an exchange, which is often the only one, is normally sent inline and not
+recorded.
+
+Sends queued by other callers follow the same capability rule. Anything the Gateway
+queues as a single prepared payload — `openclaw message send`, the agent's `message`
+tool, a cron delivery, the `ask_user` question prompt — is recorded **unless it asks for
+something this channel cannot do**: a reply-to, a thread, or a silent send. LINE
+declares none of those three, so a send carrying one gets no durable record, exactly as
+if it had not been queued.
+
+One class is excluded for a different reason, and it is not a misconfiguration. A
+Gateway conversation send — what the Control UI's chat and the `conversations` methods
+use — asks for queue persistence, and core reads that as "this caller settles its own
+delivery" and turns reconciliation off for it outright, whatever the channel supports.
+Those sends are queued and durable; they are simply not reconciled here.
+
+A send with no inbound LINE event behind it leaves nothing in
+`openclaw channels dead-letters list` when it fails. Where it does show up depends on
+the caller: most only log. A failed `ask_user` prompt cancels the question either way,
+and the agent is told so — as a tool error when the prompt never became visible, and as
+a result saying the controls failed to deliver when it did. A failed exec-approval
+prompt leaves a command waiting for an approval that was never asked for.
+
+The observable rule is simple: a send that was never recorded reports
+`LINE delivery carried no durable record, so a replay could not be deduplicated` when
+it needs reconciling. Seeing that message is how you know this send was not on the
+recorded path; it is not itself a fault.
+
+When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
+carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
+fire exactly when OpenClaw cannot tell whether LINE took the send, and it settles them
+as `unknown` rather than `failed` for that reason. Check the conversation before
+re-sending anything by hand; a blind resend is how the recipient gets two copies.
+These particular outcomes do not dead-letter the incoming event, so
+`openclaw channels dead-letters resubmit` is the wrong tool for them.
+
+- **`LINE retry key expired before the queued send could be reconciled`:** LINE forgets
+  a retry key 24 hours after the send was first handed to it, so a replay after that
+  window could no longer be deduplicated. Expect this only after an outage longer than
+  a day — sooner means the host clock moved.
+- **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
+  as above — this send was not on the recorded path, so its pushes used keys LINE will
+  not deduplicate. It is ordinary for the reply shapes listed above, and it is also the
+  only signal that a send you expected to be recorded was not: OpenClaw falls back to
+  the unrecorded path without logging that it did. To tell the two apart, check the
+  send against the conditions listed above — a reply carrying media, LINE rich content
+  or an explicit reply-to is expected here, and so is the first reply of an exchange,
+  which still holds its reply token. A plain-text reply that meets none of those and
+  still reports this is a defect worth reporting rather than a setting to change:
+  nothing in the configuration turns recording on or off.
+- **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply, or one
+  carrying several media files, is split into parts, and each part writes its record
+  before its first push leaves. A part with no record therefore never reached LINE,
+  while at least one other part got as far as starting to send. Reconciliation answers
+  for the whole queued send, and neither "sent" nor "not sent" is true of a delivery in
+  that state, so it refuses rather than resend parts the recipient may already have. The
+  named indexes are the parts with no record.
+- **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
+  `key is invalid`, `part topology is inconsistent`, `requires a queue id`,
+  `disappeared during reconciliation`) mean the stored evidence is not trustworthy
+  enough to replay from, so recovery declines rather than risk duplicating an accepted
+  push or dropping one LINE never received.
+
+None of the outcomes named above is retried: each settles the delivery as unresolved and
+not retryable, so nothing will arrive later — read what did reach the conversation, then
+send the rest by hand. A failure to _read_ the record back is the one exception. That is
+the storage layer failing rather than the record being untrustworthy, its message is the
+store's own, and it stays retryable, so a transient state-directory problem resolves on
+a later attempt instead of stranding the delivery.
+
+A refusal LINE itself returns while a replay is in flight is not on this list: it is
+surfaced verbatim, so the reason reads as LINE wrote it rather than as one of the
+messages above.
+
+#### When the record itself cannot be written
+
+Two things can fail before a send is recorded, and they end differently.
+
+If the **queue row** cannot be written, what happens depends on how the caller asked
+for the send. A LINE agent reply is best-effort, so it still goes out live and
+`openclaw logs` carries `outbound queue write failed; continuing without durability`.
+That send has no queue row, so nothing will ever replay it and nothing can reconcile
+it: if it is interrupted, it is simply lost. Callers that ask for a durable send
+outright — the `ask_user` prompt and the exec-approval prompt among them — get no such
+fallback and no such log line. Their send fails instead.
+
+If the **recorded plan** cannot be stored, that part of the send fails. When the send
+was answering an inbound message it is not silent about it: the turn has been adopted by
+the time it replies, so the LINE event that prompted it is dead-lettered rather than
+answered, under the reason `delivery-side-effects-committed`. As noted earlier on this page, that reason must never
+be resubmitted — the turn was already adopted, so re-enqueuing repeats the committed
+work. Fix the cause and let the sender ask again. A send with no inbound event behind it
+— a cron delivery, `openclaw message send`, an `ask_user` prompt — has nothing to
+dead-letter, so it fails wherever its own caller reports failures and leaves no queued
+record to find. What you see depends on which half of the store rejected it: a validation
+problem is reported as `LINE durable send plan part N cannot be recorded: ...`, while
+the plan store's own refusals surface unchanged and mention neither LINE nor the part —
+`Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
+the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
+limit` when this one part's record is itself too large, and other store errors when the
+state directory will not take the write.
+
+Three more come from the moment a part claims its record, and they name a conflict
+rather than a storage fault. `LINE durable send plan part N was recorded for a different
+recipient` and `... for a different fan-out` mean a record already exists under this
+delivery's key but does not describe this send. The fan-out one is the reachable one:
+if the reply now splits into a different number of parts than the attempt that recorded
+it — an upgrade between attempts that changes how a reply is split — the claim is
+refused. Each retry of that queued send renders the reply again from the same payload,
+so it produces the same new shape and is refused the same way, and the reply does not
+go out. Send it again as a new message rather than waiting. `... disappeared while being recorded` means the record
+was claimed and then vanished before it could be read back; nothing was sent.
+
+**A refused record does not always mean nothing was sent.** A reply is split into
+parts — one per text chunk, one per media file — and each part records itself just
+before its own pushes leave. Within one part that ordering is airtight: the record
+lands first, so a part whose record is refused sends nothing. Across parts it is not.
+If the store fills between part 2 and part 3, parts 1 and 2 are already on the
+recipient's phone and the rest never arrives. The turn fails and dead-letters, and
+because that dead letter must not be resubmitted, nothing retries it. The recipient
+keeps a truncated reply with no notice that it was cut off. Read a namespace-limit
+message as "some of this reply may already have been delivered" and check the
+conversation before doing anything by hand.
+
+The namespace limits clear as sends settle; the per-entry limit does not — a part whose
+record cannot fit will never fit, so that part is permanently undeliverable. It is
+worth knowing which replies can get there. A text reply is chunked into parts of at
+most the channel's message length, so each of its records stays small. A reply carrying
+structured content — a card, quick replies, a location — is handed to the channel whole
+as a single part, and every push it fans out into is recorded together, so that is the
+shape whose record can grow. No setting splits it: the chunk limit only plans parts for
+the text path, and LINE does not expose it as a setting anyway.
+
+One more consequence worth knowing before it bites. The plan namespace refuses new
+entries when full rather than evicting, with records kept about an hour past their
+twenty-four-hour window and cleared only as each send settles. The namespace is shared
+by the whole LINE plugin, not divided per account: one that fills up stops recorded
+replies for **every** LINE account on this Gateway until it drains, and there is no CLI
+or doctor command to inspect or clear it. Watch for the limit messages above; they are
+the only warning, and they arrive after replies have already started failing.
+
 ## Configure
 
 Minimal config:
@@ -410,6 +571,14 @@ Outbound media URLs must be public HTTPS URLs of at most 2000 characters. OpenCl
 validates the target hostname before handing the URL to LINE and rejects loopback,
 link-local, and private-network targets.
 
+A media send that carries a caption arrives as two LINE messages, the caption first
+and the media after it, because every physical send is recorded separately so an
+interrupted one can be resolved (see
+[Outbound replies that could not be reconciled](#outbound-replies-that-could-not-be-reconciled)).
+They are two requests, not one, so a failure between them leaves the caption
+delivered and the media not. The caption goes through the same markdown handling as
+an agent reply, so a table in it arrives as a card rather than as literal pipes.
+
 ## Troubleshooting
 
 - **Webhook verification fails:** ensure the webhook URL is HTTPS and the
@@ -452,148 +621,9 @@ link-local, and private-network targets.
   eventually exhausts the retry limit, so an event that stalls its way to a dead
   letter lands under `retry-limit-exceeded`, not under a timeout reason. Check
   `openclaw logs --follow` around the affected event id.
-
-### Outbound replies that could not be reconciled
-
-Some LINE sends are recorded before they go out: every push the reply will make is
-written down before the first of them leaves, so a send interrupted anywhere in that
-fan-out can be recovered by reissuing the recorded requests under the same retry keys
-— a push LINE already took answers 409 with its original receipt, and one that never
-landed goes out now. This runs on any retry of the same queued send, not only after a
-restart, and the record always wins over what the reply would render today.
-
-Not every send is recorded. On the inbound side the recorded set is narrow: a turn's
-reply is recorded only when it is a final block, carries text without media or
-LINE-specific rich content, does not reply to one specific earlier message (LINE cannot
-quote by message id), and the event's reply token is spent or absent — so the first
-reply of an exchange, which is often the only one, is normally sent inline and not
-recorded.
-
-Sends queued by other callers follow the same capability rule. The Gateway queues a
-single payload for `openclaw message send`, the agent's `message` tool, heartbeat and
-session-maintenance notices, transcript echoes, cron deliveries, exec-approval prompts
-and the `ask_user` question prompt, and each of those is recorded **unless it asks for
-something this channel cannot do** — a reply-to, a thread, or a silent send. LINE
-declares none of those three, so a send carrying one gets no durable record, exactly as
-if it had not been queued. None of these callers has an inbound LINE event behind it,
-so a failure leaves nothing in `openclaw channels dead-letters list`. Where it does show
-up depends on the caller: most only log, but a failed `ask_user` prompt cancels the
-question and hands the agent a tool error in place of an answer, and a failed
-exec-approval prompt leaves a command waiting for an approval that was never asked for.
-
-The observable rule is simple: a send that was never recorded reports
-`LINE delivery carried no durable record, so a replay could not be deduplicated` when
-it needs reconciling. Seeing that message is how you know this send was not on the
-recorded path; it is not itself a fault.
-
-When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
-carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
-fire exactly when OpenClaw cannot tell whether LINE took the send, and it settles them
-as `unknown` rather than `failed` for that reason. Check the conversation before
-re-sending anything by hand; a blind resend is how the recipient gets two copies.
-These particular outcomes do not dead-letter the incoming event, so
-`openclaw channels dead-letters resubmit` is the wrong tool for them.
-
-- **`LINE retry key expired before the queued send could be reconciled`:** LINE forgets
-  a retry key 24 hours after the send was first handed to it, so a replay after that
-  window could no longer be deduplicated. Expect this only after an outage longer than
-  a day — sooner means the host clock moved.
-- **`LINE delivery carried no durable record, so a replay could not be deduplicated`:**
-  as above — this send was not on the recorded path, so its pushes used keys LINE will
-  not deduplicate. It is ordinary for the reply shapes listed above, and it is also the
-  only signal that a send you expected to be recorded was not: OpenClaw falls back to
-  the unrecorded path without logging that it did. Seeing it for replies that used to
-  be recorded means that fallback is now being taken every time, which is worth
-  investigating rather than ignoring.
-- **`LINE ambiguous delivery is missing recorded parts: ...`:** a long reply, or one
-  carrying several media files, is split into parts, and each part writes its record
-  before its first push leaves. A part with no record therefore never reached LINE,
-  while at least one other part got as far as starting to send. Reconciliation answers
-  for the whole queued send, and neither "sent" nor "not sent" is true of a delivery in
-  that state, so it refuses rather than resend parts the recipient may already have. The
-  named indexes are the parts with no record.
-- **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
-  `key is invalid`, `part topology is inconsistent`, `requires a queue id`,
-  `disappeared during reconciliation`) mean the stored evidence is not trustworthy
-  enough to replay from, so recovery declines rather than risk duplicating an accepted
-  push or dropping one LINE never received.
-
-None of the outcomes named above is retried: each settles the delivery as unresolved and
-not retryable, so nothing will arrive later — read what did reach the conversation, then
-send the rest by hand. A failure to _read_ the record back is the one exception. That is
-the storage layer failing rather than the record being untrustworthy, its message is the
-store's own, and it stays retryable, so a transient state-directory problem resolves on
-a later attempt instead of stranding the delivery.
-
-A refusal LINE itself returns while a replay is in flight is not on this list: it is
-surfaced verbatim, so the reason reads as LINE wrote it rather than as one of the
-messages above.
-
-#### When the record itself cannot be written
-
-Two things can fail before a send is recorded, and they end differently.
-
-If the **queue row** cannot be written, what happens depends on how the caller asked
-for the send. A LINE agent reply is best-effort, so it still goes out live and
-`openclaw logs` carries `outbound queue write failed; continuing without durability`.
-That send has no queue row, so nothing will ever replay it and nothing can reconcile
-it: if it is interrupted, it is simply lost. Callers that ask for a durable send
-outright — the `ask_user` prompt and the exec-approval prompt among them — get no such
-fallback and no such log line. Their send fails instead.
-
-If the **recorded plan** cannot be stored, that part of the send fails. When the send
-was answering an inbound message it is not silent about it: the LINE event that prompted
-it is dead-lettered rather than answered, under the reason
-`delivery-side-effects-committed`. As noted earlier on this page, that reason must never
-be resubmitted — the turn was already adopted, so re-enqueuing repeats the committed
-work. Fix the cause and let the sender ask again. A send with no inbound event behind it
-— a cron delivery, `openclaw message send`, an `ask_user` prompt — has nothing to
-dead-letter, so it fails wherever its own caller reports failures and leaves no queued
-record to find. What you see depends on which half of the store rejected it: a validation
-problem is reported as `LINE durable send plan part N cannot be recorded: ...`, while
-the plan store's own refusals surface unchanged and mention neither LINE nor the part —
-`Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
-the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
-limit` when this one part's record is itself too large, and other store errors when the
-state directory will not take the write.
-
-Three more come from the moment a part claims its record, and they name a conflict
-rather than a storage fault. `LINE durable send plan part N was recorded for a different
-recipient` and `... for a different fan-out` mean a record already exists under this
-delivery's key but does not describe this send. The fan-out one is the reachable one:
-if the reply now splits into a different number of parts than the attempt that recorded
-it — an upgrade between attempts that changes how a reply is split — every retry
-re-renders the same new shape and is refused again, so that reply never goes out. Send it again as a
-new message rather than waiting. `... disappeared while being recorded` means the record
-was claimed and then vanished before it could be read back; nothing was sent.
-
-**A refused record does not always mean nothing was sent.** A reply is split into
-parts — one per text chunk, one per media file — and each part records itself just
-before its own pushes leave. Within one part that ordering is airtight: the record
-lands first, so a part whose record is refused sends nothing. Across parts it is not.
-If the store fills between part 2 and part 3, parts 1 and 2 are already on the
-recipient's phone and the rest never arrives. The turn fails and dead-letters, and
-because that dead letter must not be resubmitted, nothing retries it. The recipient
-keeps a truncated reply with no notice that it was cut off. Read a namespace-limit
-message as "some of this reply may already have been delivered" and check the
-conversation before doing anything by hand.
-
-The namespace limits clear as sends settle; the per-entry limit does not — a part whose
-record cannot fit will never fit, so that part is permanently undeliverable. It is
-worth knowing which replies can get there. A text reply is chunked into parts of at
-most the channel's message length, so each of its records stays small. A reply carrying
-structured content — a card, quick replies, a location — is handed to the channel whole
-as a single part, and every push it fans out into is recorded together, so that is the
-shape whose record can grow. No setting splits it: the chunk limit only plans parts for
-the text path, and LINE does not expose it as a setting anyway.
-
-One more consequence worth knowing before it bites. The plan namespace refuses new
-entries when full rather than evicting, with records kept about an hour past their
-twenty-four-hour window and cleared only as each send settles. The namespace is shared
-by the whole LINE plugin, not divided per account: one that fills up stops recorded
-replies for **every** LINE account on this Gateway until it drains, and there is no CLI
-or doctor command to inspect or clear it. Watch for the limit messages above; they are
-the only warning, and they arrive after replies have already started failing.
+- **A reply that could not be reconciled after a restart:** see
+  [Outbound durability](#outbound-durability) for what each of those messages means
+  and which of them are ordinary.
 
 ## Related
 

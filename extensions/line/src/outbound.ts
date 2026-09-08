@@ -283,8 +283,8 @@ async function sendLinePayload({
       ? (
           await recordLineDurableSendPlan({
             queueId: deliveryQueueId,
-            partIndex: deliveryPartIndex ?? 0,
-            partCount: deliveryPartCount ?? 1,
+            partIndex: deliveryPartIndex,
+            partCount: deliveryPartCount,
             to,
             ...(accountId ? { accountId } : {}),
             pushes: plannedPushes.map((messages, pushIndex) => ({
@@ -330,7 +330,7 @@ async function dispatchLinePushes(params: {
   for (const push of params.pushes) {
     let result: LineSendResult;
     try {
-      result = await sendBatch(params.to, push.messages as never, {
+      result = await sendBatch(params.to, push.messages, {
         verbose: false,
         cfg: params.cfg,
         accountId,
@@ -511,7 +511,7 @@ async function reconcileLineUnknownSend(
         error: formatErrorMessage(error),
         // An ambiguous failure stays retryable: the derived retry key makes a
         // replay safe for 24 hours even if the interrupted attempt did land.
-        retryable: !(error instanceof LineDurableSendPlanError) && (nonDispatchRetryable ?? true),
+        retryable: nonDispatchRetryable ?? true,
       };
     }
   }

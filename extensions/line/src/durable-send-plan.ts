@@ -72,8 +72,8 @@ function createPlanStore() {
   });
 }
 
-function requireIndex(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
+function requireIndex(value: number | undefined, label: string): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
     throw new LineDurableSendPlanError(
       `LINE durable send plan ${label} must be a non-negative integer`,
     );
@@ -89,7 +89,7 @@ function queuePrefix(queueId: string): string {
   return `${createHash("sha256").update(normalized).digest("hex")}.`;
 }
 
-function planKey(queueId: string, partIndex: number): string {
+function planKey(queueId: string, partIndex: number | undefined): string {
   return `${queuePrefix(queueId)}${requireIndex(partIndex, "part index")}`;
 }
 
@@ -152,21 +152,25 @@ function decodePlan(bytes: Uint8Array): LineDurableSendPlan {
  */
 export async function recordLineDurableSendPlan(params: {
   queueId: string;
-  partIndex: number;
-  partCount: number;
+  /**
+   * The delivery's own part coordinates, passed through rather than defaulted: a
+   * substituted index or count records a topology the delivery never had, and both
+   * are refused below instead.
+   */
+  partIndex: number | undefined;
+  partCount: number | undefined;
   to: string;
   accountId?: string;
   pushes: LineDurablePush[];
 }): Promise<LineDurableSendPlan> {
   const key = planKey(params.queueId, params.partIndex);
   const store = createPlanStore();
-  const plan: LineDurableSendPlan = {
+  // Typed as the input rather than as a valid plan: the schema below is what decides
+  // whether it is one, and pre-declaring it valid would hide a missing part count.
+  const plan = {
     version: PLAN_VERSION,
     queueId: params.queueId,
     partIndex: params.partIndex,
-    // Not coerced: the schema refuses a non-positive count below, before the first
-    // push crosses the boundary. Substituting a value would record a topology the
-    // delivery never had and let reconciliation call it complete.
     partCount: params.partCount,
     to: params.to,
     ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
@@ -216,6 +220,15 @@ export async function recordLineDurableSendPlan(params: {
     // mismatch only surfaces later as an inconsistent topology that cannot be settled.
     throw new LineDurableSendPlanError(
       `LINE durable send plan part ${params.partIndex} was recorded for a different fan-out`,
+    );
+  }
+  if (recorded.accountId !== recordable.accountId) {
+    // The dimension deduplication actually runs on: LINE remembers a retry key per
+    // channel, so a record claimed under one account says nothing about whether the
+    // other account's channel accepted the same key. Replaying it there would deliver
+    // a second copy.
+    throw new LineDurableSendPlanError(
+      `LINE durable send plan part ${params.partIndex} was recorded for a different account`,
     );
   }
   return recorded;

@@ -75,7 +75,6 @@ function planKeys(): string[] {
 
 /** Stored plan shape the tests reshape to stand in for an interrupted run. */
 type StoredPlan = Record<string, unknown> & {
-  payload: Record<string, unknown>;
   pushes: { retryKey: string; messages: unknown[] }[];
 };
 
@@ -370,6 +369,50 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("refuses a claim whose stored plan names a different account", async () => {
+    // LINE remembers a retry key per channel, so a record claimed under one account
+    // says nothing about whether another account's channel accepted the same key.
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    fetchMock.mockClear();
+
+    await expect(
+      linePlugin.outbound?.sendPayload?.({
+        cfg: CFG,
+        to: TARGET,
+        text: "hello",
+        payload: { text: "hello" },
+        accountId: "second",
+        deliveryQueueId: QUEUE_ID,
+        deliveryPartIndex: 0,
+        deliveryPartCount: 1,
+      } as never),
+    ).rejects.toThrow("was recorded for a different account");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{}, "part index must be a non-negative integer"],
+    [{ deliveryPartIndex: 0 }, "cannot be recorded"],
+  ])(
+    "refuses to record a delivery whose part topology core did not supply",
+    async (topology, message) => {
+      // Substituting "part 0 of 1" would record a topology the delivery never had and
+      // let reconciliation call a fan-out complete that it never saw the whole of.
+      await expect(
+        linePlugin.outbound?.sendPayload?.({
+          cfg: CFG,
+          to: TARGET,
+          text: "hello",
+          payload: { text: "hello" },
+          deliveryQueueId: QUEUE_ID,
+          ...topology,
+        } as never),
+      ).rejects.toThrow(message);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(planKeys()).toHaveLength(0);
+    },
+  );
+
   it("refuses to replay when a planned part was never dispatched", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 2, text: "first" });
     fetchMock.mockClear();
@@ -432,10 +475,12 @@ describe("LINE unknown-send reconciliation", () => {
     const store = createLineBlobStoreState();
     setLineRuntime({
       state: {
+        // One row, and it is taken below: the store refuses a zero ceiling when it is
+        // opened, so a full namespace has to be reached rather than declared.
         openBlobStore: (options: { namespace: string }) =>
           store.state.openBlobStore({
             ...options,
-            maxEntries: 0,
+            maxEntries: 1,
             overflowPolicy: "reject-new",
           }),
       },
@@ -443,10 +488,20 @@ describe("LINE unknown-send reconciliation", () => {
         text: { chunkMarkdownText: (text: string) => [text], resolveTextChunkLimit: () => 5000 },
       },
     } as unknown as PluginRuntime);
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "the one row this holds" });
+    fetchMock.mockClear();
 
-    await expect(sendDurableFlexPart()).rejects.toThrow(
-      "Plugin blob namespace reached its stored row limit.",
-    );
+    await expect(
+      linePlugin.outbound?.sendPayload?.({
+        cfg: CFG,
+        to: TARGET,
+        text: "hello",
+        payload: { text: "hello" },
+        deliveryQueueId: "queue-entry-2",
+        deliveryPartIndex: 0,
+        deliveryPartCount: 1,
+      } as never),
+    ).rejects.toThrow("Plugin blob namespace reached its stored row limit.");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
