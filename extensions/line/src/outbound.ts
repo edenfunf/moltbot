@@ -194,10 +194,21 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     }
 
     await sendMessageBatch(messages);
-    if (deliveryError !== undefined) {
-      throw deliveryError;
-    }
     const completedResult = lastResult as LineSendResult | null;
+    if (deliveryError !== undefined) {
+      if (!completedResult) {
+        throw deliveryError;
+      }
+      // The rest of the reply is already in the chat, so a media URL LINE will
+      // not carry must not be reported as a delivery that never started.
+      throw createChannelPartialDeliveryError(deliveryError, {
+        messageIds: completedResult.receipt
+          ? listMessageReceiptPlatformIds(completedResult.receipt)
+          : [],
+        ...(completedResult.receipt ? { receipt: completedResult.receipt } : {}),
+        visibleReplySent: true,
+      });
+    }
     if (!completedResult) {
       throw new Error("Message must be non-empty for LINE sends");
     }

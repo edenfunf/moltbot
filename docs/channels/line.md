@@ -426,17 +426,24 @@ link-local, and private-network targets.
   429 can also reflect rate limits or temporary message reservations. Ordinary
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
-  LINE counts one message per request per recipient whatever that request carries, and a
-  reply is pushed five messages at a time, so a reply that renders as several bubbles spends
-  one message rather than one per bubble. Text long enough to be split into several chunks
-  still spends one per chunk, and several media URLs still spend one each.
-- **A whole reply is missing and the error names a message index:** LINE validates a push
-  request as a unit, so one message object it refuses takes the rest of that request with
-  it. The rejection names the position inside that request
-  (`A message (messages[1]) in the request body is invalid`), and a reply longer than five
-  messages spans more than one request, so count within the request rather than from the
-  start of the reply. Check the `channelData.line` value at that position; content OpenClaw
-  renders itself is bounded before it is sent.
+  A reply is pushed five messages at a time, and LINE counts one message per request per
+  recipient whatever that request carries, so a reply that renders as several bubbles costs
+  one message per five bubbles rather than one each. A plain text reply — one with no card,
+  quick replies, or location — is split into chunks before it reaches the channel, so it
+  still costs one message per chunk, and its media URLs still cost one each.
+- **A whole reply is missing:** LINE validates a push request as a unit, so one message
+  object it refuses takes the rest of that request with it — up to five messages, because a
+  reply is pushed five at a time. The failure carries only the status; run the Gateway with
+  `--verbose` to also record LINE’s own explanation, which names the rejected position
+  inside that request:
+
+  ```text
+  line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
+  ```
+
+  Content OpenClaw renders itself is bounded before it is sent, so a refusal points at a
+  `channelData.line` value the reply supplied.
+
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
   Inspect with `openclaw channels dead-letters list --channel line --account default`

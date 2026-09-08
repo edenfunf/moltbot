@@ -861,20 +861,23 @@ describe("line outbound sendPayload", () => {
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
 
-    await expect(
-      lineOutboundAdapter.sendPayload!({
-        to: "line:user:U123",
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text: "Here is the chart.",
+      payload: {
         text: "Here is the chart.",
-        payload: {
-          text: "Here is the chart.",
-          mediaUrl: createCredentialBearingHttpUrl(),
-          channelData: { line: { quickReplies: ["Continue"] } },
-        },
-        accountId: "default",
-        cfg,
-      }),
-    ).rejects.toThrow(new Error("LINE outbound media URL must use HTTPS"));
+        mediaUrl: createCredentialBearingHttpUrl(),
+        channelData: { line: { quickReplies: ["Continue"] } },
+      },
+      accountId: "default",
+      cfg,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
 
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    expect(String((failure as Error).cause)).toContain("must use HTTPS");
     expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
       "line:user:U123",
       [
@@ -886,6 +889,46 @@ describe("line outbound sendPayload", () => {
       ],
       { verbose: false, accountId: "default", cfg },
     );
+  });
+
+  it("keeps the media LINE will carry when a sibling URL is refused", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text: "Two charts.",
+      payload: {
+        text: "Two charts.",
+        mediaUrls: [createCredentialBearingHttpUrl(), "https://example.com/second.png"],
+      },
+      accountId: "default",
+      cfg,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    // One refused URL must not take the other media or the text with it, and the
+    // failure has to carry the evidence that part of the reply is already visible.
+    expect(sentMessages(mocks)).toEqual([
+      { type: "text", text: "Two charts." },
+      {
+        type: "image",
+        originalContentUrl: "https://example.com/second.png",
+        previewImageUrl: "https://example.com/second.png",
+      },
+    ]);
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    if (!isChannelPartialDeliveryError(failure)) {
+      throw new Error("expected a partial LINE delivery error");
+    }
+    expect(failure.deliveryResult).toMatchObject({
+      messageIds: ["m-batch"],
+      visibleReplySent: true,
+    });
+    expect(String((failure as Error).cause)).toContain("must use HTTPS");
   });
 
   it("keeps trackingId for user quick-reply inline video media", async () => {
