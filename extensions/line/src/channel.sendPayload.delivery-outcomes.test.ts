@@ -215,6 +215,7 @@ describe("line outbound delivery outcomes", () => {
       () => undefined,
       (error: unknown) => error,
     );
+    const cause = failure instanceof Error ? failure.cause : undefined;
 
     // Five messages are already in the chat, so the refusal of the second
     // request has to carry them rather than read as a send that never started.
@@ -226,7 +227,7 @@ describe("line outbound delivery outcomes", () => {
       messageIds: ["m-first-batch"],
       visibleReplySent: true,
     });
-    expect((failure as Error).cause).toBe(rejection);
+    expect(cause).toBe(rejection);
 
     expect(mocks.pushMessagesLine).toHaveBeenCalledTimes(2);
     expect(events).toEqual(["batch-receipt", "batch-refused"]);

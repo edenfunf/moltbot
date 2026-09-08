@@ -125,9 +125,10 @@ describe("line outbound request batching", () => {
       () => undefined,
       (error: unknown) => error,
     );
+    const cause = failure instanceof Error ? failure.cause : undefined;
 
     expect(isChannelPartialDeliveryError(failure)).toBe(true);
-    expect(String((failure as Error).cause)).toContain("must use HTTPS");
+    expect(String(cause)).toContain("must use HTTPS");
     expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
       "line:user:U123",
       [
@@ -159,6 +160,7 @@ describe("line outbound request batching", () => {
       () => undefined,
       (error: unknown) => error,
     );
+    const cause = failure instanceof Error ? failure.cause : undefined;
 
     // One refused URL must not take the other media or the text with it, and the
     // failure has to carry the evidence that part of the reply is already visible.
@@ -178,6 +180,6 @@ describe("line outbound request batching", () => {
       messageIds: ["m-batch"],
       visibleReplySent: true,
     });
-    expect(String((failure as Error).cause)).toContain("must use HTTPS");
+    expect(String(cause)).toContain("must use HTTPS");
   });
 });
