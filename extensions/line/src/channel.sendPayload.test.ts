@@ -1,5 +1,4 @@
 // Line tests cover channel.sendPayload plugin behavior.
-import { expectDefined } from "@openclaw/normalization-core";
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import {
   verifyChannelMessageAdapterCapabilityProofs,
