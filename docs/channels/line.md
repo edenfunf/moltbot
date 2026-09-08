@@ -513,8 +513,7 @@ These particular outcomes do not dead-letter the incoming event, so
   that state, so it refuses rather than resend parts the recipient may already have. The
   named indexes are the parts with no record.
 - **Other `LINE durable send plan ...` messages** (`is invalid`, `is invalid JSON`,
-  `key is invalid`, `part topology is inconsistent`,
-  `requires a queue id`, `... must be a non-negative integer`,
+  `key is invalid`, `part topology is inconsistent`, `requires a queue id`,
   `disappeared during reconciliation`) mean the stored evidence is not trustworthy
   enough to replay from, so recovery declines rather than risk duplicating an accepted
   push or dropping one LINE never received.
@@ -557,6 +556,16 @@ the plan store's own refusals surface unchanged and mention neither LINE nor the
 the plan namespace is full, `plugin blob entry exceeds the configured 1048576 byte
 limit` when this one part's record is itself too large, and other store errors when the
 state directory will not take the write.
+
+Three more come from the moment a part claims its record, and they name a conflict
+rather than a storage fault. `LINE durable send plan part N was recorded for a different
+recipient` and `... for a different fan-out` mean a record already exists under this
+delivery's key but does not describe this send. The fan-out one is the reachable one:
+if the reply now splits into a different number of parts than the attempt that recorded
+it — a chunk-limit change, or an upgrade between attempts — every retry re-renders the
+same new shape and is refused again, so that reply never goes out. Send it again as a
+new message rather than waiting. `... disappeared while being recorded` means the record
+was claimed and then vanished before it could be read back; nothing was sent.
 
 **A refused record does not always mean nothing was sent.** A reply is split into
 parts — one per text chunk, one per media file — and each part records itself just
