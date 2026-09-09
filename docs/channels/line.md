@@ -452,10 +452,10 @@ link-local, and private-network targets.
   request. Nothing in the log tells those requests apart — only the refused one is recorded —
   so a reply of five parts or fewer maps the position straight onto the reply, and a longer one
   needs it counted again from each five-part boundary. To map a position onto what the reply
-  contained, count it as OpenClaw assembles it: a card, template, or location from
-  `channelData.line` comes first, then the reply text — each Markdown table and fenced code
-  block that fits a card becomes one, an empty fenced block is dropped, and everything else
-  stays text — and then the media. When quick replies are attached and any of that text
+  contained, count it as OpenClaw assembles it. A reply the Gateway starts by itself leads
+  with a card, template, or location from `channelData.line`, then the reply text — each
+  Markdown table and fenced code block that fits a card becomes one, an empty fenced block is
+  dropped, and everything else stays text — and then the media. When quick replies are attached and any of that text
   survives as text, the media moves ahead of it so the buttons ride the last message. A media
   URL the reply pipeline sends on its own starts a request of its own, carrying whatever
   caption came with it, so its positions are counted from `messages[0]` again. A reply that
