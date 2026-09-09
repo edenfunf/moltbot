@@ -431,9 +431,10 @@ link-local, and private-network targets.
   channel-specific content, goes five messages per request, so it costs one message per five
   of its parts instead of one per part; without any of that it is divided before it reaches
   the channel and costs one message per text chunk and one per media message. A reply that
-  answers an incoming message is batched five at a time whatever it carries: its first five
-  messages ride the reply token and cost nothing, and anything past them — or any later
-  reply in the same turn — is pushed. In a group every count here is multiplied by the
+  answers an incoming message is batched five at a time: its first five messages ride the
+  reply token and cost nothing, and anything past them — or any later reply in the same turn
+  — is pushed. Once no reply token is left, a plain text answer takes the divided route
+  instead and costs one message per chunk. In a group every count here is multiplied by the
   number of members.
 - **A whole reply is missing:** LINE validates a push request as a unit, so one message
   object it refuses takes the rest of that request with it. What happens to the parts queued
@@ -455,12 +456,13 @@ link-local, and private-network targets.
   contained, count it as OpenClaw assembles it. A reply the Gateway starts by itself leads
   with a card, template, or location from `channelData.line`, then the reply text — each
   Markdown table and fenced code block that fits a card becomes one, an empty fenced block is
-  dropped, and everything else stays text — and then the media. When quick replies are attached and any of that text
-  survives as text, the media moves ahead of it so the buttons ride the last message. A media
-  URL the reply pipeline sends on its own starts a request of its own, carrying whatever
-  caption came with it, so its positions are counted from `messages[0]` again. A reply that
-  answers an incoming message assembles the other way round — the text first, then the card
-  and the media — except when quick replies are attached.
+  dropped, and the prose around them stays text, divided into one message per chunk when it
+  runs past the chunk limit — and then the media. When quick replies are attached and any of
+  that text survives as text, the media moves ahead of it so the buttons ride the last
+  message. A media URL the reply pipeline sends on its own starts a request of its own,
+  carrying whatever caption came with it, so its positions are counted from `messages[0]`
+  again. A reply that answers an incoming message assembles the other way round — the text
+  first, then the card and the media — except when quick replies are attached.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
