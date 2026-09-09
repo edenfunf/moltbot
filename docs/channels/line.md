@@ -427,24 +427,25 @@ link-local, and private-network targets.
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
   LINE counts one message per request per recipient whatever that request carries
-  ([Sending messages](https://developers.line.biz/en/docs/messaging-api/sending-messages/)),
-  so a reply costs what it takes in requests, not what the reader sees in bubbles. Answering
-  an incoming message spends nothing while its reply token works, which covers the first five
+  ([Sending messages](https://developers.line.biz/en/docs/messaging-api/sending-messages/)), so
+  a reply costs what it takes in requests, not what the reader sees in bubbles. Answering an
+  incoming message spends nothing while its reply token works, which covers the first five
   messages of the turn's first reply; if that request fails and OpenClaw pushes the same
-  messages instead, the push is billed. What the channel receives whole it sends whole, up to five parts to
-  a request — a card with its caption and an image is one message, not three. What the
-  Gateway divides first is billed per piece: a long text handed over chunk by chunk, or media
-  one URL at a time with the reply's text riding the first as its caption rather than being
-  sent again. Reading `GET /v2/bot/message/quota/consumption` before and after settles what a
-  particular reply cost. In a group every one of these counts is multiplied by the number of
-  members.
-- **A whole reply is missing:** LINE validates a push request as a unit, so one message
-  object it refuses takes the rest of that request with it, and the parts still queued behind
-  that request are not sent either. When LINE rejects a non-text part of a reply that answers
-  an incoming message with a 400, OpenClaw sends its text on again — the parts it never
-  attempted, and the refused request's own text unless a reply token had already failed for
-  some other reason — while the card or the image is gone with the refusal. Run the Gateway with `--verbose` to record LINE’s own explanation of a refused
-  batch, which names the rejected position inside that request:
+  messages instead, the push is billed. What the channel receives whole it sends whole, up to
+  five parts to a request — a card with its caption and an image is one message, not three.
+  What the Gateway divides first is billed per piece: a long text handed over chunk by chunk,
+  or media one URL at a time with the reply's text riding the first as its caption rather than
+  being sent again. Reading `GET /v2/bot/message/quota/consumption` before and after settles
+  what a particular reply cost. In a group every one of these counts is multiplied by the
+  number of members.
+- **A whole reply is missing:** LINE validates a push request as a unit, so one message object
+  it refuses takes the rest of that request with it, and the parts still queued behind that
+  request are not sent either. When LINE rejects a non-text part of a reply that answers an
+  incoming message with a 400, OpenClaw sends its text on again — the parts it never attempted,
+  and the refused request's own text unless a reply token had already failed for some other
+  reason — while the card or the image is gone with the refusal. Run the Gateway with
+  `--verbose` to record LINE’s own explanation of a refused batch, which names the rejected
+  position inside that request:
 
   ```text
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
