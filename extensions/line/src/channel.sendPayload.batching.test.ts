@@ -148,6 +148,35 @@ describe("line outbound request batching", () => {
     expect(String(cause)).toContain("must use HTTPS");
   });
 
+  it("reports the media URL that failed first when a later one fails too", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    const overlongUrl = `https://example.com/${"a".repeat(2100)}.png`;
+
+    const failure = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:U123",
+      text: "Two broken charts.",
+      payload: {
+        text: "Two broken charts.",
+        mediaUrls: [createCredentialBearingHttpUrl(), overlongUrl],
+      },
+      accountId: "default",
+      cfg,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const cause = failure instanceof Error ? failure.cause : undefined;
+
+    // Two unusable URLs must not race for the receipt: the reply reports the one
+    // that failed first, and the second neither replaces it nor ends the send.
+    expect(sentMessages(mocks)).toEqual([{ type: "text", text: "Two broken charts." }]);
+    expect(isChannelPartialDeliveryError(failure)).toBe(true);
+    expect(String(cause)).toContain("must use HTTPS");
+    expect(String(cause)).not.toContain("2000 chars");
+  });
+
   it("names every request's messages when a later media build fails", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
