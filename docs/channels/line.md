@@ -443,7 +443,9 @@ link-local, and private-network targets.
   request are not sent either. When LINE rejects a non-text part of a reply that answers an
   incoming message with a 400, OpenClaw sends its text on again — the parts it never attempted,
   and the refused request's own text unless a reply token had already failed for some other
-  reason — while the card or the image is gone with the refusal. Run the Gateway with
+  reason — while the card or the image is gone with the refusal. The divided route has no
+  such recovery: when a chunk of a long answer renders a table into a card that LINE refuses,
+  that chunk and everything after it is lost. Run the Gateway with
   `--verbose` to record LINE’s own explanation of a refused batch, which names the rejected
   position inside that request:
 
