@@ -451,8 +451,8 @@ link-local, and private-network targets.
   block that fits a card becomes one, an empty fenced block is dropped, and everything else
   stays text — and then the media. When quick replies are attached and any of that text
   survives as text, the media moves ahead of it so the buttons ride the last message. A media
-  URL the reply pipeline sends on its own does not travel this path, so a refusal there is
-  logged without LINE’s explanation.
+  URL the reply pipeline sends on its own is pushed as a request of its own, carrying whatever
+  caption came with it, so its positions are counted from `messages[0]` again.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
