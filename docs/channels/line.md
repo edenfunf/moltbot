@@ -426,43 +426,40 @@ link-local, and private-network targets.
   429 can also reflect rate limits or temporary message reservations. Ordinary
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
-  LINE counts one message per request per recipient whatever that request carries. A reply
-  the Gateway starts by itself, carrying a card, quick replies, a location, or other
-  channel-specific content, goes five messages per request, so it costs one message per five
-  of its parts instead of one per part; without any of that it is divided before it reaches
-  the channel and costs one message per text chunk and one per media message. A reply that
-  answers an incoming message is batched five at a time: its first five messages ride the
-  reply token and cost nothing, and anything past them — or any later reply in the same turn
-  — is pushed. Once no reply token is left, a plain text answer takes the divided route
-  instead and costs one message per chunk. In a group every count here is multiplied by the
-  number of members.
+  LINE counts one message per request per recipient whatever that request carries, so what
+  costs money is how many requests a reply becomes. Parts that reach the channel together —
+  a card, a location, quick replies, and the text beside them — travel five message objects
+  to a request instead of one request each. Two things still cost more than that: a long
+  reply is divided into chunks before the channel sees it and each chunk is its own request,
+  and each media URL the Gateway sends on its own is a request too, with the reply's text
+  riding the first one as its caption rather than being sent again. Answering an incoming
+  message spends nothing while its reply token lasts, which covers the first five messages of
+  the turn's first reply. In a group every one of these counts is multiplied by the number of
+  members.
 - **A whole reply is missing:** LINE validates a push request as a unit, so one message
-  object it refuses takes the rest of that request with it. What happens to the parts queued
-  behind that request depends on which reply it is: a reply the Gateway starts by itself
-  loses them, while a reply that answers an incoming message re-sends its text after LINE
-  refuses a non-text part, so there the card or the media goes missing rather than the whole
-  reply. Run the Gateway with `--verbose` to record LINE’s own explanation of a refused
+  object it refuses takes the rest of that request with it, and the parts still queued behind
+  that request are not sent either. When LINE rejects a non-text part of a reply that answers
+  an incoming message with a 400, OpenClaw re-sends that reply's text and the parts it had not
+  attempted, so what goes missing there is the card or the media rather than the answer
+  itself. Run the Gateway with `--verbose` to record LINE’s own explanation of a refused
   batch, which names the rejected position inside that request:
 
   ```text
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
   ```
 
-  That position counts inside the request LINE refused, not from the start of the reply: a
-  reply is pushed five messages at a time, so its sixth part is `messages[0]` of a second
-  request. Nothing in the log tells those requests apart — only the refused one is recorded —
-  so a reply of five parts or fewer maps the position straight onto the reply, and a longer one
-  needs it counted again from each five-part boundary. To map a position onto what the reply
-  contained, count it as OpenClaw assembles it. A reply the Gateway starts by itself leads
-  with a card, template, or location from `channelData.line`, then the reply text — each
+  That position counts inside the request LINE refused, not from the start of the reply, and
+  only the refused request is recorded. Where the Gateway divided the reply first the request
+  is a small one: a single chunk of a long text, or one media file with the reply's text
+  ahead of it. Where the reply reached the channel whole it holds up to five, assembled in
+  this order: a
+  card, template, or location from `channelData.line` first, then the reply text — each
   Markdown table and fenced code block that fits a card becomes one, an empty fenced block is
   dropped, and the prose around them stays text, divided into one message per chunk when it
-  runs past the chunk limit — and then the media. When quick replies are attached and any of
-  that text survives as text, the media moves ahead of it so the buttons ride the last
-  message. A media URL the reply pipeline sends on its own starts a request of its own,
-  carrying whatever caption came with it, so its positions are counted from `messages[0]`
-  again. A reply that answers an incoming message assembles the other way round — the text
-  first, then the card and the media — except when quick replies are attached.
+  runs past the chunk limit — and then the media. With quick replies attached the media moves
+  ahead of the text so the buttons ride the last message, and a reply that answers an incoming
+  message assembles the other way round, its text first and the card and media after. Past
+  the fifth part the count starts again at `messages[0]` of the next request.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
