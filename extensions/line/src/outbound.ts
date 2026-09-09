@@ -19,6 +19,7 @@ import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { resolveOutboundMediaUrls } from "openclaw/plugin-sdk/reply-payload";
+import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { buildLineQuickReplyFallbackText } from "./quick-reply-fallback.js";
@@ -66,16 +67,18 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     const asPartialDelivery = (
       error: unknown,
       alsoDelivered?: { receipt?: MessageReceipt; messageIds?: string[] },
-    ) =>
-      createChannelPartialDeliveryError(
-        error,
-        createAcceptedChannelDeliveryResult({
-          deliveryResults: [
-            ...accepted.map((result) => ({ receipt: result.receipt })),
-            ...(alsoDelivered ? [alsoDelivered] : []),
-          ],
-        }),
-      );
+    ) => {
+      const delivered = createAcceptedChannelDeliveryResult({
+        deliveryResults: [
+          ...accepted.map((result) => ({ receipt: result.receipt })),
+          ...(alsoDelivered ? [alsoDelivered] : []),
+        ],
+      });
+      // Each request numbers its own parts from zero, so the merged receipt has
+      // to renumber them to keep naming a position in the whole payload.
+      delivered.receipt.parts = delivered.receipt.parts.map((part, index) => ({ ...part, index }));
+      return createChannelPartialDeliveryError(error, delivered);
+    };
     const recordResult = async (
       resultPromise: Promise<LineSendResult>,
     ): Promise<LineSendResult> => {
@@ -195,17 +198,24 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         mediaMessages.push(await buildLineMediaMessage(url, mediaOptions, to));
       } catch (error) {
         // Media LINE will not carry must not take the text that came with it.
-        deliveryError ??=
+        // Only the first cause is surfaced, so later ones are recorded here
+        // rather than disappearing.
+        if (deliveryError) {
+          logVerbose(`line: another outbound media message could not be built: ${String(error)}`);
+          continue;
+        }
+        deliveryError =
           error instanceof Error
             ? error
             : new Error("LINE outbound media could not be prepared", { cause: error });
       }
     }
 
-    // Quick replies disappear as soon as a newer message arrives, so whatever
-    // must stay last carries them: media leads whenever any of the body is text.
-    const bodyHasText = hasQuickReplies && bodyMessages.some((message) => message.type === "text");
-    const messages: messagingApi.Message[] = bodyHasText
+    // Quick replies disappear as soon as a newer message arrives, so the text
+    // that carries them has to stay last and the media moves ahead of it.
+    const quickRepliesRideText =
+      hasQuickReplies && bodyMessages.some((message) => message.type === "text");
+    const messages: messagingApi.Message[] = quickRepliesRideText
       ? [...richMessages, ...mediaMessages, ...bodyMessages]
       : [...richMessages, ...bodyMessages, ...mediaMessages];
     if (hasQuickReplies && messages.length === 0 && deliveryError === undefined) {

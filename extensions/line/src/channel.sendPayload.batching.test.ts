@@ -185,6 +185,11 @@ describe("line outbound request batching", () => {
       "m-batch-5",
       "m-batch-r2",
     ]);
+    // Each request numbers its own parts from zero; merged evidence has to name
+    // a position in the payload, not repeat 0 once per request.
+    expect(failure.deliveryResult.receipt?.parts.map((part) => part.index)).toEqual([
+      0, 1, 2, 3, 4, 5,
+    ]);
   });
 
   it("sends nothing more once the first request is refused", async () => {
