@@ -47,7 +47,7 @@ export function lineResult(messageId: string, chatId = "c1") {
 // LINE answers a push with one sent-message id per message object, so a double
 // that returns a single id for a five-message request is a state the platform
 // cannot produce — and it would hide anything that reads ids across requests.
-export function lineBatchResult(messageCount: number, prefix = "m-batch", chatId = "c1") {
+function lineBatchResult(messageCount: number, prefix = "m-batch", chatId = "c1") {
   const messageIds = Array.from({ length: Math.max(1, messageCount) }, (_, index) =>
     index === 0 ? prefix : `${prefix}-${index + 1}`,
   );
