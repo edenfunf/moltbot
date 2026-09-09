@@ -426,17 +426,22 @@ link-local, and private-network targets.
   429 can also reflect rate limits or temporary message reservations. Ordinary
   reply-token messages do not consume this monthly allowance, unlike pushes.
   See [LINE message pricing](https://developers.line.biz/en/docs/messaging-api/pricing/).
-  LINE counts one message per request per recipient whatever that request carries. A pushed
-  reply that carries a card, quick replies, a location, or other channel-specific content
-  goes five messages per request, so it costs one message per five of its parts instead of
-  one per part. A pushed reply without any of that is divided before it reaches the channel:
-  a text-only one costs one message per chunk, and one with media costs one per media
-  message. In a group every one of those counts is multiplied by the number of members.
+  LINE counts one message per request per recipient whatever that request carries. A reply
+  the Gateway starts by itself, carrying a card, quick replies, a location, or other
+  channel-specific content, goes five messages per request, so it costs one message per five
+  of its parts instead of one per part; without any of that it is divided before it reaches
+  the channel and costs one message per text chunk and one per media message. A reply that
+  answers an incoming message is batched five at a time whatever it carries: its first five
+  messages ride the reply token and cost nothing, and anything past them — or any later
+  reply in the same turn — is pushed. In a group every count here is multiplied by the
+  number of members.
 - **A whole reply is missing:** LINE validates a push request as a unit, so one message
-  object it refuses takes the rest of that request with it, and on a pushed reply the parts
-  still queued behind it are never sent either. Run the Gateway with `--verbose` to record
-  LINE’s own explanation of a refused batch, which names the rejected position inside that
-  request:
+  object it refuses takes the rest of that request with it. What happens to the parts queued
+  behind that request depends on which reply it is: a reply the Gateway starts by itself
+  loses them, while a reply that answers an incoming message re-sends its text after LINE
+  refuses a non-text part, so there the card or the media goes missing rather than the whole
+  reply. Run the Gateway with `--verbose` to record LINE’s own explanation of a refused
+  batch, which names the rejected position inside that request:
 
   ```text
   line: push message failed (400 Bad Request): {"message":"A message (messages[1]) in the request body is invalid",...}
@@ -455,9 +460,7 @@ link-local, and private-network targets.
   URL the reply pipeline sends on its own starts a request of its own, carrying whatever
   caption came with it, so its positions are counted from `messages[0]` again. A reply that
   answers an incoming message assembles the other way round — the text first, then the card
-  and the media — except when quick replies are attached. That path also re-sends its text
-  after LINE refuses a non-text part, so what goes missing there is the card or the media
-  rather than the whole reply.
+  and the media — except when quick replies are attached.
 
 - **Bot silently skips messages (events dead-lettered):** `openclaw logs` shows
   `line: spooled update <id> ... dead-lettered` lines with the failure reason.
