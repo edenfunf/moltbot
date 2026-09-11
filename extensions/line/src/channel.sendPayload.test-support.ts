@@ -87,7 +87,6 @@ export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMoc
       ],
     },
   }));
-  const sendMessageLine = vi.fn(async () => lineResult("m-media"));
   const chunkMarkdownText = vi.fn((text: string) => [text]);
   const resolveTextChunkLimit = vi.fn(() => 123);
   const resolveLineAccount = vi.fn(
