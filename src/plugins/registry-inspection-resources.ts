@@ -1,5 +1,5 @@
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
-import { markPluginRegistryRetired } from "./registry-lifecycle.js";
+import { markPluginRegistriesRetired } from "./registry-lifecycle.js";
 import {
   PluginRegistrationResourceSource,
   type RegistrationDisposer,
@@ -22,20 +22,29 @@ function throwDisposalFailures(failures: Error[]): void {
   }
 }
 
-/** Owns only an explicitly acquired, uncached inspection's registration resources. */
+/** Owns an explicitly acquired, uncached registry view's registration resources. */
 export class PluginRegistryInspectionResources {
   readonly #source = new PluginRegistrationResourceSource();
   readonly #claim = this.#source.acquireClaim("inspection");
-  #registry?: PluginRegistry;
+  readonly #registries = new Set<PluginRegistry>();
+  readonly #dependencies = new WeakSet<PluginRegistryInspectionResources>();
   #release?: Promise<void>;
 
+  /** Attach views of this source; independently borrowed donors keep their own owner. */
   attach(registry: PluginRegistry): void {
-    this.#registry = registry;
+    if (this.#release) {
+      throw new Error("Plugin inspection resources have been released");
+    }
+    this.#registries.add(registry);
     inspections.set(registry, this);
   }
 
   register(pluginId: string, disposer: RegistrationDisposer): void {
     this.#source.register(pluginId, disposer);
+  }
+
+  runRegistration(pluginId: string, run: () => void): void {
+    this.#source.runRegistration(pluginId, run);
   }
 
   trackRegistration(pending: Promise<unknown>): void {
@@ -44,6 +53,22 @@ export class PluginRegistryInspectionResources {
 
   rollback(pluginId: string): void {
     this.#source.rollback(pluginId);
+  }
+
+  /** Copied callbacks keep their source through this inspection's final disposer. */
+  retainDependency(dependency: PluginRegistryInspectionResources): void {
+    if (this.#release) {
+      throw new Error("Plugin inspection resources have been released");
+    }
+    if (dependency !== this) {
+      this.#source.retainDependency(() => dependency.retain());
+      this.#dependencies.add(dependency);
+    }
+  }
+
+  /** Recorded coverage survives retirement; retain() still checks this inspection's lifetime. */
+  coversSource(source: PluginRegistryInspectionResources): boolean {
+    return source === this || this.#dependencies.has(source);
   }
 
   /** Retains physical resources without extending this inspection's authority. */
@@ -60,9 +85,8 @@ export class PluginRegistryInspectionResources {
     if (!this.#release) {
       // Revocation can call back into release through synchronous abort listeners.
       this.#release = this.#claim.release().then(throwDisposalFailures);
-      if (this.#registry) {
-        markPluginRegistryRetired(this.#registry);
-      }
+      markPluginRegistriesRetired(this.#registries);
+      this.#registries.clear();
     }
     return this.#release;
   }

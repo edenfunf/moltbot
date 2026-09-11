@@ -1,8 +1,10 @@
+import assert from "node:assert/strict";
 /**
  * Gateway server close lifecycle tests.
  */
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isProcessAlive } from "../../test/helpers/process-wait.js";
 import { isAgentRunRestartAbortReason } from "../agents/run-termination.js";
@@ -11,7 +13,9 @@ import {
   type ReplyOperation,
 } from "../auto-reply/reply/reply-run-registry.js";
 import type { InternalHookEvent } from "../hooks/internal-hooks.js";
+import { LegacyPluginSdkResourceHost } from "../plugins/legacy-sdk-resource-host.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
+import { PluginRegistryInspectionResources } from "../plugins/registry-inspection-resources.js";
 import {
   getActivePluginRegistry,
   resetPluginRuntimeStateForTest,
@@ -26,6 +30,7 @@ import type { OpenClawPluginService } from "../plugins/types.js";
 import { getProcessSupervisor, type ManagedRun } from "../process/supervisor/index.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { resolveGlobalMap, resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { killPidIfAlive } from "../test-utils/process-tree.js";
 import type {
   GatewayCloseParams as GatewayTeardownParams,
   GatewayClosePrepareParams,
@@ -280,6 +285,20 @@ describe("createGatewayCloseHandler", () => {
       );
       const state = await createOpenClawTestState({ label: "shutdown-actual-sqlite" });
       const database = openOpenClawStateDatabase({ env: state.env });
+      const sdkDatabase = new DatabaseSync(":memory:");
+      const sdkHost = new LegacyPluginSdkResourceHost();
+      const inspection = new PluginRegistryInspectionResources();
+      inspection.attach(createEmptyPluginRegistry());
+      const sdkDisposalReads: unknown[] = [];
+      inspection.register("sdk-provider", {
+        id: "native-sdk-borrow",
+        dispose: () => {
+          sdkDisposalReads.push(database.db.prepare("SELECT 42 AS value").get());
+          sdkDatabase.close();
+        },
+      });
+      sdkHost.adopt(inspection, inspection.retain());
+      await inspection.release();
       const entered = createDeferredCore();
       const release = createDeferredCore();
       const finished = createDeferredCore();
@@ -290,6 +309,7 @@ describe("createGatewayCloseHandler", () => {
         try {
           await release.promise;
           reads.push(database.db.prepare("SELECT 1 AS value").get());
+          expect(sdkDatabase.prepare("SELECT 42 AS value").get()).toEqual({ value: 42 });
         } catch (error) {
           failures.push(error);
         } finally {
@@ -321,6 +341,7 @@ describe("createGatewayCloseHandler", () => {
       const close = createGatewayCloseHandler(
         createGatewayCloseTestDeps({
           httpServer: { close: httpClose, closeIdleConnections: vi.fn() } as never,
+          closeSdkResources: () => sdkHost.close(),
         }),
       );
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -342,22 +363,127 @@ describe("createGatewayCloseHandler", () => {
         );
         await vi.waitFor(() => expect(httpClose).toHaveBeenCalledOnce());
         expect(database.db.isOpen).toBe(true);
+        expect(sdkDatabase.isOpen).toBe(true);
+        expect(sdkDisposalReads).toEqual([]);
         expect(closed).toBe(false);
         expect(mocks.closePluginStateDatabase).not.toHaveBeenCalled();
       } finally {
         release.resolve();
         await finished.promise;
-        await closing;
-        hooks.unregisterInternalHook(eventKey, cleanup);
-        vi.useRealTimers();
-        closePluginStateDatabase();
-        await state.cleanup();
+        try {
+          await closing;
+          expect(sdkDisposalReads).toEqual([{ value: 42 }]);
+          expect(sdkDatabase.isOpen).toBe(false);
+        } finally {
+          await sdkHost.close().catch(() => undefined);
+          if (sdkDatabase.isOpen) {
+            sdkDatabase.close();
+          }
+          hooks.unregisterInternalHook(eventKey, cleanup);
+          vi.useRealTimers();
+          closePluginStateDatabase();
+          await state.cleanup();
+        }
       }
       expect(cleanup).toHaveBeenCalledOnce();
       expect(failures).toEqual([]);
       expect(reads).toEqual([{ value: 1 }]);
       expect(database.db.isOpen).toBe(false);
       expect(mocks.closePluginStateDatabase).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([false, true])(
+    "finishes shared state cleanup after actual SDK disposal rejects (global failure: %s)",
+    async (globalFailure) => {
+      const { createOpenClawTestState } = await import("../test-utils/openclaw-test-state.js");
+      const { openOpenClawStateDatabase } = await import("../state/openclaw-state-db.js");
+      const { closePluginStateDatabase } = await vi.importActual<
+        typeof import("../plugin-state/plugin-state-store.js")
+      >("../plugin-state/plugin-state-store.js");
+      const state = await createOpenClawTestState({ label: "sdk-disposal-failure-tail" });
+      const database = openOpenClawStateDatabase({ env: state.env });
+      const sdkDatabase = new DatabaseSync(":memory:");
+      const sdkHost = new LegacyPluginSdkResourceHost();
+      const inspection = new PluginRegistryInspectionResources();
+      inspection.attach(createEmptyPluginRegistry());
+      const entered = createDeferredCore();
+      const resume = createDeferredCore();
+      const disposalError = new Error("synthetic SDK disposal failure");
+      const dispose = vi.fn(async () => {
+        entered.resolve();
+        await resume.promise;
+        expect(database.db.prepare("SELECT 42 AS value").get()).toEqual({ value: 42 });
+        sdkDatabase.close();
+        throw disposalError;
+      });
+      inspection.register("sdk-provider", { id: "native-sdk-failure", dispose });
+      sdkHost.adopt(inspection, inspection.retain());
+      await inspection.release();
+      const globalError = new Error("synthetic singleton reset failure");
+      let resetFailureEnabled = globalFailure;
+      const reset = vi.fn(() => {
+        if (resetFailureEnabled) {
+          throw globalError;
+        }
+      });
+      resolveGlobalSingleton(Symbol("sdk-failure-tail"), () => ({}), reset);
+      const clearSecretsRuntimeSnapshot = vi.fn();
+      mocks.closePluginStateDatabase.mockImplementation(async () => closePluginStateDatabase());
+      let sdkFailure: unknown;
+      const close = createGatewayCloseHandler(
+        createGatewayCloseTestDeps({
+          clearSecretsRuntimeSnapshot,
+          closeSdkResources: () =>
+            sdkHost.close().catch((error: unknown) => {
+              sdkFailure = error;
+              throw error;
+            }),
+        }),
+      );
+      const outcome = close({ reason: "SDK failure tail proof" }).catch((error: unknown) => error);
+      const expectCleanupFailure = (failure: unknown) => {
+        assert(failure instanceof AggregateError);
+        if (globalFailure) {
+          expect(failure.cause).toBe(sdkFailure);
+          expect(failure.errors).toEqual([
+            sdkFailure,
+            expect.objectContaining({ errors: [globalError] }),
+          ]);
+        } else {
+          expect(failure).toBe(sdkFailure);
+        }
+      };
+      try {
+        await entered.promise;
+        expect(database.db.isOpen).toBe(true);
+        expect(sdkDatabase.isOpen).toBe(true);
+        expect(reset).not.toHaveBeenCalled();
+        expect(clearSecretsRuntimeSnapshot).not.toHaveBeenCalled();
+        resume.resolve();
+        const failure = await outcome;
+        expectCleanupFailure(failure);
+        expect(sdkDatabase.isOpen).toBe(false);
+        expect(database.db.isOpen).toBe(false);
+        expect(reset).toHaveBeenCalledOnce();
+        expect(clearSecretsRuntimeSnapshot).toHaveBeenCalledOnce();
+        expectCleanupFailure(
+          await close({ reason: "retry SDK failure tail proof" }).catch((error: unknown) => error),
+        );
+        expect(dispose).toHaveBeenCalledOnce();
+        expect(reset).toHaveBeenCalledTimes(2);
+        expect(clearSecretsRuntimeSnapshot).toHaveBeenCalledTimes(2);
+      } finally {
+        resetFailureEnabled = false;
+        resume.resolve();
+        await outcome;
+        await sdkHost.close().catch(() => undefined);
+        if (sdkDatabase.isOpen) {
+          sdkDatabase.close();
+        }
+        closePluginStateDatabase();
+        await state.cleanup();
+      }
     },
   );
 
@@ -525,22 +651,44 @@ describe("createGatewayCloseHandler", () => {
     expect(clearSecretsRuntimeSnapshot).toHaveBeenCalledOnce();
   });
 
-  it.skipIf(process.platform === "win32")(
-    "terminates supervised process trees before Gateway close returns",
-    async () => {
+  it.skipIf(process.platform === "win32").each([
+    { restart: false, ignoreTerm: false },
+    { restart: true, ignoreTerm: true },
+  ])(
+    "terminates supervised process trees before Gateway close returns (restart=$restart, ignores TERM=$ignoreTerm)",
+    async ({ restart, ignoreTerm }) => {
       const previousServiceMarker = process.env.OPENCLAW_SERVICE_MARKER;
       process.env.OPENCLAW_SERVICE_MARKER = "openclaw";
       const supervisor = getProcessSupervisor();
       let output = "";
       let run: ManagedRun | undefined;
+      let replacementRun: ManagedRun | undefined;
+      let rootPid: number | undefined;
+      let descendantPid: number | undefined;
 
       try {
+        // Readiness follows TERM handler installation and closure of inherited descriptors.
+        const descendantScript = `
+          ${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ""}
+          setInterval(() => {}, 1_000);
+          process.send("ready", () => process.disconnect());
+        `;
         run = await supervisor.spawn({
           mode: "child",
           argv: [
-            "/bin/sh",
-            "-c",
-            'sleep 60 >/dev/null 2>&1 & child=$!; printf "%s %s\\n" "$$" "$child"; wait',
+            process.execPath,
+            "-e",
+            `
+              const { spawn } = require("node:child_process");
+              const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], {
+                stdio: ["ignore", "ignore", "ignore", "ipc"],
+              });
+              child.once("message", () => {
+                child.once("disconnect", () => {
+                  process.stdout.write(process.pid + " " + child.pid + "\\n");
+                });
+              });
+            `,
           ],
           stdinMode: "pipe-closed",
           onStdout: (chunk) => {
@@ -549,24 +697,44 @@ describe("createGatewayCloseHandler", () => {
         });
         await vi.waitFor(() => expect(output).toMatch(/^\d+ \d+/u));
         const match = /^(\d+) (\d+)/u.exec(output);
-        const rootPid = Number(match?.[1]);
-        const descendantPid = Number(match?.[2]);
+        rootPid = Number(match?.[1]);
+        descendantPid = Number(match?.[2]);
         expect(isProcessAlive(rootPid)).toBe(true);
         expect(isProcessAlive(descendantPid)).toBe(true);
 
         const close = createGatewayCloseHandler(createGatewayCloseTestDeps());
-        await close({ reason: "test" });
+        await close({
+          reason: restart ? "gateway restarting" : "gateway stopping",
+          ...(restart ? { restartExpectedMs: 1500, drainTimeoutMs: 0 } : {}),
+        });
 
+        // Do not poll after close: returning while either process lives is the regression.
         expect(isProcessAlive(rootPid)).toBe(false);
         expect(isProcessAlive(descendantPid)).toBe(false);
-        expect(getProcessSupervisor()).not.toBe(supervisor);
+        await expect(run.waitForExtinction!()).resolves.toBeUndefined();
+        const nextSupervisor = getProcessSupervisor();
+        expect(nextSupervisor).not.toBe(supervisor);
+        replacementRun = await nextSupervisor.spawn({
+          mode: "child",
+          argv: [process.execPath, "-e", ""],
+          exactEnv: true,
+          stdinMode: "pipe-closed",
+        });
+        await expect(replacementRun.wait()).resolves.toMatchObject({ reason: "exit", exitCode: 0 });
       } finally {
-        run?.cancel();
-        await run?.waitForExtinction?.().catch(() => undefined);
-        if (previousServiceMarker === undefined) {
-          delete process.env.OPENCLAW_SERVICE_MARKER;
-        } else {
-          process.env.OPENCLAW_SERVICE_MARKER = previousServiceMarker;
+        try {
+          run?.cancel();
+          replacementRun?.cancel();
+          killPidIfAlive(rootPid);
+          killPidIfAlive(descendantPid);
+          await run?.waitForExtinction?.().catch(() => undefined);
+          await replacementRun?.wait().catch(() => undefined);
+        } finally {
+          if (previousServiceMarker === undefined) {
+            delete process.env.OPENCLAW_SERVICE_MARKER;
+          } else {
+            process.env.OPENCLAW_SERVICE_MARKER = previousServiceMarker;
+          }
         }
       }
     },
@@ -1363,7 +1531,12 @@ describe("createGatewayCloseHandler", () => {
     const run = chatRunState.getOrCreate("run-1");
     run.buffer = "partial reply";
     run.deltaSentAt = Date.now();
-    run.assistantScope = { itemId: "assistant-1", prefix: "" };
+    run.assistantScope = {
+      itemId: "assistant-1",
+      prefix: "",
+      boundaryNewlines: 0,
+      separatorLength: 0,
+    };
     run.deltaLastBroadcastText = "par";
     run.agentText = {
       assistant: {
