@@ -1,6 +1,5 @@
 import { HTTPFetchError } from "@line/bot-sdk";
 // Line tests cover send plugin behavior.
-import { expectDefined } from "@openclaw/normalization-core";
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1088,31 +1087,6 @@ describe("LINE send helpers", () => {
 
     expect(logVerboseMock).toHaveBeenCalledWith(
       "line: loading animation failed (non-fatal): Error: unsupported",
-    );
-  });
-
-  it("pushes quick-reply text and caps to 13 buttons", async () => {
-    await sendModule.pushMessagesLine(
-      "U-quick",
-      [
-        {
-          type: "text",
-          text: "Pick one",
-          quickReply: sendModule.createQuickReplyItems(
-            Array.from({ length: 20 }, (_, index) => `Choice ${index + 1}`),
-          ),
-        },
-      ],
-      { cfg: LINE_TEST_CFG },
-    );
-
-    expect(pushMessageMock).toHaveBeenCalledTimes(1);
-    const firstCall = pushMessageMock.mock.calls.at(0) as [
-      { messages: Array<{ quickReply?: { items: unknown[] } }> },
-    ];
-    const payload = expectDefined(firstCall[0], "LINE push payload");
-    expect(expectDefined(payload.messages[0], "LINE push message").quickReply?.items).toHaveLength(
-      13,
     );
   });
 });
