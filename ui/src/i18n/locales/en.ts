@@ -1266,6 +1266,7 @@ export const en: TranslationMap & {
     space: "Space",
     sessionId: "Session ID",
     activeRun: "Active run",
+    subagentsWorking: "Subagents working",
     showChildSessions: "Show {count} child sessions for {session}",
     hideChildSessions: "Hide {count} child sessions for {session}",
     childSessions: "Child sessions",
@@ -2264,7 +2265,6 @@ export const en: TranslationMap & {
     attachSession: "Attach session",
     attachFailed: "Could not attach terminal session",
     startCancelled: "Terminal start was cancelled. Try again.",
-    panelUnavailable: "Terminal panel is unavailable. Reconnect and try again.",
     connecting: "Connecting to session…",
     connectionTimedOut: "Session did not connect within 30 seconds.",
     refreshRequired: "Control UI updated. Reload this page to continue the terminal action.",
@@ -2487,12 +2487,13 @@ export const en: TranslationMap & {
   },
   modelSetup: {
     missingAuth: "No provider credential is configured for this model. Set it up in Model Setup.",
+    commandHint: "Try /models or /help.",
     heading: "Connect a verified AI model",
     intro:
       "OpenClaw discovers AI access on this Gateway. Choose a provider to begin; nothing is selected, tested, installed, or saved automatically.",
     required: {
       title: "No AI provider configured",
-      body: "We couldn't find a provider and model configured for this agent. Choose a supported connection; OpenClaw will test it before enabling chat.",
+      body: "Connect a provider and choose a model to send messages.",
       action: "Connect an AI provider",
     },
     loading: "Checking this Gateway for available AI access…",
@@ -3735,6 +3736,8 @@ export const en: TranslationMap & {
     },
     notices: {
       applied: "Applied",
+      confirmUnconfirmed:
+        "The proposal status did not confirm as expected after the action. Refresh the workshop and check before retrying.",
       proposalChanged:
         "Suggestion changed. Review the updated draft before choosing another action.",
       rejected: "Rejected",
@@ -4725,6 +4728,19 @@ export const en: TranslationMap & {
     errorDetails: "Error details",
     details: "Details",
     copyError: "Copy error",
+    providerPolicy: {
+      bufferingTitle: "Cyber safety review",
+      bufferingBody: "OpenAI is reviewing this response for cyber safety.",
+      blockedTitle: "Cyber policy block",
+      blockedBody: "OpenAI blocked this response under its cyber policy.",
+      fallbackTitle: "Provider changed the model",
+      fallbackBody: "OpenAI routed this response to {model}.",
+      fallbackUnknownBody: "OpenAI routed this response to another model.",
+      escalatedTitle: "Retried on Daybreak",
+      escalatedBody: "OpenAI declined this request; retried on {model}.",
+      unavailableTitle: "Daybreak unavailable",
+      unavailableBody: "OpenAI declined this request; {model} is not authorized.",
+    },
     diskSpace: {
       warningTitle: "Cloud session disk space is low",
       criticalTitle: "Cloud session disk space is critically low",
@@ -4999,6 +5015,9 @@ export const en: TranslationMap & {
     taskSuggestions: {
       eyebrow: "Suggested task · in {repo}",
       startSession: "Start in a new session",
+      startOptions: "Choose where to start the task",
+      startWorktree: "Start in a new worktree",
+      startCurrentSession: "Start in this session",
       copyPrompt: "Copy prompt",
       copyPromptFailed: "Couldn't copy the prompt to the clipboard",
       promptCopied: "Copied",
@@ -5340,6 +5359,9 @@ export const en: TranslationMap & {
       showDetails: "Show goal details",
       hideDetails: "Hide goal details",
     },
+    asyncQuestions: {
+      sendFailed: "Could not send your answer. Your draft is preserved.",
+    },
     questions: {
       other: "Type your own answer here",
       answer: "Answer",
@@ -5621,7 +5643,7 @@ export const en: TranslationMap & {
       positionUserMessage: "User message",
       positionAssistantMessage: "Assistant message",
       positionMarkerHint:
-        "Use arrow keys to choose a marker, Enter or Space to jump, and Escape to dismiss the preview.",
+        "Use arrow keys or Home and End to choose a marker, Enter or Space to jump, and Escape to return to the conversation. Tab leaves the rail.",
     },
     pendingInputs: {
       waitingForWorkspaceSync: "Received · waiting for workspace sync",
