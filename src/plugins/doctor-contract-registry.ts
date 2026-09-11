@@ -5,6 +5,7 @@ import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import { shouldIncludeChannelSetupFeatureForConfig } from "../channels/plugins/bundled-setup-policy.js";
 import { GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA } from "../config/bundled-channel-config-metadata.generated.js";
+import { discoverConfigWidePluginManifestRegistry } from "../config/io.plugin-metadata.js";
 import type { LegacyConfigRule } from "../config/legacy.shared.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -108,6 +109,9 @@ function hasScopedProviderAuthAlias(
   scopedProviderIds: ReadonlySet<string>,
 ): boolean {
   return Object.entries(record.providerAuthAliases ?? {}).some(([rawAlias, rawTarget]) => {
+    if (typeof rawTarget !== "string") {
+      return false;
+    }
     const target = normalizeProviderId(rawTarget);
     return (
       scopedProviderIds.has(normalizeProviderId(rawAlias)) &&
@@ -201,11 +205,18 @@ function resolvePluginDoctorManifestRecords(params: {
     artifactPreservingReadOnly: params.artifactPreservingReadOnly,
   });
 
-  const scopedPluginIds = params?.pluginIds ? new Set(params.pluginIds) : null;
-  const scopedProviderIds = params?.pluginIds
-    ? new Set(params.pluginIds.map(normalizeProviderId).filter(Boolean))
+  return filterPluginDoctorRecordsByScope(manifestRegistry.plugins, params.pluginIds);
+}
+
+function filterPluginDoctorRecordsByScope(
+  records: readonly PluginManifestRegistryRecord[],
+  pluginIds?: readonly string[],
+): PluginManifestRegistryRecord[] {
+  const scopedPluginIds = pluginIds ? new Set(pluginIds) : null;
+  const scopedProviderIds = pluginIds
+    ? new Set(pluginIds.map(normalizeProviderId).filter(Boolean))
     : null;
-  return manifestRegistry.plugins.filter(
+  return records.filter(
     (record) =>
       !(
         scopedPluginIds &&
@@ -467,8 +478,12 @@ function resolvePluginDoctorStateMigrationRecords(params: {
   pluginIds?: readonly string[];
   artifactPreservingReadOnly?: boolean;
 }): PluginManifestRegistryRecord[] {
+  if (params.pluginIds?.length === 0) {
+    return [];
+  }
+  const registry = discoverConfigWidePluginManifestRegistry(params);
   return filterPluginDoctorStateMigrationRecords(
-    resolvePluginDoctorManifestRecords(params),
+    filterPluginDoctorRecordsByScope(registry.plugins, params.pluginIds),
     params.config,
   );
 }
@@ -503,7 +518,9 @@ function filterPluginDoctorStateMigrationRecords(
     }
     records.push(record);
   }
-  return records;
+  // Alias cleanup can change discovery order without changing migration owners.
+  // Stabilize owner order while preserving each owner's declared action order.
+  return records.toSorted((left, right) => left.id.localeCompare(right.id));
 }
 
 export type PluginDoctorStateMigrationInventory = {

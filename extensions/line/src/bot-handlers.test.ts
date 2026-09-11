@@ -994,6 +994,39 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).not.toHaveBeenCalled();
   });
 
+  it.each(["disabled", "allowlist"] as const)(
+    "does not resolve question taps from a sender denied by groupPolicy %s",
+    async (groupPolicy) => {
+      resolveLineQuestionPostbackMock.mockClear();
+      const processMessage = vi.fn();
+      await handleLineWebhookEvents(
+        [
+          {
+            type: "postback",
+            replyToken: "reply-token",
+            timestamp: Date.now(),
+            source: { type: "group", groupId: "group-1", userId: "user-denied" },
+            mode: "active",
+            webhookEventId: `evt-question-denied-${groupPolicy}`,
+            deliveryContext: { isRedelivery: false },
+            postback: {
+              data: "line.question=ask_3d8dbe55be452a9a39add7c909beb119&line.option=1",
+            },
+          } as never,
+        ],
+        createLineWebhookTestContext({
+          processMessage,
+          groupPolicy,
+          groupAllowFrom: ["user-allowed"],
+        }),
+      );
+
+      expect(resolveLineQuestionPostbackMock).not.toHaveBeenCalled();
+      expect(buildLinePostbackContextMock).not.toHaveBeenCalled();
+      expect(processMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ["already-terminal" as const, "That question is no longer waiting for an answer."],
     ["failed" as const, "Could not record that answer. Reply with the option text instead."],

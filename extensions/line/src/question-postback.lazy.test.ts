@@ -11,8 +11,11 @@ vi.mock("openclaw/plugin-sdk/question-gateway-runtime", () => {
 });
 
 it("loads the question Gateway only when resolving a tap", async () => {
-  const { buildLineQuestionPostbackData, parseLineQuestionPostbackData, resolveLineQuestionPostback } =
-    await import("./question-postback.js");
+  const {
+    buildLineQuestionPostbackData,
+    parseLineQuestionPostbackData,
+    resolveLineQuestionPostback,
+  } = await import("./question-postback.js");
   const callback = { questionId: "ask_0123456789abcdef0123456789abcdef", optionIndex: 1 };
   const data = buildLineQuestionPostbackData(callback);
   expect(parseLineQuestionPostbackData(data ?? "")).toEqual(callback);
