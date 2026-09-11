@@ -1,6 +1,5 @@
 // Line plugin module owns the postback encoding for ask_user question controls.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const QUESTION_ID_PARAM = "line.question";
@@ -60,6 +59,7 @@ export async function resolveLineQuestionPostback(params: {
   accountId: string;
 }): Promise<{ status: "answered" | "already-terminal" | "failed" }> {
   try {
+    const { questionGatewayRuntime } = await import("openclaw/plugin-sdk/question-gateway-runtime");
     const result = await questionGatewayRuntime.resolveOption({
       cfg: params.cfg,
       questionId: params.callback.questionId,
