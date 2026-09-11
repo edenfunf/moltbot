@@ -3,13 +3,11 @@ import type { webhook } from "@line/bot-sdk";
 import {
   type buildChannelInboundEventContext,
   buildMentionRegexes,
-  formatInboundMediaUnavailableText,
   isChannelPartialDeliveryError,
   logInboundDrop,
   matchesMentionPatterns,
   implicitMentionKindWhen,
   toHistoryMediaEntries,
-  type ChannelInboundMediaInput,
 } from "openclaw/plugin-sdk/channel-inbound";
 import {
   resolveChannelImplicitMentions,
@@ -41,24 +39,21 @@ import {
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
-import {
-  normalizeOptionalString,
-  normalizeStringEntries,
-} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { firstDefined, normalizeLineAllowEntry } from "./bot-access.js";
 import {
   buildLineMessageContext,
   buildLinePostbackContext,
   describeLineMessageForHistory,
   getLineSourceInfo,
-  LINE_ATTACHMENT_UNAVAILABLE_NOTICE,
   readLineTextMessageBody,
+  withLineDeliveryNotices,
   type LineInboundContext,
   type LineInboundMentionAccess,
 } from "./bot-message-context.js";
-import { downloadLineMedia, isRetryableLineInboundMediaError } from "./download.js";
 import { reserveLineGroupHistory } from "./group-history.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
+import { downloadLineInboundMedia } from "./inbound-media.js";
 import { hasAnyLineMention, isLineBotMentioned } from "./mentions.js";
 import { quotesLineBotMessage } from "./outbound-message-log.js";
 import { parseLineQuestionPostbackData, resolveLineQuestionPostback } from "./question-postback.js";
@@ -73,21 +68,6 @@ type MessageEvent = webhook.MessageEvent;
 type PostbackEvent = webhook.PostbackEvent;
 type UnfollowEvent = webhook.UnfollowEvent;
 type WebhookEvent = webhook.Event;
-
-type MediaRef = Pick<ChannelInboundMediaInput, "contentType" | "fileName"> & { path: string };
-
-const LINE_DOWNLOADABLE_MESSAGE_TYPES: ReadonlySet<string> = new Set([
-  "image",
-  "video",
-  "audio",
-  "file",
-]);
-
-function isDownloadableLineMessageType(
-  messageType: MessageEvent["message"]["type"],
-): messageType is "image" | "video" | "audio" | "file" {
-  return LINE_DOWNLOADABLE_MESSAGE_TYPES.has(messageType);
-}
 
 interface LineHandlerContext {
   cfg: OpenClawConfig;
@@ -433,62 +413,6 @@ function resolveEventRawText(event: MessageEvent | PostbackEvent | JoinEvent): s
   return "";
 }
 
-/**
- * Downloads the attachments of one LINE send, in the order the sender picked
- * them: a single message, or every part of a multi-image set. The answered turn
- * and the gated history record share it so an attachment cannot resolve
- * differently depending on which of the two reads it.
- */
-async function downloadLineInboundMedia(
-  messages: readonly MessageEvent["message"][],
-  context: LineHandlerContext,
-): Promise<{ allMedia: MediaRef[]; mediaUnavailable: boolean }> {
-  const { account, runtime, mediaMaxBytes } = context;
-  const abortSignal = context.turnAdoptionLifecycle?.abortSignal;
-  const allMedia: MediaRef[] = [];
-  let mediaUnavailable = false;
-  for (const message of messages) {
-    if (!isDownloadableLineMessageType(message.type)) {
-      continue;
-    }
-    const originalFilename =
-      message.type === "file" ? normalizeOptionalString(message.fileName) : undefined;
-    try {
-      const media = await downloadLineMedia(message.id, account.channelAccessToken, mediaMaxBytes, {
-        originalFilename,
-        ...(abortSignal ? { signal: abortSignal } : {}),
-      });
-      abortSignal?.throwIfAborted();
-      allMedia.push({
-        path: media.path,
-        contentType: media.contentType,
-        // LINE names only file messages; the model needs that name to answer
-        // questions that refer to the attachment by it.
-        ...(originalFilename ? { fileName: originalFilename } : {}),
-      });
-    } catch (err) {
-      if (abortSignal?.aborted) {
-        throw abortSignal.reason;
-      }
-      if (isRetryableLineInboundMediaError(err)) {
-        // Preparation-phase failure before turn adoption: reject so the durable
-        // ingress drain retries the whole event once LINE finishes preparing the
-        // media, instead of degrading it to an unavailable-attachment notice that
-        // permanently loses media with no text fallback.
-        throw err;
-      }
-      mediaUnavailable = true;
-      const errMsg = String(err);
-      if (errMsg.includes("exceeds") && errMsg.includes("limit")) {
-        logVerbose(`line: media exceeds size limit for message ${message.id}`);
-      } else {
-        runtime.error?.(danger(`line: failed to download media: ${errMsg}`));
-      }
-    }
-  }
-  return { allMedia, mediaUnavailable };
-}
-
 async function handleMessageEvent(
   event: MessageEvent,
   context: LineHandlerContext,
@@ -549,22 +473,19 @@ async function handleMessageEvent(
       const media = download
         ? toHistoryMediaEntries(download.allMedia, { kind: "image", messageId: message.id })
         : undefined;
-      const description = describeLineMessageForHistory(message);
       await createChannelHistoryWindow({ historyMap: context.groupHistories }).recordWithMedia({
         historyKey,
         limit: historyLimit,
         entry: {
           sender,
-          // An answered turn tells the sender their attachment did not arrive; a
-          // kept one has no reply to carry that, so the notice rides the entry
-          // instead. Without it an oversized image reads as a normal one that the
-          // following mention then cannot see.
-          body: download?.mediaUnavailable
-            ? formatInboundMediaUnavailableText({
-                body: description,
-                notice: LINE_ATTACHMENT_UNAVAILABLE_NOTICE,
-              })
-            : description,
+          // An answered turn tells the sender what did not arrive; a kept entry has
+          // no reply to carry that, so the notices ride the entry instead. Without
+          // them an oversized image, or a set LINE delivered short, reads as whole
+          // to the mention that follows.
+          body: withLineDeliveryNotices(describeLineMessageForHistory(message), {
+            missingParts: context.missingParts,
+            mediaUnavailable: download?.mediaUnavailable,
+          }),
           timestamp: event.timestamp,
           messageId: message.id,
         },

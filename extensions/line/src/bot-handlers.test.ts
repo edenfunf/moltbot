@@ -2010,7 +2010,16 @@ describe("handleLineWebhookEvents", () => {
   it("does not fetch a gated attachment no later mention can receive", async () => {
     const processMessage = vi.fn();
     const groupHistories = new Map<string, HistoryEntry[]>();
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: true,
+      requireMentionOnAllMessageTypes: true,
+      groupHistories,
+    });
 
+    // Two sends, each its own delivery: events handed over together are one send,
+    // the first answering for the rest.
     await handleLineWebhookEvents(
       [
         createTestMessageEvent({
@@ -2024,6 +2033,11 @@ describe("handleLineWebhookEvents", () => {
           source: { type: "group", groupId: "group-heavy", userId: "user-heavy" },
           webhookEventId: "evt-gated-video",
         }),
+      ],
+      context,
+    );
+    await handleLineWebhookEvents(
+      [
         createTestMessageEvent({
           message: { id: "m-gated-file", type: "file", fileName: "report.pdf", fileSize: 12 },
           timestamp: 1700000001000,
@@ -2031,13 +2045,7 @@ describe("handleLineWebhookEvents", () => {
           webhookEventId: "evt-gated-file",
         }),
       ],
-      createLineWebhookTestContext({
-        processMessage,
-        groupPolicy: "open",
-        requireMention: true,
-        requireMentionOnAllMessageTypes: true,
-        groupHistories,
-      }),
+      context,
     );
 
     expect(processMessage).not.toHaveBeenCalled();
@@ -2133,6 +2141,53 @@ describe("handleLineWebhookEvents", () => {
           expect.objectContaining({ path: "/media/m1.png" }),
           expect.objectContaining({ path: "/media/m2.png" }),
           expect.objectContaining({ path: "/media/m3.png" }),
+        ],
+      }),
+    ]);
+  });
+
+  it("tells a kept multi-image send how many of its images never arrived", async () => {
+    downloadLineMediaMock.mockImplementation(async (messageId: string) => ({
+      path: `/media/${messageId}.png`,
+      contentType: "image/png",
+      size: 10,
+    }));
+    const processMessage = vi.fn();
+    const groupHistories = new Map<string, HistoryEntry[]>();
+    const context = {
+      ...createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: true,
+        requireMentionOnAllMessageTypes: true,
+        groupHistories,
+        turnAdoptionLifecycle: createTurnAdoptionLifecycleSpy(),
+      }),
+      // The spool timed the set out with one of its three parts still missing.
+      missingParts: 1,
+    };
+    const imagePart = (messageId: string, index: number) =>
+      createTestMessageEvent({
+        message: {
+          id: messageId,
+          type: "image",
+          contentProvider: { type: "line" },
+          quoteToken: `q-${messageId}`,
+          imageSet: { id: "image-set-short", index, total: 3 },
+        },
+        source: { type: "group", groupId: "group-short-set", userId: "user-set" },
+        webhookEventId: `evt-short-set-${index}`,
+      });
+
+    await handleLineWebhookEvents([imagePart("m1", 1), imagePart("m2", 2)], context);
+
+    expect(processMessage).not.toHaveBeenCalled();
+    expect(groupHistories.get("group-short-set")).toEqual([
+      expect.objectContaining({
+        body: expect.stringContaining("[line: 1 more image in this send was not delivered]"),
+        media: [
+          expect.objectContaining({ path: "/media/m1.png" }),
+          expect.objectContaining({ path: "/media/m2.png" }),
         ],
       }),
     ]);

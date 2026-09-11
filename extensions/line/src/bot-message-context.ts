@@ -239,9 +239,32 @@ function extractMessageText(message: MessageEvent["message"]): string {
   return "";
 }
 
-/** One wording for both paths: an answered turn appends it to the agent body, a
- *  gated one to the history entry, so a reader is told the same thing either way. */
-export const LINE_ATTACHMENT_UNAVAILABLE_NOTICE = "[line attachment unavailable]";
+const LINE_ATTACHMENT_UNAVAILABLE_NOTICE = "[line attachment unavailable]";
+
+/**
+ * Says what did not arrive with a LINE send: images LINE announced for the set
+ * but never delivered, and attachments it delivered that could not be fetched.
+ * An answered turn applies it to the agent body and a gated one to the history
+ * entry, so a reader is told the same thing either way and a short set kept for
+ * a later mention does not read as the whole send.
+ */
+export function withLineDeliveryNotices(
+  body: string,
+  params: { missingParts?: number; mediaUnavailable?: boolean },
+): string {
+  const withShortfall = params.missingParts
+    ? formatInboundMediaUnavailableText({
+        body,
+        notice: `[line: ${params.missingParts === 1 ? "1 more image in this send was" : `${params.missingParts} more images in this send were`} not delivered]`,
+      })
+    : body;
+  return params.mediaUnavailable
+    ? formatInboundMediaUnavailableText({
+        body: withShortfall,
+        notice: LINE_ATTACHMENT_UNAVAILABLE_NOTICE,
+      })
+    : withShortfall;
+}
 
 /**
  * Renders a message the group's mention gate kept as context instead of
@@ -497,18 +520,10 @@ export async function buildLineMessageContext(params: BuildLineMessageContextPar
   const rawBody = textContent;
   // The turn answers what arrived. Saying so keeps the agent from describing a
   // short set as the whole send.
-  const shortfallNotice = params.missingParts
-    ? `[line: ${params.missingParts === 1 ? "1 more image in this send was" : `${params.missingParts} more images in this send were`} not delivered]`
-    : undefined;
-  const withShortfall = shortfallNotice
-    ? formatInboundMediaUnavailableText({ body: rawBody, notice: shortfallNotice })
-    : rawBody;
-  const agentBody = mediaUnavailable
-    ? formatInboundMediaUnavailableText({
-        body: withShortfall,
-        notice: LINE_ATTACHMENT_UNAVAILABLE_NOTICE,
-      })
-    : withShortfall;
+  const agentBody = withLineDeliveryNotices(rawBody, {
+    missingParts: params.missingParts,
+    mediaUnavailable,
+  });
 
   if (!agentBody && mediaFacts.length === 0) {
     return null;
