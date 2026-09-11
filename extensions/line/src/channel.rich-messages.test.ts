@@ -1,4 +1,6 @@
 // Line tests cover typed rich-message boundaries.
+import { renderPresentationForDelivery } from "openclaw/plugin-sdk/interactive-runtime";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { linePlugin } from "./channel.js";
@@ -11,6 +13,12 @@ import {
   renderLineCard,
 } from "./rich-messages.js";
 import type { LineRichCard } from "./types.js";
+
+const DIRECT_TARGET = "line:U0123456789abcdef0123456789abcdef";
+
+function prepareDirectLineReplyPayload(payload: ReplyPayload) {
+  return prepareLineReplyPayload(payload, DIRECT_TARGET);
+}
 
 function resolveChannelDataSchema() {
   const discovery = lineMessageActions.describeMessageTool({
@@ -80,7 +88,7 @@ describe("LINE rich-message boundaries", () => {
           },
         ],
       },
-      ctx: {} as never,
+      ctx: { to: "line:group:C0123456789abcdef0123456789abcdef" } as never,
     });
 
     const line = result?.channelData?.line as {
@@ -131,7 +139,7 @@ describe("LINE rich-message boundaries", () => {
   });
 
   it("turns an ask_user question into tappable LINE options", async () => {
-    const prepared = await prepareLineReplyPayload({
+    const prepared = await prepareDirectLineReplyPayload({
       text: "Agent needs input:\n\nWhich environment?\n1. Staging\n2. Production",
       presentationTextMode: "fallback",
       channelData: {
@@ -187,6 +195,62 @@ describe("LINE rich-message boundaries", () => {
     );
   });
 
+  it.each([
+    { to: DIRECT_TARGET, native: true },
+    { to: "line:group:C0123456789abcdef0123456789abcdef", native: false },
+    { to: "line:room:R0123456789abcdef0123456789abcdef", native: false },
+    { to: "unknown", native: false },
+    { to: undefined, native: false },
+  ])("renders question choices for destination $to", async ({ to, native }) => {
+    const questionId = "ask_3d8dbe55be452a9a39add7c909beb119";
+    const payload: ReplyPayload = {
+      text: "Which environment?\n1. Staging\n2. Production",
+      presentationTextMode: "fallback",
+      channelData: { askUser: { questionId, optionValues: ["Staging", "Production"] } },
+      presentation: {
+        blocks: [
+          { type: "text", text: "Which environment?" },
+          {
+            type: "buttons",
+            buttons: ["Staging", "Production"].map((label) => ({
+              label,
+              action: { type: "question", questionId, optionValue: label },
+            })),
+          },
+        ],
+      },
+    };
+    const outbound = await renderPresentationForDelivery(
+      {
+        presentationCapabilities: lineOutboundAdapter.presentationCapabilities,
+        renderPresentation: (adapted) =>
+          lineOutboundAdapter.renderPresentation!({
+            payload: adapted,
+            presentation: adapted.presentation,
+            ctx: { to } as never,
+          }),
+      },
+      payload,
+    );
+    for (const prepared of [await prepareLineReplyPayload(payload, to), outbound]) {
+      expect(prepared.presentation).toBeUndefined();
+      const line = prepared.channelData?.line as
+        | {
+            flexMessage?: { contents?: { footer?: { contents?: Array<{ action?: unknown }> } } };
+          }
+        | undefined;
+      if (native) {
+        expect(line?.flexMessage?.contents?.footer?.contents).toMatchObject([
+          { action: { type: "postback", data: `line.question=${questionId}&line.option=0` } },
+          { action: { type: "postback", data: `line.question=${questionId}&line.option=1` } },
+        ]);
+      } else {
+        expect(line).toBeUndefined();
+        expect(prepared.text).toBe(payload.text);
+      }
+    }
+  });
+
   // The free-text route is only ever offered as text on LINE. Above the action
   // budget the shared adapter writes it under `Actions:`; below it the control is
   // still delivered here, so the renderer has to write the same words itself or a
@@ -195,7 +259,7 @@ describe("LINE rich-message boundaries", () => {
     const QUESTION_ID = "ask_3d8dbe55be452a9a39add7c909beb119";
     const readCardBody = async (optionCount: number): Promise<string | undefined> => {
       const labels = ["Staging", "Production", "Canary", "Sandbox"].slice(0, optionCount);
-      const prepared = await prepareLineReplyPayload({
+      const prepared = await prepareDirectLineReplyPayload({
         text: "Which environment?",
         presentationTextMode: "fallback",
         channelData: { askUser: { questionId: QUESTION_ID, optionValues: labels } },
@@ -240,7 +304,7 @@ describe("LINE rich-message boundaries", () => {
   });
 
   it("falls back to text when two options truncate to the same control label", async () => {
-    const prepared = await prepareLineReplyPayload({
+    const prepared = await prepareDirectLineReplyPayload({
       text: "Which environment? 1. Deploy the release candidate to the shared staging cluster 2. Deploy the release candidate to the shared production cluster",
       presentationTextMode: "fallback",
       channelData: {
@@ -289,7 +353,7 @@ describe("LINE rich-message boundaries", () => {
   });
 
   it("draws the declared options and leaves the free-text route to the card text", async () => {
-    const prepared = await prepareLineReplyPayload({
+    const prepared = await prepareDirectLineReplyPayload({
       text: "Agent needs input: Which environment?",
       presentationTextMode: "fallback",
       channelData: {
@@ -556,6 +620,7 @@ describe("LINE rich-message boundaries", () => {
           },
         ],
       },
+      ctx: { to: DIRECT_TARGET },
     } as never);
 
     expect(rendered?.text).toBe("Pick a file");
@@ -598,6 +663,7 @@ describe("LINE rich-message boundaries", () => {
           },
         ],
       },
+      ctx: { to: DIRECT_TARGET },
     } as never);
 
     expect(rendered?.text).toBe("Pick a day");

@@ -1021,9 +1021,13 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).not.toHaveBeenCalled();
   });
 
-  it.each(["disabled", "allowlist"] as const)(
-    "does not resolve question taps from a sender denied by groupPolicy %s",
-    async (groupPolicy) => {
+  it.each([
+    { groupPolicy: "disabled", userId: "user-denied" },
+    { groupPolicy: "allowlist", userId: "user-denied" },
+    { groupPolicy: "allowlist", userId: undefined },
+  ] as const)(
+    "does not resolve question taps with groupPolicy $groupPolicy and userId $userId",
+    async ({ groupPolicy, userId }) => {
       resolveLineQuestionPostbackMock.mockClear();
       const processMessage = vi.fn();
       await handleLineWebhookEvents(
@@ -1032,7 +1036,7 @@ describe("handleLineWebhookEvents", () => {
             type: "postback",
             replyToken: "reply-token",
             timestamp: Date.now(),
-            source: { type: "group", groupId: "group-1", userId: "user-denied" },
+            source: { type: "group", groupId: "group-1", ...(userId ? { userId } : {}) },
             mode: "active",
             webhookEventId: `evt-question-denied-${groupPolicy}`,
             deliveryContext: { isRedelivery: false },

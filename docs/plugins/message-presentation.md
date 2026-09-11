@@ -152,15 +152,17 @@ Button semantics:
 - `action.type: "question"` identifies one choice for a live, runtime-authored
   `ask_user` question. Like `approval`, this is an OpenClaw runtime action;
   agents and plugins must not synthesize question IDs. Telegram, Discord,
-  Slack, Mattermost, and LINE map it to transport-private native callbacks and
-  resolve the choice through the Gateway. When the question becomes answered,
+  Slack, Mattermost, and LINE direct chats map it to transport-private native
+  callbacks and resolve the choice through the Gateway. When the question becomes answered,
   expired, or cancelled, Telegram, Discord, and Slack edit the delivered
   message, remove its actions, and append the terminal status. Mattermost
   retires its prompt only on the click it accepts, so a question that ends
   elsewhere keeps its buttons; a later click gets private feedback. Denied
   Mattermost clicks also receive private feedback and leave the prompt unchanged.
-  LINE cannot edit a message it already delivered, so a tap after the question
-  ends receives a notice.
+  LINE group and multi-person chats keep readable choices because their postbacks
+  do not include the sender identity needed to admit an answer. Unknown LINE
+  destinations also use text. LINE cannot edit a message it already delivered, so a
+  tap after the question ends receives a notice.
   LINE draws at most four controls on one card, matching its two-to-four option
   bound. WhatsApp, Signal, and iMessage render up to four single-select choices
   as `1️⃣` through `4️⃣` reactions. Other question shapes degrade to label text,

@@ -35,6 +35,7 @@ import {
 } from "./flex-templates/media-control-cards.js";
 import { fitsLineFlexBubble } from "./flex-templates/message.js";
 import { createAgendaCard, createEventCard } from "./flex-templates/schedule-cards.js";
+import { inferLineTargetChatType } from "./messaging-target.js";
 import { buildLineQuestionPostbackData, type LineQuestionPostback } from "./question-postback.js";
 import type { LineQuickReplyItem, LineRichCard } from "./types.js";
 
@@ -214,7 +215,21 @@ function toLineAction(
   return undefined;
 }
 
-export function renderLinePresentation(payload: ReplyPayload, presentation: MessagePresentation) {
+export function renderLinePresentation(
+  payload: ReplyPayload,
+  presentation: MessagePresentation,
+  to?: string,
+) {
+  // Group and room postbacks do not carry the sender identity required by
+  // question admission. Keep their choices readable through the shared fallback.
+  if (
+    inferLineTargetChatType(to ?? "") !== "direct" &&
+    presentation.blocks.some(
+      (block) => block.type === "buttons" && block.buttons.some(isLineQuestionButton),
+    )
+  ) {
+    return null;
+  }
   const hasCard = presentation.blocks.some(
     (block) => block.type === "buttons" && block.buttons.length > 0,
   );
@@ -325,7 +340,10 @@ export function renderLinePresentation(payload: ReplyPayload, presentation: Mess
  * replies the plugin delivers itself reach delivery with the controls still
  * portable. Preparing them here keeps both LINE delivery paths on one rendering.
  */
-export async function prepareLineReplyPayload(payload: ReplyPayload): Promise<ReplyPayload> {
+export async function prepareLineReplyPayload(
+  payload: ReplyPayload,
+  to?: string,
+): Promise<ReplyPayload> {
   if (!normalizeMessagePresentation(payload.presentation)) {
     return payload;
   }
@@ -335,7 +353,7 @@ export async function prepareLineReplyPayload(payload: ReplyPayload): Promise<Re
     {
       presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
       renderPresentation: (adapted) => {
-        const rendered = renderLinePresentation(adapted, adapted.presentation);
+        const rendered = renderLinePresentation(adapted, adapted.presentation, to);
         // Quick replies have no Flex body to replace the author's fallback prose.
         return rendered && usesFallbackText && rendered.channelData.line.flexMessage === undefined
           ? { ...rendered, text: payload.text }
