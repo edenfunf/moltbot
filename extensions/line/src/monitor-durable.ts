@@ -5,7 +5,6 @@ import type { LineChannelData } from "./types.js";
 
 type LineDurableReplyOptions = {
   to: string;
-  replyToId: null;
 };
 
 function hasLineChannelData(payload: ReplyPayload): boolean {
@@ -36,18 +35,7 @@ export function resolveLineDurableReplyOptions(params: {
   if (reply.hasMedia || !reply.hasText) {
     return false;
   }
-  // An explicit reply-to survives the inbound context's threading policy. LINE cannot
-  // honour it, and core would require a `replyTo` capability this channel does not
-  // declare, so such a reply keeps the inline path rather than being refused there.
-  if (params.payload.replyToId != null) {
-    return false;
-  }
-  return {
-    to: params.to,
-    // LINE cannot quote a message id, so this send replies to nothing. Core would
-    // otherwise take the reply-to from the turn context (`ReplyToIdFull`), which
-    // LINE leaves unset today but #134220 fills in from an inbound quote — and that
-    // would require a `replyTo` capability this send does not use and cannot honour.
-    replyToId: null,
-  };
+  // No reply-to here: core takes it from the payload or the turn context, and the
+  // outbound adapter turns it into a quote on the request it records.
+  return { to: params.to };
 }
