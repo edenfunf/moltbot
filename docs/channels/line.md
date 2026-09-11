@@ -556,14 +556,21 @@ link-local, and private-network targets.
   `channels.line.tokenFile could not be used (symlink)`. Sending needs only the
   token, so while only `secretFile` cannot be used, sends that name LINE still go
   out. Until the file is fixed, commands that ask whether LINE is configured leave
-  the account out: `openclaw message send` without `--channel` does not count LINE
-  (with no other channel it reports that no channel is configured), and neither does
-  a broadcast without `--channel`; creating a cron job with `delivery.channel: line`,
-  or moving a job's delivery to LINE, is rejected as not configured; pending DM
-  pairing requests drop out of `openclaw pairing list line`, and approving one
-  reports that the account does not use DM pairing; its peers drop out of the
-  conversation list; and `openclaw channels capabilities --channel line` shows
-  `not configured`. Point the key at a readable regular file; symlinks are rejected.
+  the account out:
+  - `openclaw message send` without `--channel` does not count LINE (with no other
+    channel it reports that no channel is configured), and neither does a broadcast
+    without `--channel`.
+  - Creating a cron job with `delivery.channel: line`, or moving a job's delivery to
+    LINE, is rejected as not configured.
+  - The Control UI's Channels page does not list the account's pending DM pairing
+    requests, and approving one there reports that the account does not use DM
+    pairing. `openclaw pairing list line` and `openclaw pairing approve` read the
+    pairing store directly and still work.
+  - The account's peers drop out of the conversation list.
+  - `openclaw channels capabilities --channel line` shows `not configured`.
+
+  Point the key at a readable regular file; symlinks are rejected.
+
 - **No inbound events:** run `openclaw channels status --probe`. LINE only delivers
   events while the channel's webhook URL is registered and **Use webhook** is on in
   the Messaging API tab of the LINE Developers Console, and the probe reports both —
