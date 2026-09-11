@@ -7,6 +7,8 @@ import { t } from "../../i18n/index.ts";
 import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import { moveArrayEntry, type ArrayDropPosition } from "../../lib/array-order.ts";
 import { formatDurationHuman } from "../../lib/format.ts";
+import { showToast } from "../../lib/toast.ts";
+import { modelProviderErrorMessage } from "./config-mutation.ts";
 import type {
   ModelProviderCard,
   ModelProviderPendingLogout,
@@ -15,6 +17,23 @@ import type {
 
 registerSettingsEnglish();
 
+export function showProfileActionError(error: unknown): void {
+  showToast({
+    placement: "bottom",
+    message: modelProviderErrorMessage(error),
+    icon: icons.alertTriangle,
+    durationMs: 12_000,
+  });
+}
+
+export function showProfileLogoutSuccess(warning?: string): void {
+  showToast({
+    placement: "bottom",
+    message: [t("modelProviders.logout.done"), warning].filter(Boolean).join(" "),
+    icon: icons.check,
+  });
+}
+
 type ProviderProfile = ModelProviderCard["profiles"][number];
 
 export type ProviderProfilesViewProps = {
@@ -22,7 +41,8 @@ export type ProviderProfilesViewProps = {
   canMutate: boolean;
   mutationBlockedReason: string | null;
   profileOrders: Record<string, string[]>;
-  onOpenModelSetup: () => void;
+  onAddAccount: (() => void) | undefined;
+  addAccountDisabled: boolean;
   onProfileOrderChange: (cardId: string, provider: string, profileIds: string[] | null) => void;
   onRequestLogout: (pending: ModelProviderPendingLogout) => void;
 };
@@ -370,9 +390,18 @@ export function renderProviderProfiles(card: ModelProviderCard, props: ProviderP
               ${t("modelProviders.profiles.resetOrder")}
             </button>`,
           )}
-          <button type="button" class="btn btn--sm" @click=${props.onOpenModelSetup}>
-            ${t("modelProviders.profiles.addAccount")}
-          </button>
+          ${
+            props.onAddAccount
+              ? html`<button
+                  type="button"
+                  class="btn btn--sm"
+                  ?disabled=${props.addAccountDisabled}
+                  @click=${props.onAddAccount}
+                >
+                  ${t("modelProviders.profiles.addAccount")}
+                </button>`
+              : nothing
+          }
         </div>
       </div>
       <div class="model-providers__profile-list" role="list">
