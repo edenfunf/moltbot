@@ -1,8 +1,9 @@
 ---
 summary: "Doctor command: health checks, config migrations, and repair steps"
 read_when:
-  - Adding or modifying doctor migrations
-  - Introducing breaking config changes
+  - You need to repair stale config, state, or a gateway service
+  - You want to find the doctor page that covers your problem
+  - You are adding or modifying doctor migrations or breaking config changes
 title: "Doctor"
 sidebarTitle: "Doctor"
 ---
@@ -79,6 +80,7 @@ still resolves. Each entry points at the page that now holds the content.
 - <a id="11b-bootstrap-file-size" />[11b. Bootstrap file size](/gateway/doctor/gateway-and-services#11b-bootstrap-file-size)
 - <a id="11c-shell-completion" />[11c. Shell completion](/gateway/doctor/gateway-and-services#11c-shell-completion)
 - <a id="11d-stale-channel-plugin-cleanup" />[11d. Stale channel plugin cleanup](/gateway/doctor/gateway-and-services#11d-stale-channel-plugin-cleanup)
+- <a id="11e-project-clone-shape" />[11e. Project clone shape](/gateway/doctor/gateway-and-services#11e-project-clone-shape)
 - <a id="12-gateway-auth-checks-local-token" />[12. Gateway auth checks (local token)](/gateway/doctor/gateway-and-services#12-gateway-auth-checks-local-token)
 - <a id="12b-read-only-secretref-aware-repairs" />[12b. Read-only SecretRef-aware repairs](/gateway/doctor/gateway-and-services#12b-read-only-secretref-aware-repairs)
 - <a id="13-gateway-health-check-restart" />[13. Gateway health check + restart](/gateway/doctor/gateway-and-services#13-gateway-health-check-restart)
@@ -95,3 +97,5 @@ still resolves. Each entry points at the page that now holds the content.
 
 - [Gateway runbook](/gateway)
 - [Gateway troubleshooting](/gateway/troubleshooting)
+- [`openclaw status`](/cli/status) — local diagnosis and channel probes
+- [Configuration reference](/gateway/configuration-reference) — core config keys, defaults, and links to subsystem references

@@ -1,19 +1,25 @@
 // Control UI view renders the Models settings page content.
-import { html, nothing } from "lit";
-import type { FastMode, ModelsProbeResult } from "../../api/types.ts";
+import { html, nothing, type TemplateResult } from "lit";
+import type { FastMode, GatewayAgentRow, ModelsProbeResult } from "../../api/types.ts";
+import { titleForRoute } from "../../app-navigation.ts";
+import type { AgentSelectionCapability } from "../../app/agent-selection.ts";
+import { renderAgentScopeControl } from "../../components/agent-scope-control.ts";
 import { icons } from "../../components/icons.ts";
 import { renderProviderBrandIcon } from "../../components/provider-icon.ts";
 import { renderProviderUsageDetails } from "../../components/provider-usage.ts";
 import {
+  renderLearnMoreLink,
   renderSettingsEmpty,
   renderSettingsGroup,
   renderSettingsLoadingSkeleton,
   renderSettingsPage,
+  renderSettingsPageHeader,
   renderSettingsRow,
   renderSettingsSection,
   renderSettingsStatus,
   renderSettingsValue,
 } from "../../components/settings-ui.ts";
+import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
 import { t } from "../../i18n/index.ts";
 import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
@@ -21,6 +27,7 @@ import { formatCompactTokenCount, formatCost, formatTimeMs } from "../../lib/for
 import { MODEL_SETTINGS_TARGET_IDS } from "../config/route-data.ts";
 import "../../styles/model-providers.css";
 import "../../styles/usage.css";
+import type { ModelProviderRowMessage } from "./config-mutation.ts";
 import type {
   DefaultModelSelection,
   ModelPickerEntry,
@@ -33,12 +40,6 @@ import { renderProviderProfiles } from "./profiles-view.ts";
 import { hasVerifiedProvider, renderProviderStatus } from "./view-status.ts";
 
 registerSettingsEnglish();
-
-export type ModelProviderRowMessage = {
-  kind: "success" | "error";
-  text: string;
-  warning?: string;
-};
 
 type ModelProvidersViewProps = {
   connected: boolean;
@@ -57,6 +58,10 @@ type ModelProvidersViewProps = {
   thinkingOverridden: boolean;
   fastMode: FastMode | undefined;
   fastModeOverridden: boolean;
+  /** True while picker-triggered catalog discovery is in flight. */
+  catalogDiscovering: boolean;
+  /** Retryable error from a picker-triggered catalog discovery. */
+  catalogDiscoveryError: string | null;
   configBusy: boolean;
   quickAddSupported: boolean;
   unconfiguredProviders: ProviderOption[];
@@ -95,7 +100,12 @@ type ModelProvidersViewProps = {
   onThinkingReset: () => void;
   onFastModeChange: (mode: FastMode) => void;
   onFastModeReset: () => void;
+  onModelPickerOpen: () => void;
+  onCatalogRetry: () => void;
   onOpenModelSetup: () => void;
+  onConnect: (card: ModelProviderCard) => void;
+  canConnect: (card: ModelProviderCard) => boolean;
+  loginBusy: boolean;
 };
 
 function configMutationDisabled(props: ModelProvidersViewProps): boolean {
@@ -290,6 +300,18 @@ function renderProviderActions(card: ModelProviderCard, props: ModelProvidersVie
   return html`
     <div class="model-providers__card-actions">
       ${
+        props.canConnect(card) && card.profiles.length === 0
+          ? html`<button
+              class="btn btn--sm"
+              data-models-connect-provider=${card.id}
+              ?disabled=${mutationDisabled || props.loginBusy}
+              @click=${() => props.onConnect(card)}
+            >
+              ${t("modelProviders.login.action")}
+            </button>`
+          : nothing
+      }
+      ${
         isConfigured
           ? html`
               <button
@@ -314,7 +336,8 @@ function renderProviderActions(card: ModelProviderCard, props: ModelProvidersVie
                 @click=${() => props.onOpenKeyEditor(card.id)}
               >
                 ${
-                  card.hasConfigApiKey
+                  card.hasConfigApiKey ||
+                  card.profiles.some((profile) => profile.type === "api_key")
                     ? t("modelProviders.apiKey.replace")
                     : t("modelProviders.apiKey.set")
                 }
@@ -322,7 +345,8 @@ function renderProviderActions(card: ModelProviderCard, props: ModelProvidersVie
             `
       }
       ${
-        card.hasConfigApiKey
+        card.hasConfigApiKey ||
+        card.profiles.some((profile) => profile.type === "api_key" && profile.logoutSupported)
           ? html`
               <button
                 class="btn btn--sm danger"
@@ -369,7 +393,8 @@ function renderProviderRow(card: ModelProviderCard, props: ModelProvidersViewPro
               canMutate: props.canMutate && !props.configBusy,
               mutationBlockedReason: props.mutationBlockedReason,
               profileOrders: props.profileOrders,
-              onOpenModelSetup: props.onOpenModelSetup,
+              onAddAccount: props.canConnect(card) ? () => props.onConnect(card) : undefined,
+              addAccountDisabled: props.loginBusy || configMutationDisabled(props),
               onProfileOrderChange: props.onProfileOrderChange,
               onRequestLogout: props.onRequestLogout,
             })
@@ -529,6 +554,8 @@ export function renderModelProviders(props: ModelProvidersViewProps) {
           fastMode: props.fastMode,
           fastModeOverridden: props.fastModeOverridden,
           loading: true,
+          catalogDiscovering: props.catalogDiscovering,
+          catalogDiscoveryError: props.catalogDiscoveryError,
           canMutate: !configMutationDisabled(props),
           mutationBlockedReason: props.mutationBlockedReason,
           busy: props.busy,
@@ -540,6 +567,8 @@ export function renderModelProviders(props: ModelProvidersViewProps) {
           onThinkingReset: props.onThinkingReset,
           onFastModeChange: props.onFastModeChange,
           onFastModeReset: props.onFastModeReset,
+          onOpen: props.onModelPickerOpen,
+          onCatalogRetry: props.onCatalogRetry,
         })}
       </div>
       ${renderSettingsGroup(renderSettingsLoadingSkeleton())}
@@ -577,6 +606,8 @@ export function renderModelProviders(props: ModelProvidersViewProps) {
         thinkingOverridden: props.thinkingOverridden,
         fastMode: props.fastMode,
         fastModeOverridden: props.fastModeOverridden,
+        catalogDiscovering: props.catalogDiscovering,
+        catalogDiscoveryError: props.catalogDiscoveryError,
         canMutate: !configMutationDisabled(props),
         mutationBlockedReason: props.mutationBlockedReason,
         busy: props.busy,
@@ -588,6 +619,8 @@ export function renderModelProviders(props: ModelProvidersViewProps) {
         onThinkingReset: props.onThinkingReset,
         onFastModeChange: props.onFastModeChange,
         onFastModeReset: props.onFastModeReset,
+        onOpen: props.onModelPickerOpen,
+        onCatalogRetry: props.onCatalogRetry,
       })}
     </div>
     ${renderSettingsSection(
@@ -631,4 +664,46 @@ export function renderModelProviders(props: ModelProvidersViewProps) {
         : nothing
     }
   `);
+}
+
+/** Page shell for the Models settings page: header, agent scope control, body. */
+export function renderModelProvidersPageShell(props: {
+  agentSelection: AgentSelectionCapability;
+  agents: readonly GatewayAgentRow[];
+  onOpenModelSetup: () => void;
+  selectedAgentId: string;
+  body: TemplateResult;
+  onConnect: () => void;
+  connectDisabled: boolean;
+  login: TemplateResult;
+  loginMessage?: ModelProviderRowMessage;
+}): TemplateResult {
+  return html`
+    ${renderSettingsPageHeader({
+      title: titleForRoute("model-providers"),
+      subtitle: html`${t("modelProviders.subtitle")}
+      ${renderLearnMoreLink("https://docs.openclaw.ai/concepts/model-providers")}`,
+      actions: html`
+        ${renderAgentScopeControl({
+          agents: props.agents,
+          selection: props.agentSelection,
+          allowAll: false,
+          selectedId: props.selectedAgentId,
+        })}
+        <button
+          class="btn"
+          data-models-connect
+          ?disabled=${props.connectDisabled}
+          @click=${props.onConnect}
+        >
+          ${t("modelProviders.login.action")}
+        </button>
+        <button class="btn" @click=${props.onOpenModelSetup}>
+          ${icons.settings}<span>${t("modelProviders.configureModels")}</span>
+        </button>
+      `,
+    })}
+    ${renderSettingsWorkspace(html`${renderMutationMessage(props.loginMessage)}${props.body}`)}
+    ${props.login}
+  `;
 }

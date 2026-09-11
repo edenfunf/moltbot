@@ -123,9 +123,9 @@ export function applyLineQuoteToken(
 /**
  * Drops every quote token from a request, or undefined when it carried none.
  *
- * LINE refuses a whole request for a quote token it no longer accepts — the
- * quoted message was deleted, say — and its answer names no field, so the only
- * way to tell that rejection apart is to offer the same reply without the quote.
+ * LINE can refuse a whole request for an invalid quote token without naming a
+ * field in its error. Offering the same reply without the quote lets delivery
+ * recover from that rejection.
  */
 export function withoutLineQuoteTokens(messages: readonly Message[]): Message[] | undefined {
   if (!messages.some((message) => "quoteToken" in message)) {

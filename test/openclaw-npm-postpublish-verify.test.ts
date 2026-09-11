@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createHash } from "node:crypto";
 // OpenClaw npm postpublish tests validate postpublish verification behavior.
 import {
   existsSync,
@@ -36,7 +36,6 @@ import {
   resolveInstalledBinaryPath,
   retryNpmRegistryProvenanceRead,
   verifyNpmProvenanceAttestation,
-  verifyNpmRegistrySignatures,
 } from "../scripts/openclaw-npm-postpublish-verify.ts";
 import {
   rewriteRootRuntimeImportsToStableAliases,
@@ -202,29 +201,6 @@ describe("npm registry provenance verification", () => {
     ).rejects.toThrow(
       "npm registry request timed out after 5ms: https://registry.example/openclaw",
     );
-  });
-
-  it("verifies an npm registry signature against the matching public key", () => {
-    const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const payload = `${packageName}@${version}:${integrity}`;
-    const signature = sign("sha256", Buffer.from(payload, "utf8"), keys.privateKey).toString(
-      "base64",
-    );
-
-    expect(() =>
-      verifyNpmRegistrySignatures({
-        packageName,
-        version,
-        integrity,
-        signatures: [{ keyid: "test-key", sig: signature }],
-        keys: [
-          {
-            keyid: "test-key",
-            key: keys.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
-          },
-        ],
-      }),
-    ).not.toThrow();
   });
 
   it("requires a trusted GitHub release identity for the exact SLSA provenance attestation", async () => {
@@ -1175,6 +1151,27 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     }
   });
 
+  it("accepts Bun built-in modules without npm dependency declarations", () => {
+    const packageRoot = makeInstalledPackageRoot();
+
+    try {
+      writePackageFile(packageRoot, "package.json", {
+        version: "2026.9.9",
+        dependencies: {},
+      });
+      mkdirSync(join(packageRoot, "dist"), { recursive: true });
+      writeFileSync(
+        join(packageRoot, "dist", "bun-sqlite-library.js"),
+        'import { Database } from "bun:sqlite";\nconst { dlopen } = require("bun:ffi");\nexport { Database, dlopen };\n',
+        "utf8",
+      );
+
+      expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toStrictEqual([]);
+    } finally {
+      rmSync(packageRoot, { recursive: true, force: true });
+    }
+  });
+
   const companionSource = 'const voice = require("@discordjs/voice");\nexport { voice };\n';
   const companionOwnership = {
     chunks: {
@@ -1202,6 +1199,28 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
       }
     },
   );
+
+  it("accepts byte-matched ownership from an additional trusted companion manifest root", () => {
+    const { installRoot, packageRoot } = makeCompanionImportFixture({
+      companions: [],
+      ownership: companionOwnership,
+      source: companionSource,
+    });
+    const trustedManifestRoot = join(installRoot, "trusted-extensions");
+    writePackageFile(trustedManifestRoot, "discord/package.json", {
+      name: "@openclaw/discord",
+      version: "2026.7.33",
+      dependencies: { "@discordjs/voice": "0.19.2" },
+    });
+
+    try {
+      expect(
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot]),
+      ).toStrictEqual([]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
 
   it.each<{
     name: string;
