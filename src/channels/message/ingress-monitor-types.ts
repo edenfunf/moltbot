@@ -26,7 +26,7 @@ export type ChannelIngressMonitorDeliveryResult =
   | { kind: "deferred" }
   | { kind: "failed-retryable"; error: unknown };
 
-export type ChannelIngressMonitorInspectionContext =
+type ChannelIngressMonitorInspectionContext =
   | { phase: "admission" }
   | { phase: "claim"; claimedId: string; claimedLaneKey: string | undefined };
 
