@@ -29,6 +29,7 @@ import { normalizeLineMessage } from "./actions.js";
 import {
   clearLineDurableSendPlans,
   LineDurableSendPlanError,
+  LineDurableSendPlanStoreError,
   loadLineDurableSendPlans,
   recordLineDurableSendPlan,
 } from "./durable-send-plan.js";
@@ -347,31 +348,50 @@ async function sendPlannedLinePushes(
     index === quotedPushIndex ? applyLineQuoteToken(messages, replyQuoteToken) : messages,
   );
 
+  let pushes: { retryKey?: string; messages: LineOutboundMessage[] }[] = quotedPushes.map(
+    (messages) => ({ messages }),
+  );
+  if (deliveryQueueId) {
+    const keyedPushes = quotedPushes.map((messages, pushIndex) => ({
+      retryKey: resolveLinePushRetryKey({
+        deliveryQueueId,
+        partIndex: deliveryPartIndex ?? 0,
+        pushIndex,
+      }),
+      messages: messages.map(normalizeLineMessage),
+    }));
+    pushes = keyedPushes;
+    try {
+      pushes = (
+        await recordLineDurableSendPlan({
+          queueId: deliveryQueueId,
+          partIndex: deliveryPartIndex,
+          partCount: deliveryPartCount,
+          to,
+          ...(accountId ? { accountId } : {}),
+          pushes: keyedPushes,
+        })
+      ).pushes;
+    } catch (error) {
+      if (!(error instanceof LineDurableSendPlanStoreError)) {
+        throw error;
+      }
+      // The plan is crash evidence, not the delivery: a store that will not take it
+      // costs this part its recovery, never its reply, as a best-effort queue row does in
+      // core (`deliver-queue.ts`). The derived keys still let LINE deduplicate a retry;
+      // only a crash before the send settles is left unresolved instead of replayed.
+      getLineRuntime()
+        .logging.getChildLogger({ plugin: "line", feature: "durable-send" })
+        .warn(`${error.message} (delivery ${deliveryQueueId}); sending it without crash recovery`);
+    }
+  }
   return await dispatchLinePushes({
     to,
     cfg,
     accountId,
     onPlatformSendDispatch,
     onDeliveryResult,
-    pushes: deliveryQueueId
-      ? (
-          await recordLineDurableSendPlan({
-            queueId: deliveryQueueId,
-            partIndex: deliveryPartIndex,
-            partCount: deliveryPartCount,
-            to,
-            ...(accountId ? { accountId } : {}),
-            pushes: quotedPushes.map((messages, pushIndex) => ({
-              retryKey: resolveLinePushRetryKey({
-                deliveryQueueId,
-                partIndex: deliveryPartIndex ?? 0,
-                pushIndex,
-              }),
-              messages: messages.map(normalizeLineMessage),
-            })),
-          })
-        ).pushes
-      : quotedPushes.map((messages) => ({ messages })),
+    pushes,
   });
 }
 
@@ -493,11 +513,9 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
  * LINE has no read-only "was this accepted?" endpoint, so reconciliation reissues
  * the requests the interrupted send recorded, under the very keys it used: a push
  * LINE already accepted answers 409 with its original receipt, and one that never
- * landed is delivered now. The reply is not rendered again: the recorded messages are
- * what go back out, so a reply that would render differently today still resolves as
- * the one LINE was actually asked to take. They do pass through the same message
- * normalization the live send used, which is where a future change could still move
- * them relative to the recorded request.
+ * landed is delivered now. The reply is not rendered or normalized again: the recorded
+ * messages go back out as stored, so a reply that would render differently today still
+ * resolves as the one LINE was actually asked to take.
  */
 async function reconcileLineUnknownSend(
   ctx: ChannelMessageUnknownSendContext,

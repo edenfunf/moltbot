@@ -522,47 +522,92 @@ describe("LINE unknown-send reconciliation", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  // The plan store refuses a new entry once its namespace is full rather than evicting
-  // one, and that refusal reaches the operator unchanged: it names neither LINE nor the
-  // part, which is what the troubleshooting docs have to say.
-  it("surfaces a full plan namespace as the store's own refusal", async () => {
-    const store = createLineBlobStoreState();
+  /** Installs a plan store and a logger whose warnings the test can read. */
+  function usePlanStore(
+    openBlobStore: (options: { namespace: string }) => unknown,
+    chunkMarkdownText: (text: string) => string[] = (text) => [text],
+    chunkLimit = 5000,
+  ) {
+    const warn = vi.fn<(message: string) => void>();
     setLineRuntime({
-      state: {
-        // One row, and it is taken below: the store refuses a zero ceiling when it is
-        // opened, so a full namespace has to be reached rather than declared.
-        openBlobStore: (options: { namespace: string }) =>
-          store.state.openBlobStore({
-            ...options,
-            maxEntries: 1,
-            overflowPolicy: "reject-new",
-          }),
-      },
-      channel: {
-        text: { chunkMarkdownText: (text: string) => [text], resolveTextChunkLimit: () => 5000 },
-      },
+      state: { openBlobStore },
+      logging: { getChildLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() }) },
+      channel: { text: { chunkMarkdownText, resolveTextChunkLimit: () => chunkLimit } },
     } as unknown as PluginRuntime);
+    return warn;
+  }
+
+  /**
+   * One row, taken by the first recorded part: the store refuses a zero ceiling when it
+   * is opened, so a full namespace has to be reached rather than declared.
+   */
+  function useOneRowPlanStore() {
+    const store = createLineBlobStoreState();
+    const warn = usePlanStore((options) =>
+      store.state.openBlobStore({ ...options, maxEntries: 1, overflowPolicy: "reject-new" }),
+    );
+    return { store, warn };
+  }
+
+  // The plan is crash evidence, not the delivery: a store that will not take it costs
+  // the send its recovery, never its reply, and the operator is told which one.
+  it("sends a part the plan store refuses, under its derived key and without a record", async () => {
+    const { store, warn } = useOneRowPlanStore();
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "the one row this holds" });
     fetchMock.mockClear();
 
-    await expect(
-      linePlugin.outbound?.sendPayload?.({
-        cfg: CFG,
-        to: TARGET,
-        text: "hello",
-        payload: { text: "hello" },
-        deliveryQueueId: "queue-entry-2",
-        deliveryPartIndex: 0,
-        deliveryPartCount: 1,
-      } as never),
-    ).rejects.toThrow("Plugin blob namespace reached its stored row limit.");
+    await linePlugin.outbound?.sendPayload?.({
+      cfg: CFG,
+      to: TARGET,
+      text: "hello",
+      payload: { text: "hello" },
+      deliveryQueueId: "queue-entry-2",
+      deliveryPartIndex: 0,
+      deliveryPartCount: 1,
+    });
+
+    expect(pushedRequests().map((request) => request.retryKey)).toEqual([
+      resolveLinePushRetryKey({ deliveryQueueId: "queue-entry-2", partIndex: 0, pushIndex: 0 }),
+    ]);
+    expect(store.blobs.size).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Plugin blob namespace reached its stored row limit."),
+    );
+
+    // What it lost is recovery: a restart finds no record and refuses to replay it.
+    fetchMock.mockClear();
+    await expect(reconcile({ queueId: "queue-entry-2" })).resolves.toMatchObject({
+      status: "unresolved",
+      retryable: false,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // Recording is one write per part, made before any of the part leaves, so a
-  // ceiling reached while writing it withholds the whole reply rather than leaving
-  // half of it delivered. Both byte ceilings reach an operator under their own
-  // message, which is what the troubleshooting docs name.
+  it("still sends a later part the plan store refuses, so the reply is not cut short", async () => {
+    const { store, warn } = useOneRowPlanStore();
+
+    await sendDurablePart({ partIndex: 0, partCount: 2, text: "first" });
+    await sendDurablePart({ partIndex: 1, partCount: 2, text: "second" });
+
+    expect(pushedRequests().map((request) => request.retryKey)).toEqual([
+      resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 0, pushIndex: 0 }),
+      resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 1, pushIndex: 0 }),
+    ]);
+    expect(store.blobs.size).toBe(1);
+    expect(warn).toHaveBeenCalledOnce();
+
+    // A crash before it settles still ends unresolved rather than replaying half of it.
+    fetchMock.mockClear();
+    await expect(reconcile()).resolves.toMatchObject({
+      status: "unresolved",
+      retryable: false,
+      error: expect.stringContaining("missing recorded parts: 1"),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Both byte ceilings reach an operator under the store's own message, which is what
+  // the troubleshooting docs name.
   it.each([
     { name: "per-entry", option: "maxBytesPerEntry", message: "byte limit" },
     {
@@ -570,34 +615,30 @@ describe("LINE unknown-send reconciliation", () => {
       option: "maxBytesPerNamespace",
       message: "Plugin blob namespace reached its stored byte limit.",
     },
-  ])("delivers nothing when the record hits the $name ceiling", async ({ option, message }) => {
+  ])("still sends a part whose record hits the $name ceiling", async ({ option, message }) => {
     const store = createLineBlobStoreState();
     // Held in a box because the opener closes over it before the measuring run has
     // produced the value the restricted run needs.
     const limit: { bytes?: number } = {};
     const writes: number[] = [];
-    const chunked = (text: string) => text.match(/.{1,40}/gs) ?? [text];
-    setLineRuntime({
-      state: {
-        openBlobStore: (options: { namespace: string }) => {
-          const opened = store.state.openBlobStore({ ...options, [option]: limit.bytes });
-          return {
-            ...opened,
-            registerIfAbsent: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
-              writes.push(bytes.byteLength);
-              return await (opened.registerIfAbsent as (...args: unknown[]) => Promise<boolean>)(
-                key,
-                bytes,
-                ...rest,
-              );
-            },
-          };
-        },
+    const warn = usePlanStore(
+      (options) => {
+        const opened = store.state.openBlobStore({ ...options, [option]: limit.bytes });
+        return {
+          ...opened,
+          registerIfAbsent: async (key: string, bytes: Uint8Array, ...rest: unknown[]) => {
+            writes.push(bytes.byteLength);
+            return await (opened.registerIfAbsent as (...args: unknown[]) => Promise<boolean>)(
+              key,
+              bytes,
+              ...rest,
+            );
+          },
+        };
       },
-      channel: {
-        text: { chunkMarkdownText: chunked, resolveTextChunkLimit: () => 40 },
-      },
-    } as unknown as PluginRuntime);
+      (text) => text.match(/.{1,40}/gs) ?? [text],
+      40,
+    );
     const threeChunks = "x".repeat(120);
 
     // Measure the one write this part makes, then cap just under it.
@@ -605,15 +646,48 @@ describe("LINE unknown-send reconciliation", () => {
     expect(writes).toHaveLength(1);
     limit.bytes = writes[0]! - 1;
     store.blobs.clear();
-    writes.length = 0;
     fetchMock.mockClear();
 
-    await expect(
-      sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks }),
-    ).rejects.toThrow(message);
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: threeChunks });
 
-    // Nothing reached the recipient, so there is nothing left half-delivered.
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The part went out whole, under the keys its record would have carried.
+    const sent = pushedRequests();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.map((request) => request.retryKey)).toEqual(
+      sent.map((_, pushIndex) =>
+        resolveLinePushRetryKey({ deliveryQueueId: QUEUE_ID, partIndex: 0, pushIndex }),
+      ),
+    );
+    expect(store.blobs.size).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(message));
+  });
+
+  it("reissues a recorded request exactly as stored, without normalizing it again", async () => {
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    const [key] = planKeys();
+    // A record written by a build whose normalization differed, standing in for an
+    // upgrade between the send and its replay: today's cap would cut this label to 20.
+    const stored = readPlan(key!);
+    const recorded = {
+      type: "text",
+      text: "hello",
+      quickReply: {
+        items: [
+          {
+            type: "action",
+            action: { type: "message", label: "a label past today's cap", text: "ok" },
+          },
+        ],
+      },
+    };
+    stored.pushes[0]!.messages = [recorded];
+    blobs.set(key!, new TextEncoder().encode(JSON.stringify(stored)));
+    fetchMock.mockClear();
+
+    await expect(reconcile()).resolves.toMatchObject({ status: "sent" });
+    expect(pushedRequests()).toEqual([
+      { retryKey: stored.pushes[0]!.retryKey, messages: [recorded] },
+    ]);
   });
 
   it("refuses to replay once LINE has forgotten the retry keys", async () => {

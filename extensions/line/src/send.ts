@@ -115,7 +115,9 @@ interface LineSendOpts {
   /**
    * The recorded key for this push. The plan owns key derivation so a replay
    * reissues the exact request that was recorded, rather than one this process
-   * would derive again; an unrecorded send gets a fresh key it cannot reuse.
+   * would derive again; an unrecorded send gets a fresh key it cannot reuse. A push
+   * carrying one was quoted and normalized when it was planned, so its messages leave
+   * exactly as given.
    */
   durableRetryKey?: string;
   /**
@@ -433,9 +435,13 @@ async function pushLineMessages(
   }
 
   const { account, token, chatId } = createLinePushContext(to, opts);
-  const normalizedMessages = applyLineQuoteToken(messages, opts.quoteToken).map(
-    normalizeLineMessage,
-  );
+  // A keyed push is a planned request, and a recorded one must leave as the record holds
+  // it: normalizing it again would let a replay after an upgrade send something other
+  // than what the record says LINE was asked to take.
+  const quotedMessages = applyLineQuoteToken(messages, opts.quoteToken);
+  const wireMessages = opts.durableRetryKey
+    ? quotedMessages
+    : quotedMessages.map(normalizeLineMessage);
   // One retry key per logical push: every attempt reuses it so LINE deduplicates
   // an attempt that was accepted before its outcome reached us. A recorded key
   // stays stable across processes, so recovery replays this exact request instead
@@ -460,7 +466,7 @@ async function pushLineMessages(
       return await sendLineProviderMessages(
         "push",
         token,
-        { to: chatId, messages: normalizedMessages },
+        { to: chatId, messages: wireMessages },
         retryKey,
         revalidate,
       );

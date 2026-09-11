@@ -1,6 +1,7 @@
 // Line plugin module implements durable send plan persistence behavior.
 import { createHash } from "node:crypto";
 import type { messagingApi } from "@line/bot-sdk";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { z } from "zod";
 import { getLineRuntime } from "./runtime.js";
 import { LINE_RETRY_KEY_TTL_MS } from "./send-retry.js";
@@ -30,8 +31,9 @@ type LineDurablePush = {
  * part depends on the result of an earlier one — so the record can be complete
  * rather than accumulated. A replay reissues these recorded requests instead of
  * re-rendering the reply, which is what keeps an upgrade across the interruption
- * from putting different content behind a key LINE has already answered. Message normalization still runs on the way out, so this does not by
- * itself pin the bytes across a change to that step.
+ * from putting different content behind a key LINE has already answered. The messages
+ * are stored normalized and leave as stored, so a change to normalization between the
+ * send and its replay does not move them either.
  */
 type LineDurableSendPlan = {
   version: typeof PLAN_VERSION;
@@ -59,6 +61,21 @@ export class LineDurableSendPlanError extends Error {
   }
 }
 
+/**
+ * The plan store would not take or give back a record — a full namespace, a record over
+ * a byte limit, a failing state directory — as opposed to a record that exists but does
+ * not describe this send. What that costs the send is the sender's decision.
+ */
+export class LineDurableSendPlanStoreError extends Error {
+  constructor(partIndex: number | undefined, cause: unknown) {
+    super(
+      `LINE durable send plan part ${partIndex} could not be stored: ${formatErrorMessage(cause)}`,
+      { cause },
+    );
+    this.name = "LineDurableSendPlanStoreError";
+  }
+}
+
 function createPlanStore() {
   return getLineRuntime().state.openBlobStore<Record<string, never>>({
     namespace: PLAN_NAMESPACE,
@@ -66,7 +83,7 @@ function createPlanStore() {
     maxBytesPerEntry: 1024 * 1024,
     maxBytesPerNamespace: 64 * 1024 * 1024,
     // Evicting a plan would silently remove the only proof of what was already
-    // sent, so a full namespace fails the send instead of the reconciliation.
+    // sent, so a full namespace refuses the new record and keeps the old ones.
     overflowPolicy: "reject-new",
     defaultTtlMs: PLAN_TTL_MS,
   });
@@ -191,14 +208,21 @@ export async function recordLineDurableSendPlan(params: {
   // trims `to`, so keeping the raw one would compare a trimmed record against an
   // untrimmed argument on the claim-conflict path.
   const recordable = parsed.data;
-  await store.deleteExpired();
-  // Claim atomically rather than checking then writing: two attempts at the same part
-  // can race, and a lost race that still wrote would put re-rendered content behind
-  // keys the winner already used.
-  if (await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})) {
-    return recordable;
+  let existing: Awaited<ReturnType<typeof store.lookup>>;
+  try {
+    await store.deleteExpired();
+    // Claim atomically rather than checking then writing: two attempts at the same part
+    // can race, and a lost race that still wrote would put re-rendered content behind
+    // keys the winner already used.
+    if (
+      await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})
+    ) {
+      return recordable;
+    }
+    existing = await store.lookup(key);
+  } catch (error) {
+    throw new LineDurableSendPlanStoreError(params.partIndex, error);
   }
-  const existing = await store.lookup(key);
   if (!existing) {
     // The record was there a moment ago and is not now. Nothing has been sent yet, so
     // refuse rather than send under keys whose record no longer exists.
