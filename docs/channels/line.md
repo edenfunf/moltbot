@@ -187,9 +187,10 @@ recorded path; it is not itself a fault.
 
 When recovery cannot run safely it stops instead of guessing, and `openclaw logs`
 carries the reason. **Read these as "delivery unknown", not "not delivered"** — they
-fire exactly when OpenClaw cannot tell whether LINE took the send, and it settles them
-as `unknown` rather than `failed` for that reason. Check the conversation before
-re-sending anything by hand; a blind resend is how the recipient gets two copies.
+fire exactly when OpenClaw cannot tell whether LINE took the send. The recovery log
+counts such an entry under `failed` and closes it without replaying it, but the outcome
+it records for the delivery is `unknown`, not a failed send. Check the conversation
+before re-sending anything by hand; a blind resend is how the recipient gets two copies.
 These particular outcomes do not dead-letter the incoming event, so
 `openclaw channels dead-letters resubmit` is the wrong tool for them.
 
