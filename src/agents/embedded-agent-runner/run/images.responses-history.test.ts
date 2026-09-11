@@ -207,19 +207,6 @@ async function withResponsesSession(
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey(model.provider, "synthetic-loopback-only");
     const modelRegistry = ModelRegistry.inMemory(authStorage);
-    const transport = createOpenAIResponsesTransportStreamFn();
-    modelRegistry.registerProvider(model.provider, {
-      api: "openai-responses",
-      streamSimple: (runtimeModel, context, streamOptions) =>
-        transport(runtimeModel, context, {
-          ...streamOptions,
-          onPayload: async (payload, selectedModel) => {
-            const modified = await streamOptions?.onPayload?.(payload, selectedModel);
-            beforeSanitization.push(structuredClone(modified ?? payload));
-            return modified;
-          },
-        }),
-    });
     const extensions = { extensions: [], errors: [], runtime: createExtensionRuntime() };
     const { session } = await createAgentSession({
       cwd: base,
@@ -246,6 +233,20 @@ async function withResponsesSession(
         reload: async () => {},
       },
     });
+    const transport = createOpenAIResponsesTransportStreamFn();
+    // The agent's stream seam takes the transport as-is, so it carries the loopback
+    // key the session would have resolved; the payload hook records what the
+    // session asked to send before the transport sanitizes it.
+    session.agent.streamFn = (runtimeModel, context, streamOptions) =>
+      transport(runtimeModel, context, {
+        ...streamOptions,
+        apiKey: "synthetic-loopback-only",
+        onPayload: async (payload, selectedModel) => {
+          const modified = await streamOptions?.onPayload?.(payload, selectedModel);
+          beforeSanitization.push(structuredClone(modified ?? payload));
+          return modified;
+        },
+      });
     try {
       await run({ session, model, requests, beforeSanitization, releaseFirstResponse });
     } finally {
