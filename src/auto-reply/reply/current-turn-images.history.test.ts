@@ -172,8 +172,22 @@ describe("current-turn and shared attachment history agreement", () => {
         Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAAElFTkSuQmCC", "base64"),
       );
 
-      const shared = await resolveAgentTurnAttachments({ ctx: fixture.ctx, cfg: {} });
-      const native = await resolveCurrentTurnImages({ ctx: fixture.ctx, cfg: {} });
+      // The unreadable current photo is what sends the turn to history, as in the
+      // agreement cases above, so the retained image is read and then refused.
+      const ctx: RuntimeMsgContext = {
+        ...fixture.ctx,
+        media: [
+          {
+            path: fixture.missingPath,
+            contentType: "image/png",
+            kind: "image",
+            workspaceDir: base,
+          },
+        ],
+      };
+
+      const shared = await resolveAgentTurnAttachments({ ctx, cfg: {} });
+      const native = await resolveCurrentTurnImages({ ctx, cfg: {} });
 
       expect(shared.attachments).toEqual([]);
       expect(shared.recentHistoryImages).toEqual([]);
