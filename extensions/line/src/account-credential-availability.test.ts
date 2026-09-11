@@ -1,12 +1,15 @@
 // Line tests cover what a credential that cannot be read is allowed to claim.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { hasLineCredentials } from "./account-helpers.js";
 import { resolveLineAccount } from "./accounts.js";
+import { lineChannelPluginCommon } from "./channel-shared.js";
 import { lineMessageActions } from "./rich-messages.js";
+import { isLineConfigured } from "./setup-core.js";
+import { lineStatusAdapter } from "./status.js";
 
 let dir: string;
 let missing: string;
@@ -14,7 +17,6 @@ let missing: string;
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "line-credential-availability-"));
   missing = join(dir, "not-created.txt");
-  writeFileSync(join(dir, "token.txt"), "a-real-token");
 });
 
 afterAll(() => {
@@ -29,44 +31,70 @@ function accountFor(line: Record<string, unknown>) {
   return resolveLineAccount({ cfg: lineCfg(line), accountId: "default" });
 }
 
+const { config } = lineChannelPluginCommon;
+
+function messageToolActions(line: Record<string, unknown>) {
+  return lineMessageActions.describeMessageTool?.({
+    cfg: lineCfg(line),
+    accountId: "default",
+  } as never)?.actions;
+}
+
+async function statusFor(line: Record<string, unknown>) {
+  const snapshot = await lineStatusAdapter.buildAccountSnapshot?.({
+    cfg: lineCfg(line),
+    account: accountFor(line),
+  });
+  if (!snapshot) {
+    throw new Error("LINE status snapshot builder is unavailable");
+  }
+  return { snapshot, issues: lineStatusAdapter.collectStatusIssues?.([snapshot]) };
+}
+
 describe("an account whose credential file cannot be read", () => {
-  it("does not count as enough configuration to run", () => {
-    const account = accountFor({ tokenFile: missing, channelSecret: "secret" });
+  it("cannot run, but stays configured wherever the account is described", async () => {
+    const line = { tokenFile: missing, channelSecret: "secret" };
+    const account = accountFor(line);
 
-    // The status itself is the point: the config named a source, so this is neither
-    // "missing" nor usable, and only the second of those may run.
+    // The config named a source that could not be read: neither missing nor usable.
     expect(account.tokenStatus).toBe("configured_unavailable");
-    expect(hasLineCredentials(account)).toBe(false);
+    expect(config.isConfigured(account)).toBe(false);
+    // Status keeps it visible as configured but unavailable, as core does for a blocked
+    // account, instead of telling the operator that nothing was configured.
+    expect(config.describeAccount(account)).toMatchObject({
+      configured: true,
+      tokenStatus: "configured_unavailable",
+    });
+    const { snapshot, issues } = await statusFor(line);
+    expect(snapshot).toMatchObject({ configured: true, tokenStatus: "configured_unavailable" });
+    expect(issues).toEqual([]);
+    expect(isLineConfigured(lineCfg(line), "default")).toBe(true);
   });
 
-  it("does not count when the signing secret is the unreadable one", () => {
-    const account = accountFor({ channelAccessToken: "token", secretFile: missing });
-
-    expect(account.signingSecretStatus).toBe("configured_unavailable");
-    expect(hasLineCredentials(account)).toBe(false);
-  });
-
-  it("keeps offering the message tool while both credentials resolve", () => {
-    const account = accountFor({ channelAccessToken: "token", channelSecret: "secret" });
-
-    expect(hasLineCredentials(account)).toBe(true);
+  it("names the credential that could not be read", () => {
     expect(
-      lineMessageActions.describeMessageTool?.({
-        cfg: lineCfg({ channelAccessToken: "token", channelSecret: "secret" }),
-        accountId: "default",
-      } as never)?.actions,
-    ).toEqual(["send"]);
+      config.unconfiguredReason(accountFor({ tokenFile: missing, channelSecret: "secret" })),
+    ).toBe("not configured: token file is configured but unavailable");
+    expect(
+      config.unconfiguredReason(accountFor({ channelAccessToken: "token", secretFile: missing })),
+    ).toBe("not configured: channel secret file is configured but unavailable");
+    expect(config.unconfiguredReason(accountFor({ tokenFile: missing, secretFile: missing }))).toBe(
+      "not configured: token file and channel secret file are configured but unavailable",
+    );
   });
 
   it("withholds the message tool the model would otherwise be told it can use", () => {
     // Offering send here hands the model a tool whose every call fails: the channel
     // refuses to start on the same credentials.
-    expect(
-      lineMessageActions.describeMessageTool?.({
-        cfg: lineCfg({ tokenFile: missing, channelSecret: "secret" }),
-        accountId: "default",
-      } as never)?.actions,
-    ).toEqual([]);
+    expect(messageToolActions({ tokenFile: missing, channelSecret: "secret" })).toEqual([]);
+    expect(messageToolActions({ channelAccessToken: "token", secretFile: missing })).toEqual([]);
+  });
+
+  it("runs and offers the message tool while both credentials resolve", () => {
+    const line = { channelAccessToken: "token", channelSecret: "secret" };
+
+    expect(config.isConfigured(accountFor(line))).toBe(true);
+    expect(messageToolActions(line)).toEqual(["send"]);
   });
 
   it("still reports an account with no credentials at all as unconfigured", () => {
@@ -74,7 +102,9 @@ describe("an account whose credential file cannot be read", () => {
     const account = accountFor({});
 
     expect(account.tokenStatus).toBe("missing");
-    expect(hasLineCredentials(account)).toBe(false);
+    expect(config.isConfigured(account)).toBe(false);
+    expect(config.describeAccount(account)).toMatchObject({ configured: false });
+    expect(config.unconfiguredReason(account)).toBe("not configured");
   });
 
   it("falls back to the raw values when no credential status was resolved", () => {

@@ -24,7 +24,7 @@ import {
   normalizeLowercaseStringOrEmpty,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { Type } from "typebox";
-import { hasLineCredentials } from "./account-helpers.js";
+import { hasUsableLineCredentials } from "./account-helpers.js";
 import { resolveLineAccount } from "./accounts.js";
 import { messageAction, postbackAction, type Action } from "./actions.js";
 import { createActionCard } from "./flex-templates/basic-cards.js";
@@ -113,7 +113,7 @@ const lineChannelDataSchema = Type.Optional(
 export const lineMessageActions: ChannelMessageActionAdapter = {
   describeMessageTool: ({ cfg, accountId }) => {
     const account = resolveLineAccount({ cfg, accountId: accountId ?? undefined });
-    return account.enabled && hasLineCredentials(account)
+    return account.enabled && hasUsableLineCredentials(account)
       ? {
           actions: ["send"],
           capabilities: ["presentation"],

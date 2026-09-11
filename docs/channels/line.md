@@ -541,14 +541,16 @@ link-local, and private-network targets.
 
 - **Webhook verification fails:** ensure the webhook URL is HTTPS and the
   `channelSecret` matches the LINE console.
-- **Channel reports as not configured after it used to work:** a `tokenFile` or
-  `secretFile` that names a path OpenClaw cannot read counts as unconfigured, not as
-  configured. While the Gateway is running, `openclaw status` lists the account under
-  `Degraded secrets` (for example `account:line:default`), and
-  `openclaw status --json` names the config path that failed in
-  `degradedSecretOwners[].paths` (for example `channels.line.tokenFile`). The Gateway
-  also logs a startup failure naming that secret owner as configured but unavailable.
-  Restore the file, or point the key at a path that can be read.
+- **Channel is configured but does not start:** a `tokenFile` or `secretFile` that
+  names a path OpenClaw cannot read keeps the account visible as configured but
+  unavailable. The Gateway does not start it, the model is not offered LINE's message
+  tool, and the account's reason names the credential, for example
+  `not configured: token file is configured but unavailable`. While the Gateway is
+  running, `openclaw status` lists the account under `Degraded secrets` (for example
+  `account:line:default`), and `openclaw status --json` names the config path that
+  failed in `degradedSecretOwners[].paths` (for example `channels.line.tokenFile`).
+  The Gateway also logs a startup failure naming that secret owner as configured but
+  unavailable. Restore the file, or point the key at a path that can be read.
 - **No inbound events:** run `openclaw channels status --probe`. LINE only delivers
   events while the channel's webhook URL is registered and **Use webhook** is on in
   the Messaging API tab of the LINE Developers Console, and the probe reports both —
