@@ -165,6 +165,7 @@ export async function runProviderCatalog(params: {
   resolveProviderApiKey: ProviderCatalogContext["resolveProviderApiKey"];
   resolveProviderAuth: ProviderCatalogContext["resolveProviderAuth"];
   reportCatalogOutcome?: (outcome: ProviderCatalogOutcome) => void;
+  isActive?: () => boolean;
 }) {
   const hook = resolveProviderCatalogHook(params.provider);
   if (!hook) {
@@ -179,6 +180,9 @@ export async function runProviderCatalog(params: {
     resolveProviderApiKey: params.resolveProviderApiKey,
     resolveProviderAuth: params.resolveProviderAuth,
   });
+  if (params.isActive?.() === false) {
+    return undefined;
+  }
   for (const outcome of copyProviderCatalogOutcomes(result)) {
     if (
       params.providerIds !== undefined &&
@@ -234,4 +238,14 @@ export async function prepareProviderStaticCatalog(params: {
     providers: Object.freeze([...params.providers]),
     entries: Object.freeze(entries),
   });
+}
+
+export function resolvePreparedProviderStaticConfigs(
+  prepared: PreparedProviderStaticCatalog | undefined,
+): Record<string, ModelProviderConfig> {
+  const providers: Record<string, ModelProviderConfig> = {};
+  for (const entry of prepared?.entries ?? []) {
+    Object.assign(providers, normalizePluginDiscoveryResult(entry));
+  }
+  return providers;
 }

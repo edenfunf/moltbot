@@ -9,6 +9,7 @@ import { createAgentHarnessTaskRuntimeScope } from "../../../tasks/agent-harness
 import { createTrajectoryRuntimeRecorder } from "../../../trajectory/runtime.js";
 import type { ToolOutcomeObserver } from "../../agent-tools.before-tool-call.js";
 import { resolveDelegationCapability } from "../../delegation-capability.js";
+import { resolveSessionGitCoauthorPrompt } from "../../git-coauthor-prompt.js";
 import { agentHarnessBuildsOpenClawTools } from "../../harness/selection.js";
 import { appendIncognitoSystemPrompt } from "../../incognito-system-prompt.js";
 import { applyAuthHeaderOverride, applyLocalNoAuthHeaderOverride } from "../../model-auth.js";
@@ -23,16 +24,13 @@ import {
   createAdmittedGatewayToolCallerIdentity,
   withGatewayToolCallerIdentity,
 } from "../../tools/gateway-caller-context.js";
+import { resolveAttemptWorkspaceSandbox } from "../../workspace-sandbox.js";
 import type { EmbeddedRunReplayState } from "../replay-state.js";
-import {
-  resolveSandboxSkillRuntimeInputs,
-  mapSandboxSkillUsagePaths,
-  remapSkillReferencePaths,
-} from "../sandbox-skills.js";
+import { remapSkillReferencePaths } from "../sandbox-skills.js";
+import { prepareEmbeddedSkills } from "../skill-runtime.js";
 import { mapThinkingLevelForProvider } from "../utils.js";
 import { prepareExecApprovalContinuationForAttempt } from "./attempt-exec-approval-continuation.js";
 import { applyResolvedToolPromptFinalizer } from "./attempt-prompt-support.js";
-import { resolveAttemptWorkspaceSandbox } from "./attempt-setup.js";
 import { EMBEDDED_RUN_ATTEMPT_DISPATCH_STAGE } from "./attempt-stage-timing.js";
 import { resolveAttemptDispatchApiKey } from "./auth-store.js";
 import { runEmbeddedAttemptWithBackend } from "./backend.js";
@@ -261,7 +259,6 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
   const attemptContextEngine = nativeModelOwned ? undefined : contextEngine;
   const authProfileIdSource =
     runtime.lastProfileId && runtime.lastProfileId === lockedProfileId ? "user" : "auto";
-  const observeToolTerminal = createToolTerminalObserver(params.runId);
   const attemptAbortController = new AbortController();
   input.setPostCompactionAbortController(attemptAbortController);
   const preparedExecApprovalContinuation = prepareExecApprovalContinuationForAttempt({
@@ -340,27 +337,37 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
     sessionKey: params.sessionKey,
     toolsAllow: params.toolsAllow,
   });
+  const gitCoauthorPrompt = resolveSessionGitCoauthorPrompt({
+    config: params.config,
+    agentId: workspaceResolution.agentId,
+    sessionKey: params.sessionKey,
+    storePath: params.sessionTarget?.storePath,
+  });
   let skillsSnapshot = resolveSessionSkillResourceSnapshot(params.skillsSnapshot);
   let skillReferencePaths = pluginSandbox?.readOnlyResourceMounts?.map((mount) => ({
     skillFile: path.join(mount.hostPath, "SKILL.md"),
     readPath: path.posix.join(mount.containerPath, "SKILL.md"),
   }));
-  if (
-    pluginSandbox?.enabled &&
-    !pluginSandbox.readOnlyResourceMounts?.length &&
-    skillsSnapshot?.librarySelections?.length
-  ) {
-    const prepared = resolveSandboxSkillRuntimeInputs({
+  if (pluginSandbox?.enabled && !pluginSandbox.readOnlyResourceMounts?.length && skillsSnapshot) {
+    const prepared = prepareEmbeddedSkills({
+      applySkillEnvironment: false,
+      includeCodeModeSkills: false,
+      attempt: {
+        bootstrapWorkspaceDir,
+        config: params.config,
+        contextTokenBudget: runtime.contextTokenBudget,
+        skillsSnapshot,
+        toolExecutionAllow: params.toolExecutionAllow,
+      },
+      effectiveWorkspace: workspaceDir,
       sandbox: pluginSandbox,
-      skillsAnchorWorkspace: bootstrapWorkspaceDir ?? workspaceDir,
-      skillsSnapshot,
+      sessionAgentId: workspaceResolution.agentId,
     });
-    skillsSnapshot = prepared.skillsSnapshot;
-    skillReferencePaths = mapSandboxSkillUsagePaths({
-      paths: pluginSandbox.skillUsagePaths,
-      skillsWorkspaceDir: prepared.skillsWorkspaceDir,
-      skillsPromptWorkspaceDir: prepared.skillsPromptWorkspaceDir,
-    });
+    skillsSnapshot = {
+      ...(prepared.skillsSnapshotForRun ?? skillsSnapshot),
+      prompt: prepared.skillsPrompt,
+    };
+    skillReferencePaths = prepared.skillUsagePaths;
   }
   const attemptControls = createAttemptControls({
     admittedRunContext,
@@ -514,7 +521,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
         }
       : {}),
     runtimePlan,
-    observeToolTerminal,
+    observeToolTerminal: createToolTerminalObserver(params.runId),
     model: applyAuthHeaderOverride(
       applyLocalNoAuthHeaderOverride(effectiveModel, runtime.apiKeyInfo),
       runtime.runtimeAuthState !== null ? null : runtime.apiKeyInfo,
@@ -579,7 +586,9 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
     onDeferredLifecycleAbort: params.onDeferredLifecycleAbort,
     onExecutionPhase: params.onExecutionPhase,
     extraSystemPrompt,
+    gitCoauthorPrompt,
     sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+    silentReplyPromptMode: params.silentReplyPromptMode,
     taskSuggestionDeliveryMode: params.taskSuggestionDeliveryMode,
     inputProvenance: params.inputProvenance,
     trustedInternalHandoff: params.trustedInternalHandoff,
@@ -624,6 +633,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
     forceHeartbeatTool: params.forceHeartbeatTool,
     requireExplicitMessageTarget: params.requireExplicitMessageTarget,
     internalEvents: params.internalEvents,
+    runtimeContextFragments: params.runtimeContextFragments,
     bootstrapPromptWarningSignaturesSeen: input.bootstrapPromptWarningSignaturesSeen,
     bootstrapPromptWarningSignature:
       input.bootstrapPromptWarningSignaturesSeen[
