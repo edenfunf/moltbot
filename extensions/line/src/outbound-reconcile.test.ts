@@ -638,6 +638,55 @@ describe("LINE unknown-send reconciliation", () => {
     await expect(reconcile()).resolves.toEqual({ status: "not_sent" });
   });
 
+  it("keeps a replay refused for its credentials unresolved instead of claiming nothing landed", async () => {
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    // A 401 refuses today's token, not the request, so it cannot show that LINE turned
+    // down the interrupted attempt that went out under the same key.
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ message: "Authentication failed" }, 401),
+    );
+
+    await expect(reconcile()).resolves.toMatchObject({ status: "unresolved" });
+  });
+
+  it("stops before the unquoted retry once the retry-key window has closed", async () => {
+    recordLineQuoteToken({
+      accountId: "default",
+      chatId: TARGET,
+      messageId: "inbound-2",
+      quoteToken: "q-inbound-2",
+    });
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error("process died before LINE answered");
+    });
+    await expect(
+      linePlugin.outbound?.sendPayload?.({
+        cfg: CFG,
+        to: TARGET,
+        text: "late",
+        payload: { text: "late" },
+        replyToId: "inbound-2",
+        deliveryQueueId: QUEUE_ID,
+        deliveryPartIndex: 0,
+        deliveryPartCount: 1,
+      }),
+    ).rejects.toThrow();
+    fetchMock.mockClear();
+    // LINE refuses the quoted replay just as the window closes; the unquoted retry that
+    // would follow must not go out under a key LINE no longer deduplicates.
+    fetchMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(NOW + LINE_RETRY_KEY_TTL_MS);
+      return jsonResponse({ message: "Invalid quote token" }, 400);
+    });
+
+    await expect(reconcile()).resolves.toEqual({
+      status: "unresolved",
+      error: "LINE retry key expired before the queued send could be reconciled",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("keeps a rejection after an accepted push unresolved instead of claiming nothing landed", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 2, text: "first" });
     await sendDurablePart({ partIndex: 1, partCount: 2, text: "second" });

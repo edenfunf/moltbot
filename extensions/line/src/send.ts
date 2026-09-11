@@ -119,9 +119,10 @@ interface LineSendOpts {
    */
   durableRetryKey?: string;
   /**
-   * When LINE stops deduplicating this send's retry key. Checked per attempt because
-   * the backoff between attempts can outlive the window, and a request that lands
-   * after it is a second delivery rather than a deduplicated one. The recorded plan
+   * When LINE stops deduplicating this send's retry key. Checked before every request,
+   * because the backoff between attempts or the unquoted retry inside one can outlive
+   * the window, and a request that lands after it is a second delivery rather than a
+   * deduplicated one. The recorded plan
    * answers it: the key itself is a timestamp-free hash (`resolveLinePushRetryKey`),
    * so neither a first send nor a retry can tell from the key alone when LINE first
    * saw it.
@@ -445,21 +446,23 @@ async function pushLineMessages(
   // like a send that never started; one after it is reconciled, not replayed blind.
   await opts.onPlatformSendDispatch?.();
 
-  const response = await runLinePushWithRetries(async () => {
-    // Re-checked per attempt, not once: the backoff between attempts can outlast the
-    // window the caller entered under, and a request that lands after LINE forgets
-    // the key is delivered again instead of deduplicated.
-    const { retryKeyExpiresAtMs } = opts;
+  // Rides the per-request revalidation so the unquoted retry inside one attempt is
+  // held to the window as well as each attempt after a backoff.
+  const { retryKeyExpiresAtMs } = opts;
+  const revalidate = async () => {
     if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
       throw new LineRetryKeyExpiredError();
     }
+    return opts.authorize ? await opts.authorize() : true;
+  };
+  const response = await runLinePushWithRetries(async () => {
     try {
       return await sendLineProviderMessages(
         "push",
         token,
         { to: chatId, messages: normalizedMessages },
         retryKey,
-        opts.authorize,
+        revalidate,
       );
     } catch (err) {
       if (behavior.errorContext) {

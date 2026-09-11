@@ -49,6 +49,7 @@ import {
 import { getLineRuntime } from "./runtime.js";
 import {
   explainLineRefusal,
+  isLineRequestRejection,
   isLineRetryKeyExpiredError,
   LINE_RETRY_KEY_TTL_MS,
   resolveLineNonDispatchRetryable,
@@ -540,9 +541,10 @@ async function reconcileLineUnknownSend(
         };
       }
       const nonDispatchRetryable = resolveLineNonDispatchRetryable(error);
-      if (results.length === 0 && nonDispatchRetryable === false) {
-        // LINE refused this exact request outright, so the first push could not
-        // have been accepted on the interrupted attempt either.
+      if (results.length === 0 && nonDispatchRetryable === false && isLineRequestRejection(error)) {
+        // LINE rejected this exact request, so the interrupted attempt carrying the same
+        // bytes was rejected too. A credential refusal proves only that today's replay
+        // failed, so it stays unresolved below.
         return { status: "not_sent" };
       }
       return {

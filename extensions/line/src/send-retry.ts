@@ -67,6 +67,15 @@ export function findLineHttpError(error: unknown): HTTPFetchError | undefined {
 }
 
 /**
+ * LINE rejected the request itself, so the same bytes were refused whenever they were
+ * sent. A 401 or 403 refuses the caller's credentials instead, which says nothing about
+ * whether an earlier attempt under the same retry key was accepted.
+ */
+export function isLineRequestRejection(error: unknown): boolean {
+  return findLineHttpError(error)?.status === 400;
+}
+
+/**
  * LINE answered this attempt with a client error, so it rejected the request and
  * sent nothing.
  *
