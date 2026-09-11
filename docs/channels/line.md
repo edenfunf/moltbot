@@ -293,9 +293,10 @@ parts — one per text chunk, one per media file — and each part records itsel
 before its own pushes leave. Within one part that ordering is airtight: the record
 lands first, so a part whose record is refused sends nothing. Across parts it is not.
 If the store fills between part 2 and part 3, parts 1 and 2 are already on the
-recipient's phone and the rest never arrives. The turn fails and dead-letters, and
-because that dead letter must not be resubmitted, nothing retries it. The recipient
-keeps a truncated reply with no notice that it was cut off. Read a namespace-limit
+recipient's phone and the rest never arrives: the delivery is left as delivery unknown,
+ends as `LINE ambiguous delivery is missing recorded parts`, and is not retried, while
+the inbound event completes rather than dead-lettering. The recipient keeps a truncated
+reply with no notice that it was cut off. Read a namespace-limit
 message as "some of this reply may already have been delivered" and check the
 conversation before doing anything by hand.
 
@@ -717,13 +718,14 @@ Outbound media URLs must be public HTTPS URLs of at most 2000 characters. OpenCl
 validates the target hostname before handing the URL to LINE and rejects loopback,
 link-local, and private-network targets.
 
-A media send that carries a caption arrives as two LINE messages, the caption first
-and the media after it, because every physical send is recorded separately so an
-interrupted one can be resolved (see
-[Outbound durability](#outbound-durability)).
-They are two requests, not one, so a failure between them leaves the caption
-delivered and the media not. The caption goes through the same markdown handling as
-an agent reply, so a table in it arrives as a card rather than as literal pipes.
+A media send that carries a caption keeps the request shape of the route it came in
+on, and each request is recorded so an interrupted one can be resolved (see
+[Outbound durability](#outbound-durability)). `openclaw message send --media` goes
+through the message adapter, which sends the caption and the media as two LINE
+messages, caption first: two requests, so a failure between them can leave the caption
+delivered without the media, and the caption gets the same markdown handling as an
+agent reply. A caller that uses the plugin's direct `sendMedia` sends the media and its
+caption as one request, media first.
 
 ## Troubleshooting
 

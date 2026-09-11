@@ -12,6 +12,7 @@ import { createRuntime, lineResult } from "./outbound-harness.test-support.js";
 import { lineOutboundAdapter } from "./outbound.js";
 import { setLineRuntime } from "./runtime.js";
 import { createLineSendReceipt } from "./send-receipt.js";
+import { resolveLinePushRetryKey } from "./send-retry.js";
 
 const ssrfMocks = vi.hoisted(() => ({
   resolvePinnedHostnameWithPolicy: vi.fn(),
@@ -282,7 +283,7 @@ describe("line outbound sendPayload", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("sends a captioned media send as its own pushes, caption first", async () => {
+  it("sends a direct captioned media send as one push, media first, as main did", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -295,24 +296,57 @@ describe("line outbound sendPayload", () => {
       cfg,
     });
 
-    // Media rides the payload owner so its push is recorded like any other; that
-    // makes it a push of its own rather than one message beside the caption, and
-    // the caption goes first because the payload path sends text before media.
-    expect(mocks.pushMessagesLine.mock.calls).toEqual([
-      ["line:user:U123", [{ type: "text", text: "caption" }], expect.any(Object)],
+    // One request, so the caption cannot arrive without its media and the send costs
+    // one monthly message, the shape `sendMessageLine` sent before this path recorded.
+    expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
+      "line:user:U123",
       [
-        "line:user:U123",
-        [
-          {
-            type: "image",
-            originalContentUrl: "https://example.com/image.png",
-            previewImageUrl: "https://example.com/image.png",
-          },
-        ],
-        expect.any(Object),
+        {
+          type: "image",
+          originalContentUrl: "https://example.com/image.png",
+          previewImageUrl: "https://example.com/image.png",
+        },
+        { type: "text", text: "caption" },
       ],
-    ]);
-    expect(result.messageId).toBe("m-media");
+      expect.any(Object),
+    );
+    expect(result.messageId).toBe("m-batch");
+  });
+
+  it("records a direct captioned media send as one push under one retry key", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+
+    await lineOutboundAdapter.sendMedia!({
+      to: "line:user:U123",
+      text: "caption",
+      mediaUrl: "https://example.com/image.png",
+      accountId: "default",
+      cfg,
+      deliveryQueueId: "queue-media",
+      deliveryPartIndex: 0,
+      deliveryPartCount: 1,
+    });
+
+    expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
+      "line:user:U123",
+      [
+        {
+          type: "image",
+          originalContentUrl: "https://example.com/image.png",
+          previewImageUrl: "https://example.com/image.png",
+        },
+        { type: "text", text: "caption" },
+      ],
+      expect.objectContaining({
+        durableRetryKey: resolveLinePushRetryKey({
+          deliveryQueueId: "queue-media",
+          partIndex: 0,
+          pushIndex: 0,
+        }),
+      }),
+    );
   });
 
   it("publishes completed Flex receipts before a later legacy text send fails", async () => {

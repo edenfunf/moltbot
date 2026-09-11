@@ -60,6 +60,10 @@ import type { LineChannelData, LineSendResult, ResolvedLineAccount } from "./typ
 /** Any LINE message this adapter can put on the wire. */
 type LineOutboundMessage = messagingApi.Message;
 
+type LineSendPayloadContext = Parameters<
+  NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
+>[0];
+
 const loadLineOutboundRuntime = createLazyRuntimeModule(() => import("./outbound.runtime.js"));
 
 /** One payload crosses the platform boundary once, however many pushes it fans out into. */
@@ -94,9 +98,7 @@ async function sendLinePayload({
   deliveryPartCount,
   onPlatformSendDispatch,
   onDeliveryResult,
-}: Parameters<
-  NonNullable<NonNullable<ChannelPlugin<ResolvedLineAccount>["outbound"]>["sendPayload"]>
->[0]) {
+}: LineSendPayloadContext) {
   const runtime = getLineRuntime();
   const outboundRuntime = await loadLineOutboundRuntime();
   const rawLineData = (payload.channelData?.line as LineChannelData | undefined) ?? {};
@@ -277,6 +279,51 @@ async function sendLinePayload({
     }
   }
 
+  return await sendPlannedLinePushes(
+    {
+      to,
+      cfg,
+      accountId,
+      replyToId,
+      deliveryQueueId,
+      deliveryPartIndex,
+      deliveryPartCount,
+      onPlatformSendDispatch,
+      onDeliveryResult,
+    },
+    plannedPushes,
+  );
+}
+
+/**
+ * Quotes, records and sends one part's planned pushes. Every route that sends a part
+ * comes through here, so a replay always finds the request that actually went out.
+ */
+async function sendPlannedLinePushes(
+  {
+    to,
+    cfg,
+    accountId,
+    replyToId,
+    deliveryQueueId,
+    deliveryPartIndex,
+    deliveryPartCount,
+    onPlatformSendDispatch,
+    onDeliveryResult,
+  }: Pick<
+    LineSendPayloadContext,
+    | "to"
+    | "cfg"
+    | "accountId"
+    | "replyToId"
+    | "deliveryQueueId"
+    | "deliveryPartIndex"
+    | "deliveryPartCount"
+    | "onPlatformSendDispatch"
+    | "onDeliveryResult"
+  >,
+  plannedPushes: LineOutboundMessage[][],
+) {
   if (plannedPushes.length === 0) {
     throw new Error("Message must be non-empty for LINE sends");
   }
@@ -428,13 +475,17 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         ...ctx,
         payload: { text: ctx.text },
       }),
-    // Media rides the same payload owner as text: it is the only path that records
-    // every push of the fan-out, and splitting it would let the two routes drift.
-    sendMedia: async (ctx) =>
-      await sendLinePayload({
-        ...ctx,
-        payload: { text: ctx.text, mediaUrl: ctx.mediaUrl },
-      }),
+    // A direct media send keeps the request `sendMessageLine` made: the media and its
+    // caption in one push, recorded as one so a replay reissues it whole.
+    sendMedia: async (ctx) => {
+      const url = ctx.mediaUrl?.trim();
+      const caption = ctx.text?.trim();
+      const messages: LineOutboundMessage[] = [
+        ...(url ? [await buildLineMediaMessage(url, {}, ctx.to)] : []),
+        ...(caption ? [{ type: "text" as const, text: caption }] : []),
+      ];
+      return await sendPlannedLinePushes(ctx, messages.length > 0 ? [messages] : []);
+    },
   }),
 };
 
@@ -573,7 +624,13 @@ async function reconcileLineUnknownSend(
 // platform dispatch cannot be reconciled after a crash.
 const lineMessageAdapterBase = createChannelMessageAdapterFromOutbound({
   id: "line",
-  outbound: lineOutboundAdapter,
+  // `message send --media` comes through the message adapter, where main sent the
+  // caption and the media the way the payload owner does: separately, caption first.
+  outbound: {
+    ...lineOutboundAdapter,
+    sendMedia: async (ctx) =>
+      await sendLinePayload({ ...ctx, payload: { text: ctx.text, mediaUrl: ctx.mediaUrl } }),
+  },
   capabilities: {
     text: true,
     media: true,
