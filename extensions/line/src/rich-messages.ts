@@ -219,15 +219,24 @@ export function renderLinePresentation(
   payload: ReplyPayload,
   presentation: MessagePresentation,
   to?: string,
+  sourcePresentation: MessagePresentation = presentation,
 ) {
+  const hasQuestion = sourcePresentation.blocks.some(
+    (block) => block.type === "buttons" && block.buttons.some(isLineQuestionButton),
+  );
+  const hasAuthoredPrompt =
+    Boolean(sourcePresentation.title?.trim()) ||
+    sourcePresentation.blocks.some(
+      (block) => (block.type === "text" || block.type === "context") && block.text.trim(),
+    );
+  // Adaptation may add Actions/Other guidance, which cannot replace the prompt.
+  // Declining native rendering preserves the producer's complete text fallback.
+  if (hasQuestion && !hasAuthoredPrompt) {
+    return null;
+  }
   // Group and room postbacks do not carry the sender identity required by
   // question admission. Keep their choices readable through the shared fallback.
-  if (
-    inferLineTargetChatType(to ?? "") !== "direct" &&
-    presentation.blocks.some(
-      (block) => block.type === "buttons" && block.buttons.some(isLineQuestionButton),
-    )
-  ) {
+  if (inferLineTargetChatType(to ?? "") !== "direct" && hasQuestion) {
     return null;
   }
   const hasCard = presentation.blocks.some(
@@ -352,8 +361,13 @@ export async function prepareLineReplyPayload(
   return renderPresentationForDelivery(
     {
       presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
-      renderPresentation: (adapted) => {
-        const rendered = renderLinePresentation(adapted, adapted.presentation, to);
+      renderPresentation: (adapted, sourcePresentation) => {
+        const rendered = renderLinePresentation(
+          adapted,
+          adapted.presentation,
+          to,
+          sourcePresentation,
+        );
         // Quick replies have no Flex body to replace the author's fallback prose.
         return rendered && usesFallbackText && rendered.channelData.line.flexMessage === undefined
           ? { ...rendered, text: payload.text }

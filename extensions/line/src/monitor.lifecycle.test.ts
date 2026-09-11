@@ -377,14 +377,35 @@ describe("monitorLineProvider lifecycle", () => {
   });
 
   it.each([
-    { from: "line:U0123456789abcdef0123456789abcdef", question: true, native: true },
-    { from: "line:group:C0123456789abcdef0123456789abcdef", question: true, native: false },
-    { from: "line:room:R0123456789abcdef0123456789abcdef", question: true, native: false },
-    { from: "unknown", question: true, native: false },
-    { from: "line:group:C0123456789abcdef0123456789abcdef", question: false, native: true },
+    { from: "line:U0123456789abcdef0123456789abcdef", question: true, prompt: true, native: true },
+    {
+      from: "line:U0123456789abcdef0123456789abcdef",
+      question: true,
+      prompt: false,
+      native: false,
+    },
+    {
+      from: "line:group:C0123456789abcdef0123456789abcdef",
+      question: true,
+      prompt: true,
+      native: false,
+    },
+    {
+      from: "line:room:R0123456789abcdef0123456789abcdef",
+      question: true,
+      prompt: true,
+      native: false,
+    },
+    { from: "unknown", question: true, prompt: true, native: false },
+    {
+      from: "line:group:C0123456789abcdef0123456789abcdef",
+      question: false,
+      prompt: false,
+      native: true,
+    },
   ])(
-    "prepares native=$native question=$question replies for $from",
-    async ({ from, question, native }) => {
+    "prepares native=$native question=$question prompt=$prompt replies for $from",
+    async ({ from, question, prompt, native }) => {
       const { setLineRuntime } = await import("./runtime.js");
       type ResolvedTurn = Pick<ChannelInboundTurnPlan, "delivery">;
       let resolvedTurn: ResolvedTurn | undefined;
@@ -432,6 +453,7 @@ describe("monitorLineProvider lifecycle", () => {
               : {}),
             presentation: {
               blocks: [
+                ...(prompt ? [{ type: "text" as const, text: "Approve this run?" }] : []),
                 {
                   type: "buttons",
                   buttons: question

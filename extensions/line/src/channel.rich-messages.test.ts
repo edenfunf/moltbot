@@ -251,6 +251,77 @@ describe("LINE rich-message boundaries", () => {
     }
   });
 
+  it.each([
+    ["buttons only", "", "text", "", 2, false, false],
+    ["omitted Other control", "", "text", "", 2, true, false],
+    ["overflow Other guidance", "", "text", "", 4, true, false],
+    ["blank authored content", " ", "text", " ", 2, false, false],
+    ["title-only prompt", "Which environment?", "text", "", 2, false, true],
+    ["context prompt", "", "context", "Which environment?", 2, false, true],
+  ] as const)(
+    "preserves the question prompt for %s through both render owners",
+    async (_name, title, promptType, prompt, optionCount, other, native) => {
+      const questionId = "ask_3d8dbe55be452a9a39add7c909beb119";
+      const labels = ["Staging", "Production", "Canary", "Sandbox"].slice(0, optionCount);
+      const payload: ReplyPayload = {
+        text: `Which environment?\n${labels.join(" / ")}${other ? " / Other: reply with your own answer." : ""}`,
+        presentationTextMode: "fallback",
+        channelData: { askUser: { questionId, optionValues: labels } },
+        presentation: {
+          title,
+          blocks: [
+            ...(prompt ? [{ type: promptType, text: prompt }] : []),
+            {
+              type: "buttons",
+              buttons: [
+                ...labels.map((label) => ({
+                  label,
+                  action: { type: "question" as const, questionId, optionValue: label },
+                })),
+                ...(other
+                  ? [
+                      {
+                        label: "Other…",
+                        action: {
+                          type: "question" as const,
+                          questionId,
+                          intent: "custom-input" as const,
+                        },
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ],
+        },
+      };
+      const outbound = await renderPresentationForDelivery(
+        {
+          presentationCapabilities: lineOutboundAdapter.presentationCapabilities,
+          renderPresentation: (adapted, sourcePresentation) =>
+            lineOutboundAdapter.renderPresentation!({
+              payload: adapted,
+              presentation: adapted.presentation,
+              sourcePresentation,
+              ctx: { cfg: {}, to: DIRECT_TARGET, text: adapted.text ?? "", payload: adapted },
+            }),
+        },
+        payload,
+      );
+      for (const prepared of [await prepareDirectLineReplyPayload(payload), outbound]) {
+        expect(prepared.presentation).toBeUndefined();
+        const line = prepared.channelData?.line as { flexMessage?: unknown } | undefined;
+        if (native) {
+          expect(line?.flexMessage).toBeDefined();
+          expect(JSON.stringify(line?.flexMessage)).toContain("Which environment?");
+        } else {
+          expect(line).toBeUndefined();
+          expect(prepared.text).toBe(payload.text);
+        }
+      }
+    },
+  );
+
   // The free-text route is only ever offered as text on LINE. Above the action
   // budget the shared adapter writes it under `Actions:`; below it the control is
   // still delivered here, so the renderer has to write the same words itself or a
