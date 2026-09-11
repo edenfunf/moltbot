@@ -7,6 +7,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { runWithOwnedSessionTranscriptWrite } from "../../../config/sessions/transcript-write-context.js";
 import { captureAgentRunLifecycleGeneration } from "../../../infra/agent-events.js";
+import { validateAgentRunDelegatedAuthority } from "../../../infra/agent-run-registry.js";
 import {
   freezeDiagnosticTraceContext,
   type DiagnosticTraceContext,
@@ -103,6 +104,7 @@ export function prepareEmbeddedAttemptStream(input: {
     revokeApprovals: () => void,
   ) => void;
   activeSession: AgentSession;
+  onModelUsage?: Parameters<typeof subscribeEmbeddedAgentSession>[0]["onModelUsage"];
   runtimeChannel?: string;
   hookRunner: HookRunner;
   hookAgentId: string;
@@ -288,6 +290,7 @@ export function prepareEmbeddedAttemptStream(input: {
   let deferredLifecycleOwner: EmbeddedAttemptDeferredLifecycleOwner | undefined;
   const subscription = subscribeEmbeddedAgentSession({
     session: input.activeSession,
+    onModelUsage: input.onModelUsage,
     runId: attempt.runId,
     lifecycleGeneration: attempt.lifecycleGeneration,
     messageChannel: input.runtimeChannel,
@@ -305,6 +308,7 @@ export function prepareEmbeddedAttemptStream(input: {
     onDeliveredMessageToolOnlySourceReply: input.markSourceReplyDelivered,
     onAgentToolResult: attempt.onAgentToolResult,
     observeToolTerminal: attempt.observeToolTerminal,
+    trajectoryRecorder: input.trajectoryRecorder,
     onToolResult: attempt.onToolResult,
     onReasoningStream: attempt.onReasoningStream,
     streamReasoningInNonStreamModes: attempt.streamReasoningInNonStreamModes,
@@ -685,6 +689,13 @@ export function prepareEmbeddedAttemptStream(input: {
     deferredLifecycleOwner = createEmbeddedAttemptDeferredLifecycleOwner({
       runId: attempt.runId,
       sessionId: attempt.sessionId,
+      diagnosticOwner: input.diagnosticOwner,
+      onRetryWaitCompleted: () => attempt.replyOperation?.recordActivity(),
+      isCurrent: () =>
+        registration?.delegatedAuthority !== undefined &&
+        validateAgentRunDelegatedAuthority(registration.delegatedAuthority) &&
+        ACTIVE_EMBEDDED_RUN_REGISTRATIONS.get(queueHandle) === registration &&
+        ACTIVE_EMBEDDED_RUNS.get(attempt.sessionId) === queueHandle,
       trajectoryRecorder: input.trajectoryRecorder ?? null,
       clearActiveRun: () =>
         clearActiveEmbeddedRun(
