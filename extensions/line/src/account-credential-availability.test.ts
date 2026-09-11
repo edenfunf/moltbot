@@ -8,6 +8,7 @@ import { hasLineCredentials } from "./account-helpers.js";
 import { resolveLineAccount } from "./accounts.js";
 import { lineChannelPluginCommon } from "./channel-shared.js";
 import { lineMessageActions } from "./rich-messages.js";
+import { sendMessageLine } from "./send.js";
 import { isLineConfigured } from "./setup-core.js";
 import { lineStatusAdapter } from "./status.js";
 
@@ -95,6 +96,16 @@ describe("an account whose credential file cannot be read", () => {
     expect(messageToolActions(line, "default")).toEqual([]);
   });
 
+  it("tells a send the token file could not be read instead of asking for a token", async () => {
+    // A send can still name this account (CLI, cron, an explicit account id), and the
+    // error it gets is the only place that operator learns what to fix.
+    const cfg = lineCfg({ tokenFile: missing, channelSecret: "secret" });
+
+    await expect(sendMessageLine("U123", "hello", { cfg })).rejects.toThrow(
+      'LINE channel access token configured for account "default" is unavailable: its tokenFile could not be read.',
+    );
+  });
+
   it("runs and offers the message tool while both credentials resolve", () => {
     const line = { channelAccessToken: "token", channelSecret: "secret" };
 
@@ -102,13 +113,16 @@ describe("an account whose credential file cannot be read", () => {
     expect(messageToolActions(line)).toEqual(["send"]);
   });
 
-  it("still reports an account with no credentials at all as unconfigured", () => {
+  it("still reports an account with no credentials at all as unconfigured", async () => {
     // The branch that already worked; it has to keep working after the change.
     const account = accountFor({});
 
     expect(account.tokenStatus).toBe("missing");
     expect(config.isConfigured(account)).toBe(false);
     expect(config.describeAccount(account)).toMatchObject({ configured: false });
+    await expect(sendMessageLine("U123", "hello", { cfg: lineCfg({}) })).rejects.toThrow(
+      'LINE channel access token missing for account "default"',
+    );
   });
 
   it("falls back to the raw values when no credential status was resolved", () => {
