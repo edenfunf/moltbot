@@ -57,7 +57,8 @@ export async function resolveLineQuestionPostback(params: {
   callback: LineQuestionPostback;
   senderId?: string;
   accountId: string;
-}): Promise<{ status: "answered" | "already-terminal" | "failed" }> {
+  authorize: () => boolean | Promise<boolean>;
+}): Promise<{ status: "answered" | "already-terminal" | "denied" | "failed" }> {
   try {
     const { questionGatewayRuntime } = await import("openclaw/plugin-sdk/question-gateway-runtime");
     const result = await questionGatewayRuntime.resolveOption({
@@ -66,8 +67,13 @@ export async function resolveLineQuestionPostback(params: {
       senderId: params.senderId,
       clientDisplayName: `LINE question (${params.accountId})`,
       optionIndex: params.callback.optionIndex,
+      authorize: params.authorize,
     });
-    if (result.status === "answered" || result.status === "already-terminal") {
+    if (
+      result.status === "answered" ||
+      result.status === "already-terminal" ||
+      result.status === "denied"
+    ) {
       return { status: result.status };
     }
     // The resolver reports custom-input only to a request that asked for one, and

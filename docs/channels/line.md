@@ -423,8 +423,9 @@ a native control, and **Other…** stays named in the card's text under `Actions
 
 LINE cannot edit a message it already delivered, so the controls stay on screen after
 the question ends. A tap that arrives then is answered with `That question is no longer
-waiting for an answer.` A tap that fails channel admission is dropped before that,
-with nothing sent back. The Gateway reports one
+waiting for an answer.` Initial taps follow the channel's normal admission and
+pairing rules. If pairing is revoked while the question is being read, the answer
+is ignored without an answer notice or a new pairing challenge. The Gateway reports one
 terminal state for answered, cancelled and expired questions alike, so the notice does
 not claim which one it was.
 

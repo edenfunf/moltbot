@@ -1058,6 +1058,42 @@ describe("handleLineWebhookEvents", () => {
     },
   );
 
+  it("rechecks paired access without another pairing challenge or answer notice", async () => {
+    const processMessage = vi.fn();
+    const userId = "U0123456789abcdef0123456789abcdef";
+    readAllowFromStoreMock.mockResolvedValue([userId]);
+    let admittedBeforeWrite = true;
+    resolveLineQuestionPostbackMock.mockImplementationOnce(async ({ authorize }) => {
+      // The Gateway can await its question read while this pairing is revoked.
+      readAllowFromStoreMock.mockResolvedValue([]);
+      admittedBeforeWrite = await authorize();
+      return { status: admittedBeforeWrite ? "answered" : "denied" };
+    });
+    await handleLineWebhookEvents(
+      [
+        {
+          type: "postback",
+          replyToken: "reply-token",
+          timestamp: Date.now(),
+          source: { type: "user", userId },
+          mode: "active",
+          webhookEventId: "evt-question-revoked",
+          deliveryContext: { isRedelivery: false },
+          postback: { data: "line.question=ask_3d8dbe55be452a9a39add7c909beb119&line.option=1" },
+        },
+      ],
+      createLineWebhookTestContext({ processMessage, dmPolicy: "pairing" }),
+    );
+
+    expect(readAllowFromStoreMock).toHaveBeenCalledTimes(2);
+    expect(admittedBeforeWrite).toBe(false);
+    expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+    expect(pairingDeliveryMocks.replyMessageLine).not.toHaveBeenCalled();
+    expect(pairingDeliveryMocks.pushMessageLine).not.toHaveBeenCalled();
+    expect(buildLinePostbackContextMock).not.toHaveBeenCalled();
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["already-terminal" as const, "That question is no longer waiting for an answer."],
     ["failed" as const, "Could not record that answer. Reply with the option text instead."],

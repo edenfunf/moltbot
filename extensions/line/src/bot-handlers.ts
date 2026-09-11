@@ -185,13 +185,22 @@ async function sendLinePairingReply(params: {
   });
 }
 
+function isLineEventAdmitted(access: ResolvedChannelMessageIngress): boolean {
+  return (
+    access.senderAccess.decision === "allow" &&
+    (access.ingress.admission === "dispatch" ||
+      access.ingress.admission === "observe" ||
+      access.ingress.admission === "skip")
+  );
+}
+
 async function resolveLineEventAdmission(
   event: MessageEvent | PostbackEvent | JoinEvent,
   context: LineHandlerContext,
 ): Promise<{
   access: ResolvedChannelMessageIngress;
   resolveBoundAccess: (
-    contextBinding: ChannelIngressContextBinding,
+    contextBinding?: ChannelIngressContextBinding,
   ) => Promise<ResolvedChannelMessageIngress>;
   mentions?: LineInboundMentionAccess;
 } | null> {
@@ -309,12 +318,7 @@ async function resolveLineEventAdmission(
     return roomAllowed ? { access, resolveBoundAccess: resolveAccess } : null;
   }
 
-  if (
-    access.senderAccess.decision === "allow" &&
-    (access.ingress.admission === "dispatch" ||
-      access.ingress.admission === "observe" ||
-      access.ingress.admission === "skip")
-  ) {
+  if (isLineEventAdmitted(access)) {
     // Quotes and authorized commands can address the bot without a native LINE
     // mention. Preserve that effective result separately from explicit evidence.
     const mentions = mentionFacts
@@ -642,11 +646,13 @@ async function handlePostbackEvent(
       callback: question,
       accountId: context.account.accountId,
       ...(userId ? { senderId: userId } : {}),
+      // Re-read admission after question.get without issuing a new pairing challenge.
+      authorize: async () => isLineEventAdmitted(await decision.resolveBoundAccess()),
     });
     // A recorded answer needs no acknowledgement: the agent's next reply is the
     // feedback, and LINE already echoed the label through the action's displayText.
     const pushTarget = groupId ?? roomId ?? (userId ? `line:${userId}` : undefined);
-    if (outcome.status === "answered" || !pushTarget) {
+    if (outcome.status === "answered" || outcome.status === "denied" || !pushTarget) {
       return;
     }
     await sendLineHandlerText({
