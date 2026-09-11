@@ -576,9 +576,13 @@ describe("monitorLineProvider lifecycle", () => {
       agentId: "main",
     });
 
-    expect(
-      turn?.delivery.durable?.({ text: "answering you", replyToId: "m1" }, { kind: "final" }),
-    ).toEqual({ to: "line:U1" });
+    const durable = turn?.delivery.durable;
+    if (typeof durable !== "function") {
+      throw new Error("expected LINE to choose durable delivery per reply");
+    }
+    expect(await durable({ text: "answering you", replyToId: "m1" }, { kind: "final" })).toEqual({
+      to: "line:U1",
+    });
   });
 
   it("carries a group's skill scope into the turn that answers it", async () => {
