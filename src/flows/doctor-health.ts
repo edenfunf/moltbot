@@ -4,9 +4,10 @@ import { intro as clackIntro, outro as clackOutro } from "@clack/prompts";
 import { stylePromptTitle } from "../../packages/terminal-core/src/prompt-style.js";
 import type { DoctorOptions } from "../commands/doctor-prompter.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
-import { formatDoctorStateRepairFailure } from "../infra/state-repair-message.js";
+import { DoctorUnreadableStateDatabaseError } from "../infra/state-repair-message.js";
 import {
   captureUpdateDoctorConfigWrites,
+  normalizeUpdatePostInstallDoctorWarnings,
   UPDATE_POST_INSTALL_DOCTOR_ADVISORY_EXIT_CODE,
   UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
   writeUpdatePostInstallDoctorResult,
@@ -61,11 +62,9 @@ async function assertDoctorDatabaseSchemasCompatible(scope?: "state") {
     (database) => database.kind === "state",
   );
   if (unreadableStateDatabase) {
-    throw new Error(
-      formatDoctorStateRepairFailure(
-        `shared state database is unreadable at ${unreadableStateDatabase.path}: ${unreadableStateDatabase.reason}`,
-        "Stop OpenClaw processes, then restore this file from a verified backup; the unreadable database was left unchanged.",
-      ),
+    throw new DoctorUnreadableStateDatabaseError(
+      unreadableStateDatabase.path,
+      unreadableStateDatabase.reason,
     );
   }
   return databaseSchemas;
@@ -109,7 +108,7 @@ async function runDoctorHealthFlowWithResult(
 
   if (options.repair === true || options.yes === true || options.generateGatewayToken === true) {
     const { assertConfigWriteAllowedInCurrentMode } =
-      await import("../config/nix-mode-write-guard.js");
+      await import("../config/config-write-guard.js");
     assertConfigWriteAllowedInCurrentMode();
   }
   let maintenance: Awaited<
@@ -212,9 +211,9 @@ async function runDoctorHealthFlowWithResult(
           env: process.env,
         }),
       });
-      const { assertConfiguredWorkspaceStateReady } =
+      const { assertConfiguredWorkspaceStateReadyForDoctor } =
         await import("../agents/workspace-state-dirs.js");
-      assertConfiguredWorkspaceStateReady({ cfg: ctx.cfg, operation: "doctor" });
+      await assertConfiguredWorkspaceStateReadyForDoctor({ cfg: ctx.cfg });
       const { assertNoPendingLegacyExecApprovals } =
         await import("../infra/exec-approvals-migration-gate.js");
       assertNoPendingLegacyExecApprovals({ operation: "doctor" });
@@ -223,7 +222,17 @@ async function runDoctorHealthFlowWithResult(
       repairGatewayMaintenanceStartupFailures();
     }
     await maintenance?.finish(ctx.cfg);
-    doctorResult = ctx.postInstallDoctorResult ?? { status: "ok" };
+    const warnings = normalizeUpdatePostInstallDoctorWarnings([
+      ...(ctx.configResult.stateMigrationStepReceipts ?? []).flatMap((receipt) =>
+        receipt.outcome === "warning" ? receipt.warnings : [],
+      ),
+      ...(ctx.postInstallDoctorResult?.warnings ?? []),
+      ...(ctx.updateWarnings ?? []),
+    ]);
+    doctorResult = {
+      ...(ctx.postInstallDoctorResult ?? { status: "ok" }),
+      ...(warnings.length ? { warnings } : {}),
+    };
     if (updateResult && doctorResult.status === "advisory") {
       exitCode = UPDATE_POST_INSTALL_DOCTOR_ADVISORY_EXIT_CODE;
       return;
