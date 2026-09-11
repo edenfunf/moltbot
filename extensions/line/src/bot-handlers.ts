@@ -120,14 +120,19 @@ async function sendLineHandlerText(params: {
   replyToken?: string;
   pushTarget: string;
   logLabel: string;
+  authorize?: () => boolean | Promise<boolean>;
 }): Promise<void> {
   const { context, logLabel, text } = params;
   const sendOptions = {
     cfg: context.cfg,
     accountId: context.account.accountId,
     channelAccessToken: context.account.channelAccessToken,
+    ...(params.authorize ? { authorize: params.authorize } : {}),
   };
   if (params.replyToken) {
+    if (params.authorize && !(await params.authorize())) {
+      return;
+    }
     try {
       await replyMessageLine(params.replyToken, [{ type: "text", text }], sendOptions);
       return;
@@ -137,6 +142,9 @@ async function sendLineHandlerText(params: {
         return;
       }
     }
+  }
+  if (params.authorize && !(await params.authorize())) {
+    return;
   }
   try {
     await pushMessageLine(params.pushTarget, text, sendOptions);
@@ -641,13 +649,14 @@ async function handlePostbackEvent(
   if (question) {
     // An ask_user tap answers the pending question; it is not a new turn.
     const { userId, groupId, roomId } = getLineSourceInfo(event.source);
+    // Re-read admission without issuing another pairing challenge.
+    const authorize = async () => isLineEventAdmitted(await decision.resolveBoundAccess());
     const outcome = await resolveLineQuestionPostback({
       cfg: context.cfg,
       callback: question,
       accountId: context.account.accountId,
       ...(userId ? { senderId: userId } : {}),
-      // Re-read admission after question.get without issuing a new pairing challenge.
-      authorize: async () => isLineEventAdmitted(await decision.resolveBoundAccess()),
+      authorize,
     });
     // A recorded answer needs no acknowledgement: the agent's next reply is the
     // feedback, and LINE already echoed the label through the action's displayText.
@@ -661,6 +670,7 @@ async function handlePostbackEvent(
       pushTarget,
       logLabel: "line: question answer notice failed",
       text: lineQuestionOutcomeNotice(outcome.status),
+      authorize,
     });
     return;
   }
