@@ -49,8 +49,9 @@ import {
   resolveLineConversationId,
   buildLinePostbackContext,
   getLineSourceInfo,
-  extractLineMessageText,
   readLineTextMessageBody,
+  recordLineAgentVisibleSend,
+  resolveLineQuotableBody,
   type LineInboundContext,
   type LineInboundMentionAccess,
 } from "./bot-message-context.js";
@@ -59,11 +60,7 @@ import { reserveLineGroupHistory } from "./group-history.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
 import { hasAnyLineMention, isLineBotMentioned } from "./mentions.js";
 import { parseLineQuestionPostbackData, resolveLineQuestionPostback } from "./question-postback.js";
-import {
-  readLineQuotedMessageId,
-  recordLineAgentVisibleMessage,
-  resolveLineQuotedMessage,
-} from "./quoted-messages.js";
+import { readLineQuotedMessageId, resolveLineQuotedMessage } from "./quoted-messages.js";
 import { getLineGroupName, getUserDisplayName, pushMessageLine, replyMessageLine } from "./send.js";
 import type { ResolvedLineAccount } from "./types.js";
 import type { LineWebhookTurnAdoptionLifecycle } from "./webhook-spool.js";
@@ -448,7 +445,6 @@ async function handleMessageEvent(
   }
 
   const { isGroup, groupId, roomId, userId } = getLineSourceInfo(event.source);
-  const quotableBody = resolveLineQuotableBody(message);
   if (isGroup && decision.access.activationAccess.shouldSkip) {
     const historyKey = groupId ?? roomId;
     const groupsConfigPath = resolveChannelGroupsConfigPath({
@@ -483,7 +479,7 @@ async function handleMessageEvent(
         limit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
         entry: {
           sender,
-          body: quotableBody,
+          body: resolveLineQuotableBody(message),
           timestamp: event.timestamp,
         },
       });
@@ -491,7 +487,7 @@ async function handleMessageEvent(
       // this message was never put in front of the agent and a later quote of
       // it must not resolve to its text.
       if (recorded.length > 0) {
-        recordLineAgentVisibleSend(account.accountId, event, setParts);
+        recordLineAgentVisibleSend(account.accountId, [event, ...setParts]);
       }
     }
     return;
@@ -579,7 +575,7 @@ async function handleMessageEvent(
       logVerbose("line: skipping empty message");
     } else {
       // This send is on its way to the agent, so a later quote of any part may name it.
-      recordLineAgentVisibleSend(account.accountId, event, setParts);
+      recordLineAgentVisibleSend(account.accountId, [event, ...setParts]);
       await processMessage(messageContext, {
         // The config this event resolved to, not the one the monitor booted on.
         cfg: context.cfg,
@@ -722,36 +718,6 @@ async function handlePostbackEvent(
 }
 
 /** Media reads in the order the sender picked, whatever order LINE delivered. */
-// Text a later quote of a message must resolve to. It is the same string the agent
-// is given for that message — a sticker's description, a formatted location — so a
-// quote answers with what the reader already saw. A message that carried only media
-// has no such text and keeps its kind marker.
-function resolveLineQuotableBody(message: MessageEvent["message"]): string {
-  return extractLineMessageText(message) || `<${message.type}>`;
-}
-
-/**
- * Makes every message of one send quotable. A multi-image send reaches the agent as
- * one turn, and a later quote may name any image in it, not only the part that
- * anchored the turn.
- */
-function recordLineAgentVisibleSend(
-  accountId: string,
-  event: MessageEvent,
-  setParts: readonly MessageEvent[],
-): void {
-  const { userId } = getLineSourceInfo(event.source);
-  const conversationId = resolveLineConversationId(event.source);
-  for (const part of orderedLineSetMessages(event.message, setParts)) {
-    recordLineAgentVisibleMessage(accountId, {
-      id: part.id,
-      conversationId,
-      body: resolveLineQuotableBody(part),
-      ...(userId ? { senderId: userId } : {}),
-    });
-  }
-}
-
 function orderedLineSetMessages(
   message: MessageEvent["message"],
   setParts: readonly MessageEvent[],

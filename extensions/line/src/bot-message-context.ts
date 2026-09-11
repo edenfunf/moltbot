@@ -43,6 +43,7 @@ import { resolveLineMentionStrippedText } from "./mentions.js";
 import { readLineQuoteToken, recordLineQuoteToken } from "./quote-tokens.js";
 import {
   readLineQuotedMessageId,
+  recordLineAgentVisibleMessage,
   resolveLineQuotedMessage,
   type LineQuotedMessage,
 } from "./quoted-messages.js";
@@ -233,7 +234,7 @@ export function readLineTextMessageBody(message: webhook.TextMessageContent): st
 }
 
 /** The text this message reaches the agent as; empty when it carries only media. */
-export function extractLineMessageText(message: MessageEvent["message"]): string {
+function extractLineMessageText(message: MessageEvent["message"]): string {
   if (message.type === "text") {
     return readLineTextMessageBody(message);
   }
@@ -252,6 +253,31 @@ export function extractLineMessageText(message: MessageEvent["message"]): string
     return describeLineSticker(message);
   }
   return "";
+}
+
+// Text a later quote of a message must resolve to. It is the same string the agent
+// is given for that message — a sticker's description, a formatted location — so a
+// quote answers with what the reader already saw. A message that carried only media
+// has no such text and keeps its kind marker.
+export function resolveLineQuotableBody(message: MessageEvent["message"]): string {
+  return extractLineMessageText(message) || `<${message.type}>`;
+}
+
+/**
+ * Makes every message of one send quotable. A multi-image send reaches the agent as
+ * one turn, and a later quote may name any image in it, not only the part that
+ * anchored the turn.
+ */
+export function recordLineAgentVisibleSend(accountId: string, send: readonly MessageEvent[]): void {
+  for (const { source, message } of send) {
+    const { userId } = getLineSourceInfo(source);
+    recordLineAgentVisibleMessage(accountId, {
+      id: message.id,
+      conversationId: resolveLineConversationId(source),
+      body: resolveLineQuotableBody(message),
+      ...(userId ? { senderId: userId } : {}),
+    });
+  }
 }
 
 function extractNativeMediaKind(
