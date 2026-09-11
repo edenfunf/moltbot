@@ -806,7 +806,7 @@ describe("structured prompt media replay", () => {
           media,
           mediaImageLayout: {
             slots: meta.slots.map((slot) => ({ ...slot })),
-            ...("suppressedFactIndexes" in meta
+            ...(meta.suppressedFactIndexes
               ? { suppressedFactIndexes: [...meta.suppressedFactIndexes] }
               : {}),
           },
@@ -823,7 +823,8 @@ describe("structured prompt media replay", () => {
       const byData = new Map(
         Object.entries(bytes).map(([key, value]) => [value.toString("base64"), key]),
       );
-      const blocks = Array.isArray(replayed?.content) ? replayed.content : [];
+      const blocks =
+        replayed?.role === "user" && Array.isArray(replayed.content) ? replayed.content : [];
       expect(
         blocks.map((block) =>
           block.type === "image" ? (byData.get(block.data) ?? "unknown") : block.type,
