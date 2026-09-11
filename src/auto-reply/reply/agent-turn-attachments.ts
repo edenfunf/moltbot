@@ -29,6 +29,7 @@ type AgentTurnAttachmentRuntime = Pick<
   Awaited<ReturnType<typeof loadAgentTurnMediaRuntime>>,
   | "MediaAttachmentCache"
   | "isImageAttachment"
+  | "isImageDecodable"
   | "isMediaUnderstandingSkipError"
   | "normalizeAttachments"
   | "resolveMediaAttachmentLocalRoots"
@@ -130,6 +131,15 @@ export async function resolveAgentTurnAttachments(params: {
         return false;
       }
       const historyImage = historyAttachmentByIndex.get(attachment.index);
+      // A retained image is described to the model as attached. Its header can be
+      // valid while its pixels are not, and a runtime that decodes it then drops
+      // the image but keeps that note, so a retained image must decode first.
+      if (historyImage && !(await runtime.isImageDecodable(buffer))) {
+        logVerbose(
+          `agent-turn-attachments: skipping retained image #${attachment.index + 1} (undecodable)`,
+        );
+        return false;
+      }
       // Bind provenance only after the cache accepts the bytes. Runtime adapters
       // can then describe exactly the images that survive their own filtering.
       results.push(

@@ -162,6 +162,25 @@ describe("current-turn and shared attachment history agreement", () => {
     },
   );
 
+  it("does not hand a turn a retained image whose pixels cannot be decoded", async () => {
+    await withTestDir({ prefix: "openclaw-turn-history-undecodable-" }, async (base) => {
+      const fixture = await createImageHistory(base);
+      // A valid PNG signature and 1x1 IHDR with no IDAT: every header-only check
+      // accepts it, and a runtime that decodes it replaces it with a placeholder.
+      await fs.writeFile(
+        fixture.historyImage.path,
+        Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAAElFTkSuQmCC", "base64"),
+      );
+
+      const shared = await resolveAgentTurnAttachments({ ctx: fixture.ctx, cfg: {} });
+      const native = await resolveCurrentTurnImages({ ctx: fixture.ctx, cfg: {} });
+
+      expect(shared.attachments).toEqual([]);
+      expect(shared.recentHistoryImages).toEqual([]);
+      expect(native.images).toBeUndefined();
+    });
+  });
+
   it.each(["supplied", "extracted"] as const)(
     "keeps a %s image ahead of retained history after a current read fails",
     async (source) => {
