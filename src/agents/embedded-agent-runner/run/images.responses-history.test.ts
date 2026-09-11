@@ -103,7 +103,13 @@ function responseBody(requestIndex: number): { created: string; completed: strin
 
 async function resolveRetainedImages(
   base: string,
-  fixture: { extension: string; mimeType: string; bytes: Buffer; sha256: string },
+  fixture: {
+    extension: string;
+    mimeType: string;
+    bytes: Buffer;
+    sha256: string;
+    retained: boolean;
+  },
 ) {
   const historyPath = path.join(base, "media", "inbound", `history.${fixture.extension}`);
   await fs.mkdir(path.dirname(historyPath), { recursive: true });
@@ -122,6 +128,11 @@ async function resolveRetainedImages(
     ],
   };
   const images = await resolveCurrentTurnImages({ ctx, cfg: {} });
+  if (!fixture.retained) {
+    // It cannot decode, so it is refused where it is retained: no runtime sees it.
+    expect(images.images).toBeUndefined();
+    return images;
+  }
   expect(images.images?.map(imageHash)).toEqual([fixture.sha256]);
   expect(images.images?.map((image) => image.mimeType)).toEqual([fixture.mimeType]);
   expect(images.images?.map(readRuntimeImageHistory)).toEqual([
@@ -263,6 +274,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
       sanitized: true,
       blocked: false,
       forwarded: true,
+      retained: true,
     },
     {
       format: "BMP",
@@ -274,6 +286,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
       sanitized: true,
       blocked: false,
       forwarded: false,
+      retained: true,
     },
     {
       format: "PNG on a text-only model",
@@ -285,6 +298,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
       sanitized: false,
       blocked: false,
       forwarded: false,
+      retained: true,
     },
     {
       format: "truncated PNG",
@@ -296,6 +310,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
       sanitized: false,
       blocked: false,
       forwarded: false,
+      retained: false,
     },
     {
       format: "PNG with image reading disabled",
@@ -307,13 +322,30 @@ describe("retained image provenance at Responses HTTP egress", () => {
       sanitized: true,
       blocked: true,
       forwarded: false,
+      retained: true,
     },
   ])(
     "matches final input for retained $format",
-    async ({ extension, mimeType, bytes, sha256, vision, sanitized, blocked, forwarded }) => {
+    async ({
+      extension,
+      mimeType,
+      bytes,
+      sha256,
+      vision,
+      sanitized,
+      blocked,
+      forwarded,
+      retained,
+    }) => {
       await withTestDir({ prefix: "openclaw-retained-image-responses-" }, async (base) => {
         await withEnvAsync({ OPENCLAW_STATE_DIR: base }, async () => {
-          const images = await resolveRetainedImages(base, { extension, mimeType, bytes, sha256 });
+          const images = await resolveRetainedImages(base, {
+            extension,
+            mimeType,
+            bytes,
+            sha256,
+            retained,
+          });
           const modelInput: Array<"text" | "image"> = vision ? ["text", "image"] : ["text"];
           const prepared = await prepareEmbeddedAttemptPromptExecution({
             attempt: {
@@ -402,16 +434,18 @@ describe("retained image provenance at Responses HTTP egress", () => {
       bytes: HISTORY_PNG,
       sha256: "b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640",
       forwarded: true,
+      retained: true,
     },
     {
       format: "truncated PNG",
       bytes: HISTORY_PNG.subarray(0, 8),
       sha256: createHash("sha256").update(HISTORY_PNG.subarray(0, 8)).digest("hex"),
       forwarded: false,
+      retained: false,
     },
   ])(
     "consumes retained $format through accepted steering",
-    async ({ bytes, sha256, forwarded }) => {
+    async ({ bytes, sha256, forwarded, retained }) => {
       await withTestDir({ prefix: "openclaw-retained-image-steer-" }, async (base) => {
         await withEnvAsync({ OPENCLAW_STATE_DIR: base }, async () => {
           const images = await resolveRetainedImages(base, {
@@ -419,6 +453,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
             mimeType: "image/png",
             bytes,
             sha256,
+            retained,
           });
           await withResponsesSession(
             base,
@@ -474,7 +509,11 @@ describe("retained image provenance at Responses HTTP egress", () => {
                 await running;
 
                 expect(admissions).toEqual([
-                  { imageHashes: [sha256], hasCurrentMediaFacts: false, pendingSteers: [] },
+                  {
+                    imageHashes: retained ? [sha256] : [],
+                    hasCurrentMediaFacts: false,
+                    pendingSteers: [],
+                  },
                 ]);
                 expect(session.pendingMessageCount).toBe(0);
                 expect(session.getSteeringMessages()).toEqual([]);
@@ -489,7 +528,7 @@ describe("retained image provenance at Responses HTTP egress", () => {
                 expect(canonicalUsers).toHaveLength(2);
                 expect(canonicalUsers[1]?.content).toEqual([
                   { type: "text", text: QUESTION },
-                  ...images.images!,
+                  ...(images.images ?? []),
                 ]);
                 expect(JSON.stringify(canonicalUsers)).not.toContain("attached as media");
 
