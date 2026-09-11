@@ -1174,6 +1174,8 @@ export const en: TranslationMap & {
     transcriptSearchError: "Transcript search failed",
     transcriptSearchIndexing:
       "The transcript index is still updating. Retry to include recent messages.",
+    transcriptSearchArchivedExcluded:
+      "{count} archived transcripts excluded; open a session to restore its searchable history.",
     transcriptSearchEmpty: "No transcript messages match that search.",
     transcriptSearchMatches: "Transcript matches: {count}",
     transcriptSearchTruncated: "Showing the first 25 matches.",
@@ -5909,6 +5911,7 @@ export const en: TranslationMap & {
       running: "Running",
       completed: "Completed",
       exitCode: "Exit code {code}",
+      failureCount: "{count} failed",
       noOutputFailed: "No output — tool failed.",
       noOutputSucceeded: "No output — tool completed successfully.",
       noResult: "No result available.",
