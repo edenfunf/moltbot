@@ -26,6 +26,7 @@ import {
   type QuestionPrompt,
 } from "../../app/question-prompt.ts";
 import type { PresencePayload } from "../../app/user-profile.ts";
+import type { MarkdownRenderOptions } from "../../components/markdown-render-options.ts";
 import { SessionProgressCardController } from "../../components/session-progress-card-controller.ts";
 import type {
   BoardCommandEvent,
@@ -146,6 +147,8 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   // Empty means unresolved route data: boot on the page state's default session
   // without canonicalizing until the container supplies a real key.
   @property({ attribute: false }) sessionKey = "";
+  // This session-keyed pane retains its initial skeleton through URL canonicalization.
+  @property({ attribute: false }) routeLoadingSkeleton = false;
   @property({ attribute: false }) agentId?: string;
   @property({ attribute: false }) inputRegion: ChatInputRegion = "page";
   @property({ attribute: false }) compact = false;
@@ -287,7 +290,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     onViewportResize: () => this.chatState.handleTranscriptResize(),
     onReaderScroll: () => this.state && handleChatScrollTakeover(this.state),
   });
-  protected readonly taskSidebarTranscript = new ChatTranscriptController(this);
   protected readonly progressCard = new SessionProgressCardController(this, {
     gateway: () => this.context?.gateway,
     target: () => {
@@ -535,6 +537,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   protected readonly typingTimers = new Map<string, number>();
   protected sessionPullRequests: ControlUiSessionPullRequest[] = [];
   protected sessionPullRequestsBranch: ControlUiSessionBranch | undefined;
+  protected githubRepo: MarkdownRenderOptions["githubRepo"] = null;
   protected sessionPullRequestsRateLimited = false;
   protected sessionPullRequestsExpanded = false;
   protected githubPublication: GitHubPublicationBinding | null = null;

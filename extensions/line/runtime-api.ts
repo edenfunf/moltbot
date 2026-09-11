@@ -65,9 +65,7 @@ export {
 export {
   type CodeBlock,
   convertCodeBlockToFlexBubble,
-  convertTableToFlexBubble,
   hasMarkdownToConvert,
-  type MarkdownTable,
   type ProcessedLineMessage,
   processLineMessage,
   stripMarkdown,

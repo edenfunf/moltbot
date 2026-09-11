@@ -35,6 +35,12 @@ import {
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { buildLineQuickReplyFallbackText } from "./quick-reply-fallback.js";
 import {
+  applyLineQuoteToken,
+  canCarryLineQuoteToken,
+  reportLineQuoteCarrierMissing,
+  resolveLineQuoteToken,
+} from "./quote-tokens.js";
+import {
   createLineQuickReply,
   LINE_PRESENTATION_CAPABILITIES,
   renderLineCard,
@@ -81,6 +87,7 @@ async function sendLinePayload({
   payload,
   accountId,
   cfg,
+  replyToId,
   deliveryQueueId,
   deliveryPartIndex,
   deliveryPartCount,
@@ -273,6 +280,25 @@ async function sendLinePayload({
     throw new Error("Message must be non-empty for LINE sends");
   }
 
+  // LINE renders a quote on one bubble, so a reply spends its token on the first
+  // message able to carry it, whichever push that is. Quoting before the plan is
+  // recorded is what lets a replay reissue the quote along with the request.
+  const replyQuoteToken = resolveLineQuoteToken({
+    cfg,
+    accountId,
+    chatId: to,
+    messageId: replyToId,
+  });
+  const quotedPushIndex = replyQuoteToken
+    ? plannedPushes.findIndex((messages) => messages.some(canCarryLineQuoteToken))
+    : -1;
+  if (replyQuoteToken && quotedPushIndex < 0) {
+    reportLineQuoteCarrierMissing(to);
+  }
+  const quotedPushes = plannedPushes.map((messages, index) =>
+    index === quotedPushIndex ? applyLineQuoteToken(messages, replyQuoteToken) : messages,
+  );
+
   return await dispatchLinePushes({
     to,
     cfg,
@@ -287,7 +313,7 @@ async function sendLinePayload({
             partCount: deliveryPartCount,
             to,
             ...(accountId ? { accountId } : {}),
-            pushes: plannedPushes.map((messages, pushIndex) => ({
+            pushes: quotedPushes.map((messages, pushIndex) => ({
               retryKey: resolveLinePushRetryKey({
                 deliveryQueueId,
                 partIndex: deliveryPartIndex ?? 0,
@@ -297,7 +323,7 @@ async function sendLinePayload({
             })),
           })
         ).pushes
-      : plannedPushes.map((messages) => ({ messages })),
+      : quotedPushes.map((messages) => ({ messages })),
   });
 }
 
@@ -377,7 +403,8 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
   textChunkLimit: 5000,
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
-  renderPresentation: ({ payload, presentation }) => renderLinePresentation(payload, presentation),
+  renderPresentation: ({ payload, presentation, sourcePresentation, ctx }) =>
+    renderLinePresentation(payload, presentation, ctx.to, sourcePresentation),
   // Core plans parts for text and media but not for a structured payload, because a
   // payload is one part of one; it is stated here rather than substituted at the
   // recorder, which must keep refusing a route that lost its real coordinates.
@@ -548,6 +575,9 @@ const lineMessageAdapterBase = createChannelMessageAdapterFromOutbound({
   capabilities: {
     text: true,
     media: true,
+    // Core withholds durable final delivery from any payload whose declared
+    // capabilities it cannot find, so a reply that names a target has to say so.
+    replyTo: true,
     payload: true,
     messageSendingHooks: true,
     reconcileUnknownSend: true,

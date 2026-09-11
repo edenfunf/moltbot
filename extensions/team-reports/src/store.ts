@@ -36,6 +36,14 @@ export type PeriodListEntry = {
   untilMs: number;
   status: "partial" | "closed";
   generatedAtMs: number;
+  activeMembers: number;
+  memberCount: number;
+  githubTotal: number;
+  discordMessages: number;
+  commits: number;
+  prsOpened: number;
+  prsMerged: number;
+  securityAdvisories: number;
 };
 export type PersonDay = {
   dayKey: string;
@@ -141,7 +149,9 @@ export class TeamReportsStore {
     }
   }
 
-  upsertPeriod(value: Omit<StoredPeriod, "summary"> & { summary?: SummaryDocument | null }): void {
+  async upsertPeriod(
+    value: Omit<StoredPeriod, "summary"> & { summary?: SummaryDocument | null },
+  ): Promise<void> {
     this.assertOpen();
     const { report } = value;
     const dataJson = JSON.stringify(report);
@@ -199,7 +209,7 @@ export class TeamReportsStore {
     });
   }
 
-  getPeriod(period: Period, key: string): StoredPeriod | undefined {
+  async getPeriod(period: Period, key: string): Promise<StoredPeriod | undefined> {
     this.assertOpen();
     const row = executeSqliteQueryTakeFirstSync(
       this.db,
@@ -212,13 +222,13 @@ export class TeamReportsStore {
     return row ? readPeriod(row) : undefined;
   }
 
-  listPeriods(
+  async listPeriods(
     options: {
       period?: Period;
       status?: "partial" | "closed";
       limit?: number;
     } = {},
-  ): PeriodListEntry[] {
+  ): Promise<PeriodListEntry[]> {
     this.assertOpen();
     let query = this.query
       .selectFrom("team_reports_periods")
@@ -229,6 +239,29 @@ export class TeamReportsStore {
         "until_ms as untilMs",
         "status",
         "generated_at_ms as generatedAtMs",
+      ])
+      // SQLite extracts only the chart totals instead of materializing every report in JavaScript.
+      .select((eb) => [
+        eb.fn<number>("json_extract", ["data_json", eb.val("$.activeMembers")]).as("activeMembers"),
+        eb.fn<number>("json_extract", ["data_json", eb.val("$.memberCount")]).as("memberCount"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.github.total")])
+          .as("githubTotal"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.discord.messages")])
+          .as("discordMessages"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.github.commits")])
+          .as("commits"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.github.prsOpened")])
+          .as("prsOpened"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.github.prsMerged")])
+          .as("prsMerged"),
+        eb
+          .fn<number>("json_extract", ["data_json", eb.val("$.totals.github.securityAdvisories")])
+          .as("securityAdvisories"),
       ])
       .orderBy("since_ms", "desc")
       .orderBy("period", "asc");
@@ -241,7 +274,7 @@ export class TeamReportsStore {
     return executeSqliteQuerySync(this.db, query.limit(options.limit ?? 180)).rows;
   }
 
-  getDayReports(sinceMs: number, untilMs: number): ReportDocument[] {
+  async getDayReports(sinceMs: number, untilMs: number): Promise<ReportDocument[]> {
     this.assertOpen();
     return executeSqliteQuerySync(
       this.db,
@@ -255,12 +288,36 @@ export class TeamReportsStore {
     ).rows.map((row) => reportDocumentSchema.parse(JSON.parse(row.data_json)));
   }
 
-  listPersonDays(
+  async listPersonDays(
     login: string,
     options: { since?: string; until?: string; limit?: number } = {},
-  ): PersonDay[] {
+  ): Promise<PersonDay[]> {
     this.assertOpen();
-    let query = this.query
+    let query = this.selectPersonDays()
+      .where("login", "=", login.toLowerCase())
+      .orderBy("day_key", "desc");
+    if (options.since) {
+      query = query.where("day_key", ">=", options.since);
+    }
+    if (options.until) {
+      query = query.where("day_key", "<", options.until);
+    }
+    return executeSqliteQuerySync(this.db, query.limit(options.limit ?? 28)).rows;
+  }
+
+  async listPersonDaysSince(since: string): Promise<PersonDay[]> {
+    this.assertOpen();
+    return executeSqliteQuerySync(
+      this.db,
+      this.selectPersonDays()
+        .where("day_key", ">=", since)
+        .orderBy("day_key", "desc")
+        .orderBy("login", "asc"),
+    ).rows;
+  }
+
+  private selectPersonDays() {
+    return this.query
       .selectFrom("team_reports_person_days")
       .select([
         "day_key as dayKey",
@@ -275,24 +332,15 @@ export class TeamReportsStore {
         "issue_comments as issueComments",
         "review_comments as reviewComments",
         "discord_messages as discordMessages",
-      ])
-      .where("login", "=", login.toLowerCase())
-      .orderBy("day_key", "desc");
-    if (options.since) {
-      query = query.where("day_key", ">=", options.since);
-    }
-    if (options.until) {
-      query = query.where("day_key", "<", options.until);
-    }
-    return executeSqliteQuerySync(this.db, query.limit(options.limit ?? 28)).rows;
+      ]);
   }
 
-  startRun(run: {
+  async startRun(run: {
     id: string;
     kind: ReportRun["kind"];
     startedAtMs: number;
     periods: RunPeriod[];
-  }): void {
+  }): Promise<void> {
     this.assertOpen();
     executeSqliteQuerySync(
       this.db,
@@ -309,7 +357,7 @@ export class TeamReportsStore {
     );
   }
 
-  finishRun(
+  async finishRun(
     id: string,
     result: {
       finishedAtMs: number;
@@ -317,7 +365,7 @@ export class TeamReportsStore {
       stats?: Record<string, unknown>;
       error?: string;
     },
-  ): void {
+  ): Promise<void> {
     this.assertOpen();
     const updated = executeSqliteQuerySync(
       this.db,
@@ -337,10 +385,10 @@ export class TeamReportsStore {
     }
   }
 
-  listRuns(
+  async listRuns(
     limit = 20,
     filter: { kind?: ReportRun["kind"]; status?: ReportRun["status"] } = {},
-  ): ReportRun[] {
+  ): Promise<ReportRun[]> {
     this.assertOpen();
     let query = this.query.selectFrom("team_reports_runs").selectAll();
     if (filter.kind) {
@@ -364,10 +412,10 @@ export class TeamReportsStore {
     }));
   }
 
-  prune(
+  async prune(
     retentionDays: number,
     nowMs = Date.now(),
-  ): { periods: number; personDays: number; runs: number } {
+  ): Promise<{ periods: number; personDays: number; runs: number }> {
     this.assertOpen();
     if (!Number.isSafeInteger(retentionDays) || retentionDays < 0) {
       throw new Error("Team Reports retention days must be a nonnegative integer.");
@@ -403,7 +451,7 @@ export class TeamReportsStore {
     }));
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) {
       return;
     }
@@ -416,9 +464,9 @@ export class TeamReportsStore {
   }
 }
 
-export function createTeamReportsStore(
+export async function createTeamReportsStore(
   options: { stateDir?: string; dbPath?: string } = {},
-): TeamReportsStore {
+): Promise<TeamReportsStore> {
   const dbPath =
     options.dbPath ??
     path.join(

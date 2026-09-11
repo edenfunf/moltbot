@@ -8,6 +8,7 @@ import {
   createLineBlobStoreState,
   type LineBlobStoreFake,
 } from "./outbound-harness.test-support.js";
+import { recordLineQuoteToken } from "./quote-tokens.js";
 import { setLineRuntime } from "./runtime.js";
 import { LINE_RETRY_KEY_TTL_MS, resolveLinePushRetryKey } from "./send-retry.js";
 
@@ -321,6 +322,43 @@ describe("LINE unknown-send reconciliation", () => {
     expect(readPlan(key!).pushes).toEqual(
       recorded.map((request) => ({ retryKey: request.retryKey, messages: request.messages })),
     );
+  });
+
+  it("records the quote with the request, so a replay still quotes the answered message", async () => {
+    // Quote tokens live only in this process's memory, so after a restart the
+    // replay can quote the answered message only if the recorded request carries it.
+    recordLineQuoteToken({
+      accountId: "default",
+      chatId: TARGET,
+      messageId: "inbound-1",
+      quoteToken: "q-inbound-1",
+    });
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error("process died before LINE answered");
+    });
+    await expect(
+      linePlugin.outbound?.sendPayload?.({
+        cfg: CFG,
+        to: TARGET,
+        text: "answering you",
+        payload: { text: "answering you" },
+        replyToId: "inbound-1",
+        deliveryQueueId: QUEUE_ID,
+        deliveryPartIndex: 0,
+        deliveryPartCount: 1,
+      }),
+    ).rejects.toThrow();
+    const quoted = [{ type: "text", text: "answering you", quoteToken: "q-inbound-1" }];
+    const [key] = planKeys();
+    expect(readPlan(key!).pushes.map((push) => push.messages)).toEqual([quoted]);
+
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ sentMessages: [{ id: "delivered-1" }] }),
+    );
+    await expect(reconcile()).resolves.toMatchObject({ status: "sent" });
+
+    expect(pushedRequests().map((request) => request.messages)).toEqual([quoted]);
   });
 
   it("re-records a part whose previous plan has expired", async () => {

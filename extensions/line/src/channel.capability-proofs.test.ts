@@ -8,6 +8,7 @@ import type { OpenClawConfig } from "../api.js";
 import { linePlugin } from "./channel.js";
 import { recordLineDurableSendPlan } from "./durable-send-plan.js";
 import { createRuntime } from "./outbound-harness.test-support.js";
+import { recordLineQuoteToken } from "./quote-tokens.js";
 import { setLineRuntime } from "./runtime.js";
 import { createLineSendReceipt } from "./send-receipt.js";
 import { resolveLinePushRetryKey } from "./send-retry.js";
@@ -116,6 +117,29 @@ describe("line message adapter capability contracts", () => {
           );
           expect(result?.receipt.platformMessageIds).toEqual(["m-quick"]);
         },
+        replyTo: async () => {
+          recordLineQuoteToken({
+            accountId: "primary",
+            chatId: "U123",
+            messageId: "m-answered",
+            quoteToken: "q-answered",
+          });
+
+          await linePlugin.message?.send?.text?.({
+            cfg: CFG,
+            to: "line:user:U123",
+            text: "answering you",
+            replyToId: "m-answered",
+            accountId: "primary",
+          });
+
+          // The quote rides the message itself, so a recorded plan replays it too.
+          expect(mocks.pushMessagesLine).toHaveBeenLastCalledWith(
+            "line:user:U123",
+            [{ type: "text", text: "answering you", quoteToken: "q-answered" }],
+            { verbose: false, accountId: "primary", cfg: CFG },
+          );
+        },
         messageSendingHooks: () => {
           expect(linePlugin.message?.send?.text).toBeTypeOf("function");
         },
@@ -191,6 +215,7 @@ describe("line message adapter capability contracts", () => {
     for (const capability of [
       "text",
       "media",
+      "replyTo",
       "payload",
       "messageSendingHooks",
       "reconcileUnknownSend",
