@@ -738,4 +738,99 @@ describe("structured prompt media replay", () => {
       await fs.rm(workspaceDir, { recursive: true, force: true });
     }
   });
+
+  // Transcripts written before persistence dropped factless layout slots still
+  // carry them. Each record keeps the shape that writer left, and the expected
+  // content is what origin/main's replay produces for the same record.
+  it.each([
+    {
+      record: "a factless inline slot on a text-only record",
+      content: "look at these",
+      meta: { slots: [{ kind: "inline" }, { kind: "offloaded", factIndex: 0 }], facts: ["a"] },
+      expected: ["text", "a"],
+    },
+    {
+      record: "a factless inline slot with its bytes before an offloaded fact",
+      content: [{ type: "text", text: "compare" }, "c"],
+      meta: { slots: [{ kind: "inline" }, { kind: "offloaded", factIndex: 0 }], facts: ["a"] },
+      expected: ["text", "c", "a"],
+    },
+    {
+      record: "a factless inline slot next to a suppressed fact",
+      content: "two photos",
+      meta: {
+        slots: [
+          { kind: "inline" },
+          { kind: "offloaded", factIndex: 0 },
+          { kind: "offloaded", factIndex: 1 },
+        ],
+        facts: ["a", "b"],
+        suppressedFactIndexes: [1],
+      },
+      expected: ["text", "a"],
+    },
+    {
+      record: "an offloaded fact before a factless inline slot",
+      content: [{ type: "text", text: "reversed" }, "c"],
+      meta: { slots: [{ kind: "offloaded", factIndex: 0 }, { kind: "inline" }], facts: ["b"] },
+      expected: ["text", "b", "c"],
+    },
+  ] as const)("replays $record as main does", async ({ content, meta, expected }) => {
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-main-layout-"));
+    try {
+      const bytes = {
+        a: createSolidPngBuffer(1, 1, { r: 255, g: 0, b: 0 }),
+        b: createSolidPngBuffer(1, 1, { r: 0, g: 255, b: 0 }),
+        c: createSolidPngBuffer(1, 1, { r: 0, g: 0, b: 255 }),
+      };
+      const image = (key: keyof typeof bytes) => ({
+        type: "image" as const,
+        data: bytes[key].toString("base64"),
+        mimeType: "image/png",
+      });
+      const media = await Promise.all(
+        meta.facts.map(async (key) => {
+          const file = path.join(workspaceDir, `${key}.png`);
+          await fs.writeFile(file, bytes[key]);
+          return { path: file, contentType: "image/png", kind: "image" };
+        }),
+      );
+      const record = {
+        role: "user" as const,
+        timestamp: 1,
+        content:
+          typeof content === "string"
+            ? content
+            : content.map((block) => (typeof block === "string" ? image(block) : { ...block })),
+        __openclaw: {
+          media,
+          mediaImageLayout: {
+            slots: meta.slots.map((slot) => ({ ...slot })),
+            ...("suppressedFactIndexes" in meta
+              ? { suppressedFactIndexes: [...meta.suppressedFactIndexes] }
+              : {}),
+          },
+        },
+      };
+      const message: AgentMessage = record;
+
+      const [replayed] = await hydratePromptMediaMessages([message], {
+        workspaceDir,
+        model: { input: ["text", "image"] },
+        localRoots: [workspaceDir],
+      });
+
+      const byData = new Map(
+        Object.entries(bytes).map(([key, value]) => [value.toString("base64"), key]),
+      );
+      const blocks = Array.isArray(replayed?.content) ? replayed.content : [];
+      expect(
+        blocks.map((block) =>
+          block.type === "image" ? (byData.get(block.data) ?? "unknown") : block.type,
+        ),
+      ).toEqual(expected);
+    } finally {
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
 });
