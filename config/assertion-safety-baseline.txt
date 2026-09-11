@@ -1491,7 +1491,7 @@ packages/gateway-client/src/scope-upgrade.ts	4
 packages/gateway-protocol/src/client-info.ts	4
 packages/gateway-protocol/src/connect-error-details.ts	9
 packages/gateway-protocol/src/gateway-error-details.ts	1
-packages/gateway-protocol/src/protocol-validator.ts	3
+packages/gateway-protocol/src/protocol-validator.ts	2
 packages/gateway-protocol/src/schema/audit-activity.ts	1
 packages/gateway-protocol/src/schema/devices.ts	1
 packages/gateway-protocol/src/schema/failover-reason.ts	1
@@ -1640,7 +1640,7 @@ src/agents/cli-credentials.ts	9
 src/agents/cli-executable-identity.ts	3
 src/agents/cli-output-records.ts	1
 src/agents/cli-runner.ts	1
-src/agents/cli-runner/bundle-mcp-codex.ts	4
+src/agents/cli-runner/bundle-mcp-codex.ts	3
 src/agents/cli-runner/bundle-mcp-gemini.ts	4
 src/agents/cli-runner/bundle-mcp-runtime.ts	1
 src/agents/cli-runner/bundle-mcp.ts	6
@@ -3080,7 +3080,7 @@ src/infra/system-run-approval-context.ts	6
 src/infra/tailscale.ts	9
 src/infra/tmp-openclaw-dir.ts	3
 src/infra/unhandled-rejections.ts	6
-src/infra/update-check-package-target.ts	3
+src/infra/update-check-package-target.ts	2
 src/infra/update-doctor-result.ts	2
 src/infra/update-global.ts	3
 src/infra/update-package-manager.ts	1
