@@ -1,6 +1,9 @@
 // Line type declarations define plugin contracts.
 import type { BaseProbeResult } from "openclaw/plugin-sdk/channel-contract";
-import type { MessageReceipt } from "openclaw/plugin-sdk/channel-outbound";
+import type {
+  ChannelDeliveryStreamingConfig,
+  MessageReceipt,
+} from "openclaw/plugin-sdk/channel-outbound";
 import type { ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import type { MediaKind } from "openclaw/plugin-sdk/media-runtime";
 
@@ -34,6 +37,7 @@ interface LineAccountBaseConfig {
   responsePrefix?: string;
   /** Nothing marks a LINE turn as coalesced, so "batched" has nothing to select. */
   replyToMode?: Exclude<ReplyToMode, "batched">;
+  streaming?: ChannelDeliveryStreamingConfig;
   mediaMaxMb?: number;
   historyLimit?: number;
   webhookPath?: string;
