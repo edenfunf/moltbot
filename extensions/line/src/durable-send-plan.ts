@@ -62,9 +62,9 @@ export class LineDurableSendPlanError extends Error {
 }
 
 /**
- * The plan store would not take or give back a record — a full namespace, a record over
- * a byte limit, a failing state directory — as opposed to a record that exists but does
- * not describe this send. What that costs the send is the sender's decision.
+ * The plan store refused a part's record and a read confirmed the part has none, so the
+ * part can go out without one without contradicting an earlier plan. A record that exists
+ * but does not describe this send, or a store that cannot be read, is a different error.
  */
 export class LineDurableSendPlanStoreError extends Error {
   constructor(partIndex: number | undefined, cause: unknown) {
@@ -208,22 +208,28 @@ export async function recordLineDurableSendPlan(params: {
   // trims `to`, so keeping the raw one would compare a trimmed record against an
   // untrimmed argument on the claim-conflict path.
   const recordable = parsed.data;
-  let existing: Awaited<ReturnType<typeof store.lookup>>;
+  await store.deleteExpired();
+  // Claim atomically rather than checking then writing: two attempts at the same part
+  // can race, and a lost race that still wrote would put re-rendered content behind
+  // keys the winner already used.
+  let refusal: { error: unknown } | undefined;
   try {
-    await store.deleteExpired();
-    // Claim atomically rather than checking then writing: two attempts at the same part
-    // can race, and a lost race that still wrote would put re-rendered content behind
-    // keys the winner already used.
     if (
       await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})
     ) {
       return recordable;
     }
-    existing = await store.lookup(key);
   } catch (error) {
-    throw new LineDurableSendPlanStoreError(params.partIndex, error);
+    refusal = { error };
   }
+  // A refused write does not say this part has no record: the store checks the entry size
+  // before it looks for the key. Only this read can say so, and only then may the part go
+  // out without one. A read that fails stays the store's own, retryable, error.
+  const existing = await store.lookup(key);
   if (!existing) {
+    if (refusal) {
+      throw new LineDurableSendPlanStoreError(params.partIndex, refusal.error);
+    }
     // The record was there a moment ago and is not now. Nothing has been sent yet, so
     // refuse rather than send under keys whose record no longer exists.
     throw new LineDurableSendPlanError(

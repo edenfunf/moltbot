@@ -690,6 +690,45 @@ describe("LINE unknown-send reconciliation", () => {
     ]);
   });
 
+  // The store checks the entry size before it looks for the key, so a retry whose new
+  // render is too large is refused while its record is still there. Sending the new render
+  // would put different content behind keys that record already claims.
+  it("replays the stored record when the store refuses a retry's new write", async () => {
+    const store = createLineBlobStoreState();
+    const limit: { bytes?: number } = {};
+    const warn = usePlanStore((options) =>
+      store.state.openBlobStore({ ...options, maxBytesPerEntry: limit.bytes }),
+    );
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
+    const recorded = pushedRequests();
+    fetchMock.mockClear();
+    limit.bytes = Array.from(store.blobs.values())[0]!.byteLength;
+
+    await sendDurablePart({ partIndex: 0, partCount: 1, text: `hello ${"x".repeat(200)}` });
+
+    expect(pushedRequests()).toEqual(recorded);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the store refuses the write and cannot be read", async () => {
+    const store = createLineBlobStoreState();
+    const warn = usePlanStore((options) => ({
+      ...store.state.openBlobStore(options),
+      registerIfAbsent: async () => {
+        throw new Error("state directory refused the write");
+      },
+      lookup: async () => {
+        throw new Error("state directory refused the read");
+      },
+    }));
+
+    await expect(sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" })).rejects.toThrow(
+      "state directory refused the read",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("refuses to replay once LINE has forgotten the retry keys", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockClear();

@@ -116,6 +116,13 @@ function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
         // the deadline, because "expired rows remain owner-managed until explicitly
         // claimed" (plugin-blob-store.sqlite.ts). A stand-in that treated them as free
         // would let a caller drop its own expiry sweep and still pass.
+        // Production also checks the entry size before it looks for the key (`prepareBlob`),
+        // so a retry whose new record is too large is refused even though one is stored.
+        if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
+          throw new Error(
+            `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,
+          );
+        }
         if (blobs.has(key)) {
           return false;
         }

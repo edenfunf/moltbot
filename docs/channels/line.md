@@ -248,8 +248,9 @@ outright — the `ask_user` prompt and the exec-approval prompt among them — g
 fallback and no such log line. Their send fails instead.
 
 If the **recorded plan** cannot be stored — the plan namespace is full, one part's
-record is over the per-entry limit, or the state directory refuses the write — the send
-goes out anyway, under the same retry keys the record would have carried, and
+record is over the per-entry limit, or the state directory refuses the write — and a read
+of the store shows the part has no record yet, the send goes out anyway, under the same
+retry keys the record would have carried, and
 `openclaw logs` carries a warning naming the store's refusal, for example
 `LINE durable send plan part 0 could not be stored: Plugin blob namespace reached its stored row limit. (delivery <id>); sending it without crash recovery`.
 What that part loses is crash recovery, not delivery. A retry of the same send is still
@@ -258,7 +259,10 @@ the send settles, recovery finds no record for that part and ends the delivery a
 unresolved (`LINE delivery carried no durable record ...` or
 `LINE ambiguous delivery is missing recorded parts ...`, above) instead of replaying it:
 the recipient may have it and never gets it twice. It is the trade the delivery queue
-makes for a best-effort row, and it keeps a full plan store from blocking replies.
+makes for a best-effort row, and it keeps a full plan store from blocking replies. A part
+that already has a record — a retry — replays that record as usual even when the store
+refuses the new write, and a store that cannot be read at all fails the attempt, which
+the delivery queue retries.
 
 A validation problem is different. `LINE durable send plan part N cannot be recorded: ...`
 means the part reached the recorder without the coordinates its route should carry, and
