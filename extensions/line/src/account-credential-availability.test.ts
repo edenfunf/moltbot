@@ -1,5 +1,5 @@
 // Line tests cover what a credential that cannot be read is allowed to claim.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -96,15 +96,32 @@ describe("an account whose credential file cannot be read", () => {
     expect(messageToolActions(line, "default")).toEqual([]);
   });
 
-  it("tells a send the token file could not be read instead of asking for a token", async () => {
+  it("tells a send which token file could not be used instead of asking for a token", async () => {
     // A send can still name this account (CLI, cron, an explicit account id), and the
     // error it gets is the only place that operator learns what to fix.
     const cfg = lineCfg({ tokenFile: missing, channelSecret: "secret" });
 
     await expect(sendMessageLine("U123", "hello", { cfg })).rejects.toThrow(
-      'LINE channel access token configured for account "default" is unavailable: its tokenFile could not be read.',
+      'LINE channel access token configured for account "default" is unavailable: channels.line.tokenFile could not be used (not-found).',
     );
   });
+
+  it.skipIf(process.platform === "win32")(
+    "names the account's own key and why a token file that exists was refused",
+    async () => {
+      // A symlinked file (a Kubernetes secret mount is one) reads fine from a shell, so
+      // "could not be read" alone would send this operator to check the wrong thing.
+      const target = join(dir, "token.txt");
+      const link = join(dir, "token-link.txt");
+      writeFileSync(target, "token");
+      symlinkSync(target, link);
+      const cfg = lineCfg({ accounts: { work: { tokenFile: link, channelSecret: "secret" } } });
+
+      await expect(sendMessageLine("U123", "hello", { cfg, accountId: "work" })).rejects.toThrow(
+        'account "work" is unavailable: channels.line.accounts.work.tokenFile could not be used (symlink).',
+      );
+    },
+  );
 
   it("runs and offers the message tool while both credentials resolve", () => {
     const line = { channelAccessToken: "token", channelSecret: "secret" };
