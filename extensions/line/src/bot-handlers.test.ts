@@ -2091,6 +2091,52 @@ describe("handleLineWebhookEvents", () => {
     ]);
   });
 
+  it("keeps every image of a gated multi-image send, not just the part that anchored it", async () => {
+    downloadLineMediaMock.mockImplementation(async (messageId: string) => ({
+      path: `/media/${messageId}.png`,
+      contentType: "image/png",
+      size: 10,
+    }));
+    const processMessage = vi.fn();
+    const groupHistories = new Map<string, HistoryEntry[]>();
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: true,
+      requireMentionOnAllMessageTypes: true,
+      groupHistories,
+      turnAdoptionLifecycle: createTurnAdoptionLifecycleSpy(),
+    });
+    const imagePart = (messageId: string, index: number) =>
+      createTestMessageEvent({
+        message: {
+          id: messageId,
+          type: "image",
+          contentProvider: { type: "line" },
+          quoteToken: `q-${messageId}`,
+          imageSet: { id: "image-set-gated", index, total: 3 },
+        },
+        source: { type: "group", groupId: "group-set", userId: "user-set" },
+        webhookEventId: `evt-gated-set-${index}`,
+      });
+
+    // LINE delivers the parts out of order; the kept entry reads in picked order.
+    await handleLineWebhookEvents(
+      [imagePart("m2", 2), imagePart("m1", 1), imagePart("m3", 3)],
+      context,
+    );
+
+    expect(processMessage).not.toHaveBeenCalled();
+    expect(groupHistories.get("group-set")).toEqual([
+      expect.objectContaining({
+        media: [
+          expect.objectContaining({ path: "/media/m1.png" }),
+          expect.objectContaining({ path: "/media/m2.png" }),
+          expect.objectContaining({ path: "/media/m3.png" }),
+        ],
+      }),
+    ]);
+  });
 
   it("tells a kept entry its attachment never arrived", async () => {
     const processMessage = vi.fn();
