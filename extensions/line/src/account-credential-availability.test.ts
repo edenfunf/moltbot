@@ -34,12 +34,9 @@ function accountFor(line: Record<string, unknown>) {
 
 const { config } = lineChannelPluginCommon;
 
-// `null` is discovery with no account, as core does for a channel other than the current one.
-function messageToolActions(line: Record<string, unknown>, accountId: string | null = "default") {
-  return lineMessageActions.describeMessageTool?.({
-    cfg: lineCfg(line),
-    accountId,
-  } as never)?.actions;
+// `undefined` is how core discovers a channel other than the current one: with no account.
+function messageToolActions(line: Record<string, unknown>, accountId: string | undefined) {
+  return lineMessageActions.describeMessageTool?.({ cfg: lineCfg(line), accountId })?.actions;
 }
 
 async function statusFor(line: Record<string, unknown>) {
@@ -76,10 +73,13 @@ describe("an account whose credential file cannot be read", () => {
   it("withholds the message tool the model would otherwise be told it can use", () => {
     // Offering send here hands the model a tool whose every call fails: the channel
     // refuses to start on the same credentials.
-    expect(messageToolActions({ tokenFile: missing, channelSecret: "secret" })).toEqual([]);
-    expect(messageToolActions({ channelAccessToken: "token", secretFile: missing })).toEqual([]);
+    const unreadableToken = { tokenFile: missing, channelSecret: "secret" };
+    expect(messageToolActions(unreadableToken, "default")).toEqual([]);
+    expect(
+      messageToolActions({ channelAccessToken: "token", secretFile: missing }, "default"),
+    ).toEqual([]);
     // With no account named, a single unreadable one still has nothing that can send.
-    expect(messageToolActions({ tokenFile: missing, channelSecret: "secret" }, null)).toEqual([]);
+    expect(messageToolActions(unreadableToken, undefined)).toEqual([]);
   });
 
   it("offers the message tool through a healthy account when discovery names none", () => {
@@ -92,7 +92,7 @@ describe("an account whose credential file cannot be read", () => {
       accounts: { work: { channelAccessToken: "token", channelSecret: "secret" } },
     };
 
-    expect(messageToolActions(line, null)).toEqual(["send"]);
+    expect(messageToolActions(line, undefined)).toEqual(["send"]);
     expect(messageToolActions(line, "default")).toEqual([]);
   });
 
@@ -127,7 +127,7 @@ describe("an account whose credential file cannot be read", () => {
     const line = { channelAccessToken: "token", channelSecret: "secret" };
 
     expect(config.isConfigured(accountFor(line))).toBe(true);
-    expect(messageToolActions(line)).toEqual(["send"]);
+    expect(messageToolActions(line, "default")).toEqual(["send"]);
   });
 
   it("still reports an account with no credentials at all as unconfigured", async () => {
@@ -143,8 +143,8 @@ describe("an account whose credential file cannot be read", () => {
   });
 
   it("falls back to the raw values when no credential status was resolved", () => {
-    // Callers that build an account by hand carry no status fields, and the shape
-    // they do carry still has to answer.
+    // An account without status fields falls back to the raw values; that branch
+    // predates this change and has to keep answering.
     expect(hasLineCredentials({ channelAccessToken: "token", channelSecret: "secret" })).toBe(true);
     expect(hasLineCredentials({ channelAccessToken: "token" })).toBe(false);
   });

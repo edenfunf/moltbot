@@ -18,10 +18,7 @@ export function hasLineCredentials(account: LineCredentialAccount): boolean {
   return hasUsableLineCredentials(account);
 }
 
-/**
- * Reports whether both credentials resolved to a value, which is what running the
- * account needs. A credential file that could not be read resolves to an empty value.
- */
+/** Running the account needs both values; a credential file that could not be read resolves to "". */
 export function hasUsableLineCredentials(account: LineCredentialAccount): boolean {
   return Boolean(account.channelAccessToken?.trim() && account.channelSecret?.trim());
 }

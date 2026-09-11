@@ -34,8 +34,6 @@ export const lineChannelPluginCommon = {
   configSchema: LineChannelConfigSchema,
   config: {
     ...lineConfigAdapter,
-    // Running needs both credentials resolved; an unreadable credential stays
-    // configured in describeAccount below, which is what status shows.
     isConfigured: (account: ResolvedLineAccount) => hasUsableLineCredentials(account),
     describeAccount: (account: ResolvedLineAccount) =>
       describeWebhookAccountSnapshot({
