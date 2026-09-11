@@ -354,6 +354,7 @@ describe("linePlugin status.probeAccount", () => {
     expect(fetchMock.mock.calls.map(([url]) => resolveRequestUrl(url))).toEqual([
       "https://api.line.me/v2/bot/info",
       "https://api.line.me/v2/bot/message/quota",
+      "https://api.line.me/v2/bot/channel/webhook/endpoint",
     ]);
   });
 });
