@@ -244,15 +244,17 @@ it: if it is interrupted, it is simply lost. Callers that ask for a durable send
 outright — the `ask_user` prompt and the exec-approval prompt among them — get no such
 fallback and no such log line. Their send fails instead.
 
-If the **recorded plan** cannot be stored, that part of the send fails. When the send
-was answering an inbound message it is not silent about it: the turn has been adopted by
-the time it replies, so the LINE event that prompted it is dead-lettered rather than
-answered, under the reason `delivery-side-effects-committed`. As noted earlier on this page, that reason must never
-be resubmitted — the turn was already adopted, so re-enqueuing repeats the committed
-work. Fix the cause and let the sender ask again. A send with no inbound event behind it
-— a cron delivery, `openclaw message send`, an `ask_user` prompt — has nothing to
-dead-letter, so it fails wherever its own caller reports failures and leaves no queued
-record to find. What you see depends on which half of the store rejected it: a validation
+If the **recorded plan** cannot be stored, that attempt fails but the send is not
+dropped. The delivery queue keeps it pending and retries it with backoff, up to its retry
+budget (five attempts unless the caller set its own). Once the store accepts the record
+again, the next attempt or the next Gateway start delivers it once; a send that runs out
+of attempts moves to failed. The inbound LINE event behind a reply is not dead-lettered
+by this: the turn was adopted before it replied, so the event completes. Do not ask the
+sender to repeat the question — free the store and let the queued reply go out, or the
+recipient gets a second answer when the first one recovers. A send with no inbound event
+behind it — a cron delivery, `openclaw message send`, an `ask_user` prompt — also
+reports the failure to its own caller; if the delivery queue holds it, it is retried the
+same way, so check `openclaw logs` before sending it again. What you see depends on which half of the store rejected it: a validation
 problem is reported as `LINE durable send plan part N cannot be recorded: ...`, while
 the plan store's own refusals surface unchanged and mention neither LINE nor the part —
 `Plugin blob namespace reached its stored row limit.` or `... stored byte limit.` when
