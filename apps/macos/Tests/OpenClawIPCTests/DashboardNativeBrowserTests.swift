@@ -66,7 +66,7 @@ struct DashboardNativeBrowserContractTests {
     }
 
     @Test func `requests preserve tab and presentation identities without coercion`() throws {
-        let actions: [DashboardBrowserAction] = [.back, .forward, .reload, .stop, .close, .snapshot]
+        let actions: [DashboardBrowserAction] = [.back, .forward, .reload, .stop, .close, .snapshot, .download]
         for action in actions {
             #expect(try DashboardBrowserMessageHandler.decode([
                 "type": action.rawValue, "tabId": "mac-fixture",
@@ -93,6 +93,7 @@ struct DashboardNativeBrowserContractTests {
         let malformed: [Any] = [
             NSNull(), "open", [String: Any](), ["type": "unknown"],
             ["type": "close"], ["type": "close", "tabId": ""], ["type": "close", "tabId": 42],
+            ["type": "download"], ["type": "download", "tabId": " "],
             ["type": "open", "sessionKey": "", "tabId": "mac-fixture", "url": "about:blank", "activate": 1],
             ["type": "release-scope", "scope": false],
             ["type": "inspect", "tabId": "mac-fixture", "x": -1, "y": 0],

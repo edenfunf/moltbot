@@ -65,6 +65,8 @@ function fakeNativeBrowser(tabs: NativeBrowserTab[] = [], legacy = false) {
         };
       case "inspect":
         return { ok: true, node: createInspectedNode("Save") };
+      case "download":
+        return { ok: true, cancelled: false };
       case "back":
       case "forward":
       case "navigate":
@@ -119,6 +121,9 @@ function controllerFixture(screencast = false, sessionKey = "") {
       }
       if (envelope.path === "/screenshot") {
         return { path: "/fresh.png", targetId: "remote", url: "https://remote.test/" };
+      }
+      if (envelope.path === "/download") {
+        return { download: { path: "/managed/remote.png", suggestedFilename: "remote.png" } };
       }
       if (envelope.path === "/act") {
         return {
@@ -279,6 +284,41 @@ describe("native Browser panel ownership", () => {
     await panel.updateComplete;
     expect(panel.shadowRoot?.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(panel.shadowRoot?.querySelector<HTMLInputElement>(".bp-url")?.value).toBe(opening.url);
+  });
+
+  it("releases pending download feedback when the panel changes sessions", async () => {
+    const native = fakeNativeBrowser([
+      nativeTab("mac-first", "https://example.test/first", "agent:main:first"),
+      nativeTab("mac-second", "https://example.test/second", "agent:main:second"),
+    ]);
+    const panel = await mountSessionPanel("agent:main:first");
+    const reply = createDeferred<{ ok: true; cancelled: boolean }>();
+    native.postMessage.mockImplementationOnce(() => reply.promise);
+    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Download file"]')?.click();
+    await panel.updateComplete;
+    expect(
+      panel.shadowRoot?.querySelector('[aria-label="Downloading…"]')?.getAttribute("aria-busy"),
+    ).toBe("true");
+
+    panel.sessionKey = "agent:main:second";
+    await panel.updateComplete;
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector<HTMLInputElement>(".bp-url")?.value).toBe(
+      "https://example.test/second",
+    );
+    expect(
+      panel.shadowRoot?.querySelector('[aria-label="Download file"]')?.getAttribute("aria-busy"),
+    ).toBe("false");
+    reply.reject(new Error("The old session's save failed"));
+    await flushBrowserResponses();
+    await panel.updateComplete;
+    expect(panel.shadowRoot?.querySelector(".bp-note--error")).toBeNull();
+    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Download file"]')?.click();
+    await flushBrowserResponses();
+    expect(native.messages().filter((message) => message.type === "download")).toEqual([
+      { type: "download", tabId: "mac-first" },
+      { type: "download", tabId: "mac-second" },
+    ]);
   });
 
   it("keeps popup tabs and their fallback activation in the opener's session", async () => {
@@ -832,6 +872,57 @@ describe("native Browser panel ownership", () => {
     expect(controller.inspected).toBeNull();
     expect(controller.inspectPointer).toBeNull();
   });
+
+  it("releases a slow remote download immediately when another tab is selected", async () => {
+    const native = fakeNativeBrowser([nativeTab("mac-one")]);
+    const { controller } = controllerFixture();
+    await controller.selectTab("remote");
+    const body = createDeferred<Blob>();
+    const response = new Response();
+    vi.spyOn(response, "blob").mockReturnValue(body.promise);
+    vi.mocked(fetch).mockResolvedValueOnce(response);
+    const saving = controller.download.save();
+    await flushBrowserResponses();
+    expect(controller.download.pending).toBe(true);
+    await controller.selectTab("mac-one");
+    expect(controller.download.available).toBe(true);
+    await controller.download.save();
+    expect(native.messages()).toContainEqual({ type: "download", tabId: "mac-one" });
+    expect(controller.noticeText).toBeNull();
+    expect(controller.download.pending).toBe(false);
+    body.resolve(new Blob(["late bytes"]));
+    await saving;
+    expect(controller.noticeText).toBeNull();
+    expect(controller.download.pending).toBe(false);
+  });
+
+  it.each([false, true])(
+    "saves the native asset without navigation (cancelled: %s)",
+    async (cancelled) => {
+      const native = fakeNativeBrowser([
+        nativeTab("mac-one", "https://assets.example.test/video.mp4"),
+      ]);
+      const { controller, request } = controllerFixture();
+      flushFrames();
+      controller.urlDraft = "https://example.test/unfinished";
+      const reply = createDeferred<{ ok: true; cancelled: boolean }>();
+      native.postMessage.mockImplementationOnce(() => reply.promise);
+      const before = request.mock.calls.length;
+      const saving = controller.download.save();
+      expect(controller.download.pending).toBe(true);
+      expect(controller.download.available).toBe(false);
+      expect(controller.noticeText).toBeNull();
+      reply.resolve({ ok: true, cancelled });
+      await saving;
+      expect(native.messages().at(-1)).toEqual({ type: "download", tabId: "mac-one" });
+      expect(request.mock.calls).toHaveLength(before);
+      expect(controller.activeTargetId).toBe("mac-one");
+      expect(controller.urlDraft).toBe("https://example.test/unfinished");
+      expect(controller.noticeText).toBeNull();
+      expect(controller.errorText).toBeNull();
+      expect(controller.download.pending).toBe(false);
+    },
+  );
 
   it.each([
     { mode: "annotate", action: "reload" },
