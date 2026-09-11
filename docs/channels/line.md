@@ -551,12 +551,16 @@ link-local, and private-network targets.
   `openclaw status --json` names the config path that failed in
   `degradedSecretOwners[].paths` (for example `channels.line.tokenFile`). The Gateway
   also logs a startup failure naming that secret owner as configured but unavailable.
-  A send that names the account fails with that config path and the reason, for
-  example `channels.line.tokenFile could not be used (symlink)`. Commands that pick a
-  channel on their own do not count the account: with LINE as the only channel,
-  `openclaw message send` without `--channel` reports that no channel is configured,
-  and `openclaw channels capabilities` shows `not configured`. Point the key at a
-  readable regular file; symlinks are rejected.
+  While `tokenFile` is the one that cannot be used, a send that names the account
+  fails with that config path and the reason, for example
+  `channels.line.tokenFile could not be used (symlink)`. Sending needs only the
+  token, so while only `secretFile` cannot be used, sends that name LINE still go
+  out. Commands that ask whether LINE is configured do not count the account:
+  `openclaw message send` without `--channel` picks among the other configured
+  channels, and with none reports that no channel is configured; creating or editing
+  a cron job with `delivery.channel: line` is rejected as not configured; and
+  `openclaw channels capabilities --channel line` shows `not configured`. Point the
+  key at a readable regular file; symlinks are rejected.
 - **No inbound events:** run `openclaw channels status --probe`. LINE only delivers
   events while the channel's webhook URL is registered and **Use webhook** is on in
   the Messaging API tab of the LINE Developers Console, and the probe reports both —
