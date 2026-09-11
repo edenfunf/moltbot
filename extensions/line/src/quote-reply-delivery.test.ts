@@ -306,7 +306,70 @@ describe("the push delivery path", () => {
     ]);
   });
 
+  it("quotes the first message able to carry it even when an earlier request cannot", async () => {
+    // Parts travel five to a request, so the first message LINE accepts a quote on
+    // can sit in a later request than the reply's opening one.
+    recordLineQuoteToken({
+      accountId: "default",
+      chatId: "Clate",
+      messageId: "inbound-late",
+      quoteToken: "token-late",
+    });
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    mocks.resolveTextChunkLimit.mockReturnValue(5000);
+    mocks.chunkMarkdownText.mockImplementation((text: string) =>
+      chunkMarkdownTextForLine(text, 5000),
+    );
+    const cards = Array.from({ length: 5 }, (_, index) => `\`\`\`js\ncard${index}()\n\`\`\``);
+    const markdown = `${cards.join("\n\n")}\n\nAfter the cards`;
 
+    await lineOutboundAdapter.sendPayload!({
+      to: "line:group:Clate",
+      text: markdown,
+      payload: { text: markdown },
+      replyToId: "inbound-late",
+      accountId: "default",
+      cfg,
+    });
+
+    const requests = mocks.pushMessagesLine.mock.calls.map((call) => call[1]);
+    expect(requests.map((request) => request.map((message) => message.type))).toEqual([
+      ["flex", "flex", "flex", "flex", "flex"],
+      ["text"],
+    ]);
+    expect(requests[1]).toEqual([
+      expect.objectContaining({ text: "After the cards", quoteToken: "token-late" }),
+    ]);
+  });
+
+  it("reports a push that answered a message but could carry no quote", async () => {
+    recordLineQuoteToken({
+      accountId: "default",
+      chatId: "Ccard",
+      messageId: "inbound-card",
+      quoteToken: "token-card",
+    });
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    logVerboseMock.mockClear();
+
+    await lineOutboundAdapter.sendPayload!({
+      to: "line:group:Ccard",
+      text: "",
+      payload: {
+        channelData: { line: { flexMessage: { altText: "card", contents: { type: "bubble" } } } },
+      },
+      replyToId: "inbound-card",
+      accountId: "default",
+      cfg,
+    });
+
+    expect(sentMessages(mocks).every((message) => !("quoteToken" in message))).toBe(true);
+    expect(logVerboseMock).toHaveBeenCalledWith(
+      expect.stringContaining("nothing in this reply to line:group:Ccard can carry a quote"),
+    );
+  });
 
   it("sends unquoted when the push answers nothing", async () => {
     const { runtime, mocks } = createRuntime();
