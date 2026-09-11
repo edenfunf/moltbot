@@ -33,10 +33,11 @@ function accountFor(line: Record<string, unknown>) {
 
 const { config } = lineChannelPluginCommon;
 
-function messageToolActions(line: Record<string, unknown>) {
+// `null` is discovery with no account, as core does for a channel other than the current one.
+function messageToolActions(line: Record<string, unknown>, accountId: string | null = "default") {
   return lineMessageActions.describeMessageTool?.({
     cfg: lineCfg(line),
-    accountId: "default",
+    accountId,
   } as never)?.actions;
 }
 
@@ -76,6 +77,22 @@ describe("an account whose credential file cannot be read", () => {
     // refuses to start on the same credentials.
     expect(messageToolActions({ tokenFile: missing, channelSecret: "secret" })).toEqual([]);
     expect(messageToolActions({ channelAccessToken: "token", secretFile: missing })).toEqual([]);
+    // With no account named, a single unreadable one still has nothing that can send.
+    expect(messageToolActions({ tokenFile: missing, channelSecret: "secret" }, null)).toEqual([]);
+  });
+
+  it("offers the message tool through a healthy account when discovery names none", () => {
+    // Core discovers a channel other than the current one without an account and asks
+    // for the configured-account union, so an unreadable default must not hide a
+    // healthy second account.
+    const line = {
+      tokenFile: missing,
+      channelSecret: "secret",
+      accounts: { work: { channelAccessToken: "token", channelSecret: "secret" } },
+    };
+
+    expect(messageToolActions(line, null)).toEqual(["send"]);
+    expect(messageToolActions(line, "default")).toEqual([]);
   });
 
   it("runs and offers the message tool while both credentials resolve", () => {
