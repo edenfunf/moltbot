@@ -251,7 +251,6 @@ function readAnthropicSseChunk(
       }
       settled = true;
       signal.removeEventListener("abort", onAbort);
-      reader.cancel(signal.reason).catch(() => undefined);
       reject(createAbortError(signal));
     };
 
@@ -350,7 +349,13 @@ async function* parseAnthropicSseBody(
     }
   } finally {
     if (!completed) {
-      await reader.cancel(signal?.reason).catch(() => undefined);
+      const cancellation = reader.cancel(signal?.reason).catch(() => undefined);
+      if (signal?.aborted) {
+        // The read continuation retains the original owner even when abort fires elsewhere.
+        getAiTransportHost().observePendingProviderWork?.(cancellation);
+      } else {
+        await cancellation;
+      }
     }
     reader.releaseLock();
   }
@@ -578,6 +583,7 @@ async function buildAnthropicParams(
     authProfileId: options?.authProfileId,
     sessionId: options?.sessionId,
   });
+  const cacheBreakpointOptOutMessageIndexes = new Set<number>();
   const messages = await convertAnthropicMessages(
     transformTransportMessages(replayPlan.messages, model, normalizeAnthropicToolCallId),
     model,
@@ -587,6 +593,7 @@ async function buildAnthropicParams(
       allowReasoningContentReplay: supportsReasoningContentReplay(model),
       compaction: replayPlan.compaction,
       replayThinkingEnabled,
+      cacheBreakpointOptOutMessageIndexes,
     },
   );
   const params: Record<string, unknown> = {
@@ -619,8 +626,12 @@ async function buildAnthropicParams(
       profile: "transport",
     }),
   );
-  // Anthropic-family carriers are append-only, so they are stable cache anchors too.
-  applyAnthropicRequestCacheControl(params, cacheControl, supportsCacheControlOnTools);
+  applyAnthropicRequestCacheControl(
+    params,
+    cacheControl,
+    supportsCacheControlOnTools,
+    cacheBreakpointOptOutMessageIndexes,
+  );
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
 }
 
@@ -763,7 +774,7 @@ export function createAnthropicMessagesTransportStreamFn(): StreamFn {
         );
         const bindingHeaders =
           applyAnthropicThinkingBindingControls(params, betaHeader) ??
-          (betaHeader !== undefined ? { "anthropic-beta": betaHeader } : undefined);
+          (betaHeader ? { "anthropic-beta": betaHeader } : undefined);
         const { response, stream: anthropicStream } = await client.messages.stream(
           { ...params, stream: true },
           { signal: transportOptions.signal, headers: bindingHeaders },

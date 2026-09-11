@@ -1,16 +1,20 @@
 import { html, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import type { SessionCatalog } from "../../../packages/gateway-protocol/src/index.ts";
 import { presenceUserKey } from "../../../src/shared/presence-user.ts";
 import type { GatewaySessionRow } from "../api/types.ts";
 import type { CatalogOpenTarget } from "../app/settings.ts";
 import { readPresenceEntries, resolveCurrentSelfUser } from "../app/user-profile.ts";
 import { t } from "../i18n/index.ts";
-import { isPresenceViewerIdle, projectPresenceViewers } from "../lib/presence-users.ts";
+import {
+  isPresenceViewerIdle,
+  presenceViewerLabel,
+  projectPresenceViewers,
+} from "../lib/presence-users.ts";
 import type { CatalogProjectGrouping } from "../lib/sessions/catalog-project-grouping.ts";
 import { openCatalogSessionInTerminal } from "../lib/sessions/catalog-terminal.ts";
 import type { SidebarSessionSection } from "../lib/sessions/grouping.ts";
 import type { SessionCatalogGroupsRenderer } from "./app-sidebar-session-catalog-render.ts";
+import type { SidebarSessionCatalog } from "./app-sidebar-session-catalogs.ts";
 import {
   renderChildSessionLoadError,
   renderRecentSession,
@@ -41,7 +45,7 @@ type SidebarSessionListHost = SessionListHost & {
 };
 
 type SessionCatalogRenderSnapshot = {
-  catalogs: readonly SessionCatalog[];
+  catalogs: readonly SidebarSessionCatalog[];
   basePath: string;
   routeSessionKey: string;
   newSessionAgentId: string;
@@ -50,7 +54,6 @@ type SessionCatalogRenderSnapshot = {
   projectGrouping: CatalogProjectGrouping;
   liveRows: readonly GatewaySessionRow[];
   toSidebarSession: (row: GatewaySessionRow) => SidebarRecentSession;
-  ownerId: string | null;
   catalogOpenTarget: CatalogOpenTarget;
   terminalAvailable: boolean;
 };
@@ -90,7 +93,9 @@ function renderSessionSection(params: {
   // section owns collapse UI or sits directly below the global toolbar.
   const collapsed = section.renderHeader && host.collapsedSessionSections.has(section.id);
   const label = personOwner
-    ? personOwner.label || personOwner.id
+    ? personIdentity?.type === "profile"
+      ? presenceViewerLabel({ id: personIdentity.id, name: personOwner.label || personOwner.id })
+      : personOwner.label || personOwner.id
     : section.project
       ? section.project.name
       : section.groups
@@ -280,19 +285,23 @@ function renderSessionSection(params: {
                       </button>`
                 }
                 ${
+                  group || section.id === "ungrouped"
+                    ? renderNewSessionLink({
+                        basePath: host.basePath,
+                        agentId: host.expandedAgentId(),
+                        target: { group: group ?? "" },
+                        className: "sidebar-session-group-actions sidebar-new-session",
+                        label: t("sessionsView.newSessionInGroup", { group: label }),
+                        disabledReason: newSessionAccess.allowed
+                          ? undefined
+                          : newSessionAccess.reason,
+                        onOpen: (agentId, target) => host.requestOpenNewSession(agentId, target),
+                      })
+                    : nothing
+                }
+                ${
                   group
                     ? html`
-                        ${renderNewSessionLink({
-                          basePath: host.basePath,
-                          agentId: host.expandedAgentId(),
-                          target: { group },
-                          className: "sidebar-session-group-actions sidebar-new-session",
-                          label: t("sessionsView.newSessionInGroup", { group }),
-                          disabledReason: newSessionAccess.allowed
-                            ? undefined
-                            : newSessionAccess.reason,
-                          onOpen: (agentId, target) => host.requestOpenNewSession(agentId, target),
-                        })}
                         <button
                           type="button"
                           class="sidebar-session-group-actions"
@@ -433,7 +442,7 @@ function renderSessionPagination(params: {
 function renderSessionCatalog(params: {
   host: SessionListHost;
   snapshot: SessionCatalogRenderSnapshot;
-  catalog: SessionCatalog;
+  catalog: SidebarSessionCatalog;
   renderer: SessionCatalogGroupsRenderer;
 }) {
   const { host, snapshot, catalog, renderer } = params;
@@ -455,7 +464,6 @@ function renderSessionCatalog(params: {
       visibleSessionLimits: host.sessionData.visibleSessionLimits,
       projectGrouping: snapshot.projectGrouping,
       liveRows: snapshot.liveRows,
-      ownerId: snapshot.ownerId,
       renderLiveRow: (row, display) =>
         renderRecentSession({
           host,
@@ -487,7 +495,7 @@ function renderSessionCatalog(params: {
       onNavigate: host.onNavigate,
       catalogOpenTarget: snapshot.catalogOpenTarget,
       terminalAvailable: snapshot.terminalAvailable,
-      onOpenTerminal: openCatalogSessionInTerminal,
+      onOpenTerminal: (key, agentId) => openCatalogSessionInTerminal(host, key, agentId),
       onOpenMenu: (request, x, y, trigger) => host.openCatalogMenu(request, x, y, trigger),
       onCatalogMenuTriggerRendered: (key, element) => host.retargetCatalogMenuTrigger(key, element),
       isMenuOpen: (key) => host.sidebarMenus.catalogMenu.isOpenFor(key),

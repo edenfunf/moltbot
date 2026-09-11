@@ -35,6 +35,8 @@ export function buildPendingInputItems(
   inputs: ChatPendingInputsPage["items"],
   searchQuery?: string,
   browserInputs: readonly ChatQueueItem[] = [],
+  workspaceSyncPendingRunIds: readonly string[] = [],
+  workerSetupPending = false,
 ): ChatItem[] {
   // Custody records stay outside active-run ordering until the writer promotes them.
   const items: ChatItem[] = [];
@@ -53,6 +55,18 @@ export function buildPendingInputItems(
       ),
     );
     if (input.state === "queued") {
+      items.push({
+        kind: "notice",
+        key: `pending-input:${input.id}:state`,
+        timestamp: input.acceptedAt,
+        text: t(
+          input.runId && (workerSetupPending || workspaceSyncPendingRunIds.includes(input.runId))
+            ? workerSetupPending
+              ? "chat.pendingInputs.waitingForWorkerSetup"
+              : "chat.pendingInputs.waitingForWorkspaceSync"
+            : "chat.pendingInputs.waitingForAgent",
+        ),
+      });
       continue;
     }
     items.push({

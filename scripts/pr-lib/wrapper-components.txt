@@ -62,11 +62,13 @@ test/vitest/vitest.extension-misc-paths.mjs
 test/vitest/vitest.extension-msteams-paths.mjs
 test/vitest/vitest.extension-provider-paths.mjs
 test/vitest/vitest.extension-qa-paths.mjs
+test/vitest/vitest.extension-team-reports-paths.mjs
 test/vitest/vitest.extension-telegram-paths.mjs
 test/vitest/vitest.extension-voice-call-paths.mjs
 test/vitest/vitest.extension-whatsapp-paths.mjs
 test/vitest/vitest.extension-zalo-paths.mjs
 test/vitest/vitest.gateway-server-paths.mjs
+test/vitest/vitest.package-contract-paths.mjs
 test/vitest/vitest.pattern-file.ts
 test/vitest/vitest.performance-config.ts
 test/vitest/vitest.plugin-sdk-paths.mjs

@@ -196,11 +196,7 @@ function createLazyMemoryRuntime(host: MemoryCoreRuntimeHost): MemoryPluginRunti
     },
     async authorizeSearchHits(params) {
       const { createMemoryRuntime } = await loadRuntimeProviderModule();
-      const runtime = createMemoryRuntime(host);
-      if (!runtime.authorizeSearchHits) {
-        throw new Error("memory-core runtime search authorization is unavailable");
-      }
-      return await runtime.authorizeSearchHits(params);
+      return await createMemoryRuntime(host).authorizeSearchHits(params);
     },
     async classifyWorkspaceMemoryPaths(params) {
       const [{ classifyWorkspaceMemoryPaths }, dreamingState] = await Promise.all([
@@ -212,16 +208,14 @@ function createLazyMemoryRuntime(host: MemoryCoreRuntimeHost): MemoryPluginRunti
       }
       return await classifyWorkspaceMemoryPaths(params);
     },
-    resolveMemoryBackendConfig(params) {
-      return resolveMemoryBackendConfig(params);
-    },
+    resolveMemoryBackendConfig,
     async closeAllMemorySearchManagers() {
       const { memoryRuntime: runtime } = await loadRuntimeProviderModule();
-      await runtime.closeAllMemorySearchManagers?.();
+      await runtime.closeAllMemorySearchManagers();
     },
     async closeMemorySearchManager(params) {
       const { memoryRuntime: runtime } = await loadRuntimeProviderModule();
-      await runtime.closeMemorySearchManager?.(params);
+      await runtime.closeMemorySearchManager(params);
     },
   };
 }
@@ -291,7 +285,12 @@ export default definePluginEntry({
         return undefined;
       }
       try {
+        const invocation = ctx.hookInvocation;
+        if (!invocation) {
+          throw new Error("prompt hook invocation support is required; intent matching skipped");
+        }
         const module = await loadStandingIntentsModule();
+        invocation.assertActive();
         if (!module.isEligibleStandingIntentTurn(ctx)) {
           return undefined;
         }
@@ -301,9 +300,10 @@ export default definePluginEntry({
           config,
           agentId: ctx.agentId,
         });
-        const intents = module.matchStandingIntents({
+        const intents = await module.matchStandingIntents({
           agentId,
           prompt: event.prompt,
+          assertCurrent: invocation.assertActive,
           ...((ctx.channelId ?? ctx.chatId)
             ? { channel: (ctx.channelId ?? ctx.chatId) as string }
             : {}),
@@ -337,7 +337,7 @@ export default definePluginEntry({
             config,
             agentId: ctx.agentId,
           });
-          module.sweepStandingIntents({ agentId });
+          await module.sweepStandingIntents({ agentId });
         } catch (error) {
           api.logger.warn?.(
             `memory-core: standing intent maintenance failed: ${error instanceof Error ? error.message : String(error)}`,

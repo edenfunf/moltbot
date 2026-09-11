@@ -261,7 +261,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicComp
         maxRetries: 0,
         headers:
           applyAnthropicThinkingBindingControls(params, betaHeader) ??
-          (betaHeader !== undefined ? { "anthropic-beta": betaHeader } : undefined),
+          (betaHeader ? { "anthropic-beta": betaHeader } : undefined),
       };
       const response = await client.messages
         .create({ ...params, stream: true }, sdkRequestOptions)
@@ -636,6 +636,7 @@ async function buildParams(
     authProfileId: options?.authProfileId,
     sessionId: options?.sessionId,
   });
+  const cacheBreakpointOptOutMessageIndexes = new Set<number>();
   const params: MessageCreateParamsStreaming = {
     model: model.id,
     // The SDK's stable message union omits compaction blocks accepted by its beta endpoint.
@@ -648,6 +649,7 @@ async function buildParams(
         allowEmptySignature: compat.allowEmptySignature,
         compaction: replayPlan.compaction,
         replayThinkingEnabled,
+        cacheBreakpointOptOutMessageIndexes,
       },
     )) as MessageParam[],
     max_tokens: options?.maxTokens ?? model.maxTokens,
@@ -670,7 +672,12 @@ async function buildParams(
     buildAnthropicGenerationParams({ model, options, tools, toolProjection, profile: "provider" }),
   );
 
-  applyAnthropicRequestCacheControl(params, cacheControl, supportsCacheControlOnTools);
+  applyAnthropicRequestCacheControl(
+    params,
+    cacheControl,
+    supportsCacheControlOnTools,
+    cacheBreakpointOptOutMessageIndexes,
+  );
 
   return { params, toolProjection, usedCompactionReplay: replayPlan.compaction !== undefined };
 }

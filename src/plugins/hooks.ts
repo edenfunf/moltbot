@@ -22,6 +22,7 @@ import { recordRuntimeActionDecision } from "../audit/runtime-action-decision.js
 import { copyReplyPayloadMetadata, type ReplyPayload } from "../auto-reply/reply-payload.js";
 import { formatHookErrorForLog } from "../hooks/fire-and-forget.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { projectModelContextMessages } from "../shared/model-context-message.js";
 import { concatOptionalTextSegments } from "../shared/text/join-segments.js";
 import {
@@ -684,6 +685,9 @@ export function createHookRunner(
     timeoutMs: number,
     optionsResult: { unref?: boolean } = {},
   ): Promise<T> => {
+    // The handler has started. Retain its work without replacing the raced promise
+    // if its caller's scope has already closed; hook policy still owns its errors.
+    void trackAsyncWork(() => promise).catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -856,9 +860,30 @@ export function createHookRunner(
         const handlerEvent = policy.isolateEventPerHandler
           ? cloneHookIsolationValue(hookName, dispatchEvent)
           : dispatchEvent;
-        const promise = Promise.resolve(handler(handlerEvent, ctx));
-        const timeoutMs = getModifyingHookTimeoutMs(hookName, hook);
-        const handlerResult = timeoutMs ? await withHookTimeout(promise, timeoutMs) : await promise;
+        const invocation = hookName === "before_prompt_build" ? { active: true } : undefined;
+        const handlerContext = invocation
+          ? {
+              ...ctx,
+              hookInvocation: Object.freeze({
+                assertActive() {
+                  if (!invocation.active) {
+                    throw new Error("prompt hook invocation is no longer active");
+                  }
+                },
+              }),
+            }
+          : ctx;
+        let handlerResult: TResult | undefined;
+        try {
+          const promise = Promise.resolve(handler(handlerEvent, handlerContext));
+          const timeoutMs = getModifyingHookTimeoutMs(hookName, hook);
+          handlerResult = timeoutMs ? await withHookTimeout(promise, timeoutMs) : await promise;
+        } finally {
+          // Expiry closes this handler even while its work or a later handler continues.
+          if (invocation) {
+            invocation.active = false;
+          }
+        }
 
         policy.onHandlerResult?.({ hook, result: handlerResult });
 

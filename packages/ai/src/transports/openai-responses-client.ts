@@ -79,10 +79,15 @@ import {
   resolveCodeModeResponsesVisibleToolNames,
 } from "./openai-transport-params.js";
 import {
+  createResponseModelTracker,
   createOpenAIProviderAcceptanceHook,
   log,
   resolveOpenAIClientBaseUrl,
 } from "./openai-transport-shared.js";
+import {
+  filterProviderTurnHeadersForExplicitOpencodeSession,
+  resolveProviderTransportTurnState,
+} from "./provider-transport-turn-state.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   createWritableTransportEventStream,
@@ -129,50 +134,17 @@ function combineWebSocketTimeoutSignal(
   return AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, resolvedTimeoutMs))]);
 }
 
-function resolveProviderTransportTurnState(
-  model: Model,
-  params: {
-    sessionId?: string;
-    turnId: string;
-    attempt: number;
-    transport: "stream" | "websocket";
-  },
-) {
-  const normalizedProvider = model.provider.trim().toLowerCase();
-  const allowRuntimePluginLoad =
-    normalizedProvider === "openai" ||
-    normalizedProvider === "azure-openai" ||
-    normalizedProvider === "azure-openai-responses";
-  return getAiTransportHost().plugin.resolveTransportTurnState({
-    provider: model.provider,
-    modelId: model.id,
-    allowRuntimePluginLoad,
-    context: {
-      provider: model.provider,
-      modelId: model.id,
-      model,
-      sessionId: params.sessionId,
-      turnId: params.turnId,
-      attempt: params.attempt,
-      transport: params.transport,
-    },
-  });
-}
-
 export function createOpenAIResponsesClient(
   model: Model,
-  context: Context,
   apiKey: string,
-  optionHeaders?: Record<string, string>,
-  turnHeaders?: Record<string, string>,
-  sessionId?: string,
+  defaultHeaders: Record<string, string>,
   fetchOverride?: typeof globalThis.fetch,
 ) {
   return new OpenAI({
     apiKey,
     baseURL: resolveOpenAIClientBaseUrl(model),
     dangerouslyAllowBrowser: true,
-    defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders, sessionId),
+    defaultHeaders,
     fetch: fetchOverride ?? buildGuardedModelFetch(model),
     ...buildOpenAISdkClientOptions(model),
   });
@@ -207,6 +179,23 @@ type ResponsesTransportExecutorOptions = {
   ) => ResponsesPricingOptions;
 };
 
+function withDefaultResponsesStreamEncoding(
+  fetch: typeof globalThis.fetch,
+): typeof globalThis.fetch {
+  return (input, init) => {
+    // Apply the SSE default after the SDK merges environment and caller headers.
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    if (headers.has("accept-encoding")) {
+      return fetch(input, init);
+    }
+    // Some compatible endpoints truncate compressed streams before the terminal event.
+    headers.set("accept-encoding", "identity");
+    return fetch(input, { ...init, headers });
+  };
+}
+
 function createResponsesTransportExecutor(
   config: ResponsesTransportExecutorOptions,
 ): ApiStreamSimpleFunction {
@@ -231,25 +220,43 @@ function createResponsesTransportExecutor(
           transport: websocketMode ? "websocket" : "stream",
         });
         const websocketSessionPolicy = websocketMode ? turnState?.websocket : undefined;
+        const httpTurnHeaders = filterProviderTurnHeadersForExplicitOpencodeSession(
+          model,
+          options,
+          turnState?.headers,
+        );
+        const websocketTurnHeaders = filterProviderTurnHeadersForExplicitOpencodeSession(
+          model,
+          options,
+          websocketSessionPolicy?.headers,
+        );
         const websocketHeaders = websocketMode
           ? buildOpenAIClientHeaders(
               model,
               context,
               options?.headers,
-              websocketSessionPolicy?.headers,
+              websocketTurnHeaders,
               options?.sessionId,
+              options?.cacheRetention,
             )
           : undefined;
-        const client = config.createClient(
+        const httpHeaders = buildOpenAIClientHeaders(
           model,
           context,
-          apiKey,
           options?.headers,
-          turnState?.headers,
+          httpTurnHeaders,
           options?.sessionId,
+          options?.cacheRetention,
+        );
+        const client = config.createClient(
+          model,
+          apiKey,
+          httpHeaders,
           compactRequest
             ? createBoundedOpenAIResponsesCompactionFetch(buildGuardedModelFetch(model))
-            : undefined,
+            : config.streamRequest
+              ? withDefaultResponsesStreamEncoding(buildGuardedModelFetch(model))
+              : undefined,
         );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
@@ -351,13 +358,7 @@ function createResponsesTransportExecutor(
             sessionId,
             apiKey,
             baseUrl: model.baseUrl,
-            headers: buildOpenAIClientHeaders(
-              model,
-              context,
-              options?.headers,
-              turnState?.headers,
-              sessionId,
-            ),
+            headers: httpHeaders,
             request: params as ResponsesContinuationRequest,
             restoreRequest: () =>
               restoreResponsesReasoningState(context, model, responsesOptions, params),
@@ -397,6 +398,7 @@ function createResponsesTransportExecutor(
             `baseUrl=${formatModelTransportDebugBaseUrl(model.baseUrl)} timeoutMs=${safeDebugValue(requestOptions?.timeout)} ` +
             `apiKey=${apiKey ? "present" : "missing"} ${summarizeResponsesPayload(params)}`,
         );
+        const responseModelTracker = createResponseModelTracker(isOpenAICodexResponsesModel(model));
         let continuationBaseline: ResponsesContinuationRequest | undefined;
         const createSseStream = async (
           initialRequest = (continuationClaim?.request ?? params) as typeof params,
@@ -419,8 +421,9 @@ function createResponsesTransportExecutor(
               continuationBaseline = attempt.request.previous_response_id
                 ? (params as ResponsesContinuationRequest)
                 : (attempt.request as ResponsesContinuationRequest);
+              const trackedResponseStream = responseModelTracker.track(response, rawResponseStream);
               return withProviderResponseHook({
-                stream: observeResponsesStream(rawResponseStream, model, requestStartedAt),
+                stream: observeResponsesStream(trackedResponseStream, model, requestStartedAt),
                 signal: firstEvent.signal,
                 abort: firstEvent.abort,
                 hook: createOpenAIProviderAcceptanceHook(options, response, model),
@@ -495,11 +498,12 @@ function createResponsesTransportExecutor(
                 `sessionIdHash=${redactIdentifier(options?.sessionId)} ` +
                 `headersHash=${redactIdentifier(JSON.stringify(Object.entries(websocketHeaders ?? {}).toSorted(([a], [b]) => a.localeCompare(b))))}`,
             );
+            const trackedWebSocketStream = responseModelTracker.track(undefined, websocket.stream);
             responseStream = {
               async *[Symbol.asyncIterator]() {
                 let providerAccepted = false;
                 try {
-                  for await (const event of websocket.stream) {
+                  for await (const event of trackedWebSocketStream) {
                     if (!providerAccepted) {
                       providerAccepted = true;
                       await notifyProviderStreamOpened({
@@ -574,6 +578,7 @@ function createResponsesTransportExecutor(
               sessionId: options?.sessionId,
             }),
             asyncToolExecution: asyncTools,
+            ...responseModelTracker.terminalOptions,
           });
           finishWebSocket?.();
           if (options?.signal?.aborted) {
@@ -669,20 +674,17 @@ function resolveAzureDeploymentName(model: Model): string {
   });
 }
 
-export function createAzureOpenAIClient(
+function createAzureOpenAIClient(
   model: Model,
-  context: Context,
   apiKey: string,
-  optionHeaders?: Record<string, string>,
-  turnHeaders?: Record<string, string>,
-  _sessionId?: string,
+  defaultHeaders: Record<string, string>,
   fetchOverride?: typeof globalThis.fetch,
 ) {
   const baseURL = model.baseUrl.replace(/\/+$/, "");
   const clientOptions = {
     apiKey,
     dangerouslyAllowBrowser: true,
-    defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders),
+    defaultHeaders,
     baseURL,
     fetch: fetchOverride ?? buildGuardedModelFetch(model),
     ...buildOpenAISdkClientOptions(model),

@@ -1,7 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import * as tempRoot from "../../infra/tmp-openclaw-dir.js";
+import { createUpdateRun } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner.js";
+import { withTestDir } from "../../test-helpers/temp-dir.js";
 import type { captureTargetDatabaseSchemaContext } from "./schema-preflight.js";
+import { withUpdateCommandExecutor } from "./update-command-executor.js";
 import type { PreManagedServiceStop } from "./update-command-service.js";
 
 const mocks = vi.hoisted(() => ({
@@ -20,23 +26,54 @@ const mocks = vi.hoisted(() => ({
   maybeStopService: vi.fn(),
   prepareMutableUpdate: vi.fn<(env?: NodeJS.ProcessEnv) => Promise<void>>(),
   pluginPreflight: vi.fn(),
+  pluginTargets: vi.fn(),
+  pluginRecords: vi.fn(),
+  npmMetadata: vi.fn(),
   readGitRecovery: vi.fn(),
   runGitUpdate: vi.fn(),
   runPackageUpdate: vi.fn(),
   runtimeError: vi.fn(),
   revalidateSchemaContext:
     vi.fn<typeof import("./update-command-managed-context.js").revalidateUpdateDatabaseContext>(),
+  validateCanary: vi.fn(),
+  nativeSupport:
+    vi.fn<
+      typeof import("./update-command-service-command.js").isUpdatedInstallGatewayExecutorSupported
+    >(),
   serviceStopped: false,
   shouldBlockServiceUpdate: vi.fn(),
   verifyPackageRecovery: vi.fn(),
 }));
 
-vi.mock("../../infra/update-global.js", () => ({
+vi.mock("./update-command-service-command.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./update-command-service-command.js")>()),
+  isUpdatedInstallGatewayExecutorSupported: mocks.nativeSupport,
+}));
+
+afterEach(() => vi.restoreAllMocks());
+
+vi.mock("../../infra/update-global.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/update-global.js")>()),
   verifyPackageUpdateRecovery: mocks.verifyPackageRecovery,
+}));
+vi.mock("../../infra/update-candidate-canary.js", () => ({
+  validateUpdateCandidateCanary: mocks.validateCanary,
 }));
 
 vi.mock("./update-command-plugin-preflight.js", () => ({
   preflightConfiguredNpmPluginTargets: mocks.pluginPreflight,
+}));
+
+vi.mock("../../commands/doctor/shared/missing-configured-plugin-install.targets.js", () => ({
+  collectConfiguredNpmPluginTargets: mocks.pluginTargets,
+}));
+vi.mock("../../plugins/installed-plugin-index-records.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugins/installed-plugin-index-records.js")>()),
+  loadInstalledPluginIndexInstallRecords: mocks.pluginRecords,
+}));
+vi.mock("../../infra/install-source-utils.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/install-source-utils.js")>()),
+  resolveNpmSpecMetadata: mocks.npmMetadata,
 }));
 
 vi.mock("../../infra/update-runner-git-recovery.js", () => ({
@@ -64,13 +101,15 @@ vi.mock("./update-command-handoff.js", () => ({
   handoffUpdateFromGateway: vi.fn(),
 }));
 
-vi.mock("./update-command-managed-context.js", () => ({
+vi.mock("./update-command-managed-context.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./update-command-managed-context.js")>()),
   captureOwnedManagedUpdateContext: mocks.captureManagedContext,
   captureOwnedManagedUpdatePreflightContext: mocks.captureManagedPreflight,
   revalidateUpdateDatabaseContext: mocks.revalidateSchemaContext,
 }));
 
-vi.mock("./update-command-package.js", () => ({
+vi.mock("./update-command-package.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./update-command-package.js")>()),
   runPackageInstallUpdate: mocks.runPackageUpdate,
 }));
 
@@ -174,6 +213,13 @@ function inspectOrStopService(phase: "inspect" | "prepare" = "prepare"): PreMana
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.serviceStopped = false;
+  mocks.validateCanary.mockResolvedValue({
+    status: "ok",
+    phase: "readiness",
+    steps: [],
+    durationMs: 1,
+    logTail: [],
+  });
   mocks.captureManagedContext.mockResolvedValue(undefined);
   mocks.captureManagedPreflight.mockResolvedValue(schemaContext("default"));
   mocks.captureSchemaContext.mockResolvedValue(schemaContext("invoker"));
@@ -195,28 +241,267 @@ beforeEach(() => {
 });
 
 describe("mutable update execution", () => {
-  it.each([
-    "@openclaw/example@1.0.1: Package not found on npm",
-    "@openclaw/example@1.0.1: npm view failed: ECONNRESET",
-  ])("keeps the serving package unchanged when plugin admission fails: %s", async (detail) => {
-    mocks.pluginPreflight.mockRejectedValue(
-      new UpdatePreMutationError("plugin-target-unavailable", detail),
-    );
+  it.each(
+    (["package", "git"] as const).flatMap((kind) =>
+      [30_000, 600_000].map((timeoutMs) => ({ kind, timeoutMs })),
+    ),
+  )(
+    "passes the configured $timeoutMs ms step budget to $kind candidate validation",
+    async ({ kind, timeoutMs }) => {
+      const runStagedUpdate = async ({
+        validateCandidate,
+      }: {
+        validateCandidate?: (root: string) => Promise<unknown>;
+      }) => {
+        expect(validateCandidate).toBeTypeOf("function");
+        await validateCandidate?.("/candidate");
+        return successfulUpdate;
+      };
+      mocks.runPackageUpdate.mockImplementation(runStagedUpdate);
+      mocks.runGitUpdate.mockImplementation(runStagedUpdate);
 
+      const execution = await executeMutableUpdate({
+        ...executionParams(kind),
+        timeoutMs,
+        updateStepTimeoutMs: timeoutMs,
+      });
+
+      expect(execution?.result.status).toBe("ok");
+      expect(mocks.validateCanary).toHaveBeenCalledOnce();
+      expect(mocks.validateCanary.mock.calls[0]?.[0].root).toBe("/candidate");
+      expect(mocks.validateCanary.mock.calls[0]?.[0].timeoutMs).toBe(timeoutMs);
+    },
+  );
+
+  it.each(["package", "staged", "git"] as const)(
+    "refuses an unsupported native receiver before activation: %s",
+    async (route) =>
+      withTestDir({ prefix: "native-before-activation-" }, async (dir) => {
+        const control = path.join(dir, "leases");
+        await fs.mkdir(control);
+        vi.spyOn(tempRoot, "resolvePreferredOpenClawTmpDir").mockReturnValue(control);
+        const env = { OPENCLAW_STATE_DIR: dir };
+        const runId = createUpdateRun({ trigger: "cli" }, { env }).runId;
+        const params = executionParams(route === "git" ? "git" : "package");
+        params.root = dir;
+        params.opts.run = { runId, env };
+        if (route === "staged") {
+          params.packageInstallSpec = path.join(dir, "candidate.tgz");
+        }
+        const events: string[] = [];
+        mocks.nativeSupport.mockImplementation(async ({ executor }) => {
+          executor.assertCurrent();
+          events.push("native-admission");
+          return false;
+        });
+        const candidate = async ({
+          validateCandidate,
+        }: {
+          validateCandidate: (root: string) => Promise<unknown>;
+        }) => {
+          await validateCandidate(dir);
+          // Models the package/Git publisher which follows successful validation.
+          events.push("publish");
+          return successfulUpdate;
+        };
+        mocks.runPackageUpdate.mockImplementation(candidate);
+        mocks.runGitUpdate.mockImplementation(
+          async (
+            options: Parameters<typeof import("./update-command-git.js").updateGitInstall>[0],
+          ) => {
+            if (!options.inspectGitTarget || !options.validateCandidate) {
+              throw new Error("Missing actual Git admission callbacks");
+            }
+            await options.inspectGitTarget({ schemaVersions: { state: 15, agent: 19 } });
+            return candidate({ validateCandidate: options.validateCandidate });
+          },
+        );
+        const result = await withUpdateCommandExecutor(runId, async (executor) => {
+          mocks.prepareMutableUpdate.mockImplementation(async () => {
+            params.opts.run!.executorFence = await executor.enter(dir);
+          });
+          return executeMutableUpdate(params);
+        });
+        expect(result?.result).toMatchObject({
+          status: "error",
+          reason: "target-native-unsupported",
+        });
+        expect(events).toEqual(["native-admission"]);
+        expect(mocks.serviceStopped).toBe(false);
+        expect(mocks.validateCanary).not.toHaveBeenCalled();
+      }),
+  );
+  it("refuses service admission before mutable startup housekeeping", async () => {
+    mocks.maybeStopService.mockImplementation(async ({ phase, handoffFromGateway }) => {
+      if (handoffFromGateway) {
+        throw new UpdatePreMutationError("managed-service-preflight", "service owner changed");
+      }
+      return inspectOrStopService(phase);
+    });
     const execution = await executeMutableUpdate(executionParams("package"));
-
     expect(execution).toMatchObject({
       mutationStarted: false,
-      result: {
-        status: "error",
-        reason: "plugin-target-unavailable",
-        steps: [expect.objectContaining({ stderrTail: detail })],
-      },
+      result: { status: "error", reason: "managed-service-preflight" },
     });
-    expect(mocks.serviceStopped).toBe(false);
     expect(mocks.prepareMutableUpdate).not.toHaveBeenCalled();
     expect(mocks.runPackageUpdate).not.toHaveBeenCalled();
+    expect(mocks.serviceStopped).toBe(false);
   });
+
+  it.each(["available", "incompatible", "changed-owner"] as const)(
+    "admits local artifacts from the staged version before rehearsal: %s",
+    async (outcome) => {
+      await withTestDir({ prefix: "openclaw-staged-plugin-admission-" }, async (stage) => {
+        await fs.writeFile(
+          path.join(stage, "package.json"),
+          JSON.stringify({ name: "openclaw", version: "1.0.7" }),
+        );
+        const events: string[] = [];
+        mocks.pluginPreflight.mockImplementation(async ({ targetVersion }) => {
+          events.push("preflight");
+          expect(targetVersion).toBe("1.0.7");
+          expect(mocks.serviceStopped).toBe(false);
+          if (outcome === "incompatible") {
+            throw new UpdatePreMutationError(
+              "plugin-incompatible",
+              "fixture installed plugin is incompatible",
+            );
+          }
+        });
+        mocks.revalidateSchemaContext.mockImplementation(async (context) => {
+          if (outcome === "changed-owner" && events.includes("preflight")) {
+            throw new UpdatePreMutationError("database-schema-preflight", "fixture owner changed");
+          }
+          return context;
+        });
+        mocks.validateCanary.mockImplementation(async () => {
+          events.push("rehearsal");
+          return { status: "ok", phase: "readiness", steps: [], durationMs: 1, logTail: [] };
+        });
+        mocks.runPackageUpdate.mockImplementation(async ({ validateCandidate }) => {
+          events.push("staged");
+          expect(mocks.prepareMutableUpdate).not.toHaveBeenCalled();
+          try {
+            await validateCandidate(stage);
+            return successfulUpdate;
+          } catch (error) {
+            if (!(error instanceof UpdatePreMutationError)) {
+              throw error;
+            }
+            return { ...successfulUpdate, status: "error", reason: "package-update-failed" };
+          }
+        });
+        const execution = await executeMutableUpdate({
+          ...executionParams("package"),
+          tag: "/tmp/candidate.tgz",
+          packageInstallSpec: "/tmp/candidate.tgz",
+          packageTargetVersion: undefined,
+        });
+        expect(events).toEqual(
+          outcome === "available" ? ["staged", "preflight", "rehearsal"] : ["staged", "preflight"],
+        );
+        expect(execution?.mutationStarted).toBe(false);
+        expect(mocks.serviceStopped).toBe(false);
+        expect(execution?.result.status).toBe(outcome === "available" ? "ok" : "error");
+        if (outcome !== "available") {
+          expect(mocks.validateCanary).not.toHaveBeenCalled();
+          expect(mocks.prepareMutableUpdate).not.toHaveBeenCalled();
+          expect(execution?.result.reason).toBe(
+            outcome === "incompatible" ? "plugin-incompatible" : "database-schema-preflight",
+          );
+        }
+      });
+    },
+  );
+
+  it("leaves a staged local same-version no-op free of plugin or mutable preparation", async () => {
+    mocks.runPackageUpdate.mockResolvedValue({
+      ...successfulUpdate,
+      status: "skipped",
+      reason: "already-current",
+    });
+    const execution = await executeMutableUpdate({
+      ...executionParams("package"),
+      tag: "/tmp/candidate.tgz",
+      packageInstallSpec: "/tmp/candidate.tgz",
+      packageTargetVersion: undefined,
+    });
+    expect(execution?.result.reason).toBe("already-current");
+    expect(mocks.prepareMutableUpdate).not.toHaveBeenCalled();
+    expect(mocks.pluginPreflight).not.toHaveBeenCalled();
+    expect(mocks.serviceStopped).toBe(false);
+  });
+
+  it.each([
+    { failure: "missing", contract: "api", range: ">=1.0.0", refused: false },
+    { failure: "metadata", contract: "api", range: ">=1.0.0", refused: false },
+    { failure: "throw", contract: "api", range: ">=1.0.0", refused: false },
+    { failure: "missing", contract: "api", range: ">=1.0.0 <1.0.1", refused: true },
+    { failure: "metadata", contract: "api", range: ">=1.0.0 <1.0.1", refused: true },
+    { failure: "throw", contract: "api", range: ">=1.0.0 <1.0.1", refused: true },
+    { failure: "metadata", contract: "host", range: ">=1.0.2", refused: true },
+    { failure: "throw", contract: "host", range: ">=1.0.2", refused: true },
+  ])(
+    "refuses unresolved incompatible plugins before mutation ($failure, $contract, $range)",
+    async ({ failure, contract, range, refused }) => {
+      await withTestDir({ prefix: "openclaw-plugin-admission-" }, async (installPath) => {
+        await fs.writeFile(
+          path.join(installPath, "package.json"),
+          JSON.stringify({
+            name: "@example/demo",
+            version: "1.0.0",
+            openclaw:
+              contract === "api"
+                ? { compat: { pluginApi: range } }
+                : { install: { minHostVersion: range } },
+          }),
+        );
+        mocks.pluginRecords.mockResolvedValue({
+          demo: { source: "npm", spec: "@example/demo@1.0.1", version: "1.0.0", installPath },
+        });
+        mocks.pluginTargets.mockResolvedValue([{ pluginId: "demo", spec: "@example/demo@1.0.1" }]);
+        const error =
+          failure === "missing"
+            ? "No matching version found"
+            : "registry connection failed: ECONNRESET";
+        if (failure === "throw") {
+          mocks.npmMetadata.mockRejectedValue(new Error(error));
+        } else {
+          mocks.npmMetadata.mockResolvedValue({
+            ok: false,
+            category: failure === "metadata" ? "metadata-env" : undefined,
+            error,
+          });
+        }
+        const actual = await vi.importActual<typeof import("./update-command-plugin-preflight.js")>(
+          "./update-command-plugin-preflight.js",
+        );
+        mocks.pluginPreflight.mockImplementation(actual.preflightConfiguredNpmPluginTargets);
+
+        const execution = await executeMutableUpdate(executionParams("package"));
+
+        expect(execution?.result.status).toBe(refused ? "error" : "ok");
+        if (refused) {
+          expect(execution?.result.reason).toBe("plugin-incompatible");
+          expect(execution?.failure?.detail).toContain('Plugin "demo" (installed 1.0.0)');
+          expect(execution?.failure?.detail).toContain(range);
+          expect(execution?.failure?.detail).toContain("core 1.0.1");
+          expect(execution?.failure?.detail).toContain("@example/demo@1.0.1");
+          expect(execution?.failure?.detail).toContain(error);
+          if (failure !== "missing") {
+            expect(execution?.failure?.detail).toContain("registry could not be reached");
+            expect(execution?.failure?.detail).toContain("Retry when the registry is reachable");
+          }
+          expect(mocks.prepareMutableUpdate).not.toHaveBeenCalled();
+          expect(mocks.runPackageUpdate).not.toHaveBeenCalled();
+          expect(mocks.serviceStopped).toBe(false);
+        } else {
+          expect(execution?.result.reason).toBeUndefined();
+          expect(mocks.runPackageUpdate).toHaveBeenCalledOnce();
+        }
+      });
+    },
+  );
 
   it("waits for plugin availability before preparing a package update", async () => {
     const available = createDeferred();
@@ -254,7 +539,7 @@ describe("mutable update execution", () => {
     expect(mocks.runPackageUpdate).not.toHaveBeenCalled();
   });
 
-  it("captures the package target before schema revalidation and binds the latest service environment", async () => {
+  it("captures the package target and admitted service environment before schema awaits", async () => {
     const events: string[] = [];
     mocks.runPackageUpdate.mockImplementation(async () => {
       events.push("install");
@@ -312,7 +597,7 @@ describe("mutable update execution", () => {
     expect(mocks.runPackageUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         installSpec: "openclaw@1.0.1",
-        managedServiceEnv: { OPENCLAW_PROFILE: "revalidated" },
+        managedServiceEnv: { OPENCLAW_PROFILE: "default" },
       }),
     );
   });
