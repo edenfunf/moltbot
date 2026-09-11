@@ -168,7 +168,7 @@ describe("openai transport stream", () => {
         maxTokens: 4_096,
       } satisfies Model<"openai-responses">;
 
-      const stream = createOpenAIResponsesTransportStreamFn()(
+      const stream = await createOpenAIResponsesTransportStreamFn()(
         model,
         {
           messages: [{ role: "user", content: "Reply OK", timestamp: Date.now() }],

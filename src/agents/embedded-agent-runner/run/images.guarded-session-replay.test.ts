@@ -6,15 +6,12 @@ import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSolidPngBuffer } from "../../test/helpers/image-fixtures.js";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { readRuntimePromptImageProvenance } from "../media/runtime-prompt-image-provenance.js";
-import { createUserTurnTranscriptRecorder } from "../sessions/user-turn-transcript.js";
-import {
-  detectAndLoadPromptImages,
-  hydratePromptMediaMessages,
-} from "./embedded-agent-runner/run/images.js";
-import { guardSessionManager } from "./session-tool-result-guard-wrapper.js";
+import { createSolidPngBuffer } from "../../../../test/helpers/image-fixtures.js";
+import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
+import { readRuntimePromptImageProvenance } from "../../../media/runtime-prompt-image-provenance.js";
+import { createUserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.js";
+import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
+import { detectAndLoadPromptImages, hydratePromptMediaMessages } from "./images.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 let fixtureId = 0;

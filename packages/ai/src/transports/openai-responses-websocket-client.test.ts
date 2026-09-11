@@ -300,7 +300,7 @@ async function run(
       overrides.observations?.push(observation),
     );
   }
-  const stream = createOpenAIResponsesTransportStreamFn()(
+  const stream = await createOpenAIResponsesTransportStreamFn()(
     overrides.model ?? model,
     context,
     options as never,
@@ -538,7 +538,7 @@ describe("native OpenAI Responses WebSocket client integration", () => {
       await hookPending;
       order.push("hook:end");
     });
-    const responseStream = createOpenAIResponsesTransportStreamFn()(
+    const responseStream = await createOpenAIResponsesTransportStreamFn()(
       model,
       { messages: [userMessage("hello", 1)], tools: [] },
       {

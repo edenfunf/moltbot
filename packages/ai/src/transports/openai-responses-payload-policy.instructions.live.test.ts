@@ -20,7 +20,7 @@ async function runTurn(
   context: Context,
   sessionId: string,
 ): Promise<AssistantMessage> {
-  const stream = createOpenAIResponsesTransportStreamFn()(model, context, {
+  const stream = await createOpenAIResponsesTransportStreamFn()(model, context, {
     apiKey: OPENAI_KEY,
     sessionId,
     transport: "sse",

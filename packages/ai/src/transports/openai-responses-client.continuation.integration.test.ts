@@ -71,7 +71,7 @@ it.each([
     const server = await createResponsesLoopbackServer((turn) => responseEvents(turn === 1));
     const { requests } = server;
     const run = async (messages: Context["messages"]) => {
-      const stream = createOpenAIResponsesTransportStreamFn()(
+      const stream = await createOpenAIResponsesTransportStreamFn()(
         responsesLoopbackModel,
         { messages, tools: [tool] },
         {

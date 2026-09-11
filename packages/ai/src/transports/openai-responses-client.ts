@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AssistantMessage, Context, Model } from "@openclaw/llm-core";
+import type { AssistantMessage, Context, Model, StreamFn } from "@openclaw/llm-core";
 import OpenAI, { AzureOpenAI } from "openai";
-import type { ApiStreamSimpleFunction } from "../api-registry.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import { createRequestImageHistoryProjector } from "../internal/request-image-history.js";
@@ -196,9 +195,7 @@ function withDefaultResponsesStreamEncoding(
   };
 }
 
-function createResponsesTransportExecutor(
-  config: ResponsesTransportExecutorOptions,
-): ApiStreamSimpleFunction {
+function createResponsesTransportExecutor(config: ResponsesTransportExecutorOptions): StreamFn {
   return (model, context, options) => {
     const responsesOptions = options as OpenAIResponsesOptions | undefined;
     const compactRequest = claimResponsesCompactRequest(responsesOptions);
@@ -634,7 +631,7 @@ function createResponsesTransportExecutor(
   };
 }
 
-export function createOpenAIResponsesTransportStreamFn(): ApiStreamSimpleFunction {
+export function createOpenAIResponsesTransportStreamFn(): StreamFn {
   return createResponsesTransportExecutor({
     streamRequest: true,
     httpContinuation: true,
@@ -650,7 +647,7 @@ export function createOpenAIResponsesTransportStreamFn(): ApiStreamSimpleFunctio
   });
 }
 
-export function createAzureOpenAIResponsesTransportStreamFn(): ApiStreamSimpleFunction {
+export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
   return createResponsesTransportExecutor({
     outputApi: "azure-openai-responses",
     firstEventTimeoutMs: AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,

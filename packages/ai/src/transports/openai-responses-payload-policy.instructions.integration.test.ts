@@ -103,7 +103,7 @@ const context: Context = {
 };
 
 async function runOnce(model: Model<"openai-responses">, sessionId: string) {
-  const stream = createOpenAIResponsesTransportStreamFn()(model, context, {
+  const stream = await createOpenAIResponsesTransportStreamFn()(model, context, {
     apiKey: "test-key",
     sessionId,
     transport: "sse",

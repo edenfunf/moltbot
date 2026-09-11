@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { appendRuntimeImageHistory } from "@openclaw/media-core";
 import { MAX_IMAGE_BYTES } from "@openclaw/media-core/constants";
 import { pruneProcessedHistoryImages } from "../../agents/embedded-agent-runner/run/history-image-prune.js";
 import {
@@ -273,9 +274,20 @@ export async function prepareWorkerTurnMedia(params: {
         : cloneImageContent(part),
     );
     const text = parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
-    const notes = [...input.files]
-      .filter((file) => !text.includes(file))
-      .map((file) => `[media attached: ${file}]`)
+    // The clone drops retained-image origins and the closed worker contract has no
+    // field for them, so their notes are projected here from the images this input
+    // still sends after the vision filter.
+    const sourceNotes = appendRuntimeImageHistory(
+      "",
+      input.parts.filter((part) => part.type === "image"),
+    );
+    const notes = [
+      sourceNotes,
+      ...[...input.files]
+        .filter((file) => !text.includes(file))
+        .map((file) => `[media attached: ${file}]`),
+    ]
+      .filter(Boolean)
       .join("\n");
     if (notes) {
       const index = parts.findIndex((part) => part.type === "text");

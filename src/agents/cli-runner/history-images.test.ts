@@ -2,13 +2,9 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { withRuntimeImageHistory } from "@openclaw/media-core";
 import { describe, expect, it } from "vitest";
-import { withTestDir } from "../test-helpers/temp-dir.js";
-import {
-  buildCliArgs,
-  prepareCliPromptImagePayload,
-  resolvePromptInput,
-} from "./cli-runner/helpers.js";
-import { detectAndLoadPromptImages } from "./embedded-agent-runner/run/images.js";
+import { withTestDir } from "../../test-helpers/temp-dir.js";
+import { detectAndLoadPromptImages } from "../embedded-agent-runner/run/images.js";
+import { buildCliArgs, prepareCliPromptImagePayload, resolvePromptInput } from "./helpers.js";
 
 const PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";

@@ -35,7 +35,7 @@ async function run(messages: Context["messages"]) {
     maxTokens: 256,
     onPayload: (payload) => ({ ...(payload as Record<string, unknown>), store: true }),
   } satisfies OpenAIResponsesOptions;
-  const stream = createOpenAIResponsesTransportStreamFn()(
+  const stream = await createOpenAIResponsesTransportStreamFn()(
     model,
     { messages, tools: [tool] },
     options,
