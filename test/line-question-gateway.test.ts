@@ -5,7 +5,7 @@ import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import { createMockIncomingRequest, createMockServerResponse } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as linePublicApi from "../extensions/line/channel-plugin-api.js";
+import * as linePublicApi from "../extensions/line/api.js";
 import lineEntry from "../extensions/line/index.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -13,6 +13,7 @@ import {
 } from "../src/plugin-sdk/channel-ingress-test-runtime.js";
 import { createPluginRuntimeMock } from "../src/plugin-sdk/test-helpers/plugin-runtime-mock.js";
 import { createStartAccountContext } from "../src/plugin-sdk/test-helpers/start-account-context.js";
+import { createDeferred } from "./helpers/promise.js";
 import { createTempDirTracker } from "./helpers/temp-dir.js";
 
 type GatewayCall = { method: string; params?: Record<string, unknown> };
@@ -22,7 +23,7 @@ type HttpRoute = Parameters<
 const boundary = vi.hoisted(() => ({
   paired: [] as string[],
   trace: [] as string[],
-  route: undefined as HttpRoute | undefined,
+  onRoute: undefined as ((route: HttpRoute) => void) | undefined,
   callGateway: vi.fn<(request: GatewayCall) => Promise<unknown>>(),
   upsertPairing: vi.fn(async () => ({ code: "CODE", created: true })),
 }));
@@ -43,9 +44,12 @@ vi.mock("openclaw/plugin-sdk/conversation-runtime", async () => ({
 vi.mock("../src/plugins/http-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/plugins/http-registry.js")>()),
   registerPluginHttpRoute: (route: HttpRoute) => {
-    boundary.route = route;
+    if (!boundary.onRoute) {
+      throw new Error("Unexpected LINE webhook registration");
+    }
+    boundary.onRoute(route);
     return () => {
-      boundary.route = undefined;
+      boundary.onRoute = undefined;
     };
   },
 }));
@@ -76,7 +80,7 @@ const runtimeStore = createPluginRuntimeStore<PluginRuntime>({
 beforeEach(() => {
   boundary.paired = [];
   boundary.trace = [];
-  boundary.route = undefined;
+  boundary.onRoute = undefined;
   boundary.callGateway.mockReset();
   boundary.upsertPairing.mockClear();
 });
@@ -341,15 +345,18 @@ describe("LINE public webhook question Gateway boundary", () => {
     if (!plugin.gateway?.startAccount) {
       throw new Error("Expected the public LINE gateway adapter");
     }
+    const registered = createDeferred<HttpRoute>();
+    boundary.onRoute = registered.resolve;
     const monitor = plugin.gateway.startAccount(
       createStartAccountContext({ account, cfg, runtime: runtimeEnv, abortSignal: abort.signal }),
     );
     try {
-      await vi.waitFor(() => expect(boundary.route).toBeDefined());
-      const route = boundary.route;
-      if (!route) {
-        throw new Error("Expected registered LINE webhook route");
-      }
+      const route = await Promise.race([
+        registered.promise,
+        monitor.then(() => {
+          throw new Error("LINE monitor stopped before webhook registration");
+        }),
+      ]);
       const body = JSON.stringify({
         destination: "bot",
         events: [
