@@ -58,6 +58,11 @@ vi.mock("openclaw/plugin-sdk/runtime-env", async () => {
 type MessageEvent = webhook.MessageEvent;
 type PostbackEvent = webhook.PostbackEvent;
 
+// Only the quote suite varies the group gate; every case here runs behind an open one.
+const buildMessageContext = (
+  params: Omit<Parameters<typeof buildLineMessageContext>[0], "groupPolicy" | "groupAllowFrom">,
+) => buildLineMessageContext({ groupPolicy: "open", groupAllowFrom: [], ...params });
+
 const lineBindingsPlugin = {
   id: "line",
   bindings: lineBindingsAdapter,
@@ -145,9 +150,7 @@ describe("buildLineMessageContext", () => {
   it("routes group message replies to the group id", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -185,7 +188,7 @@ describe("buildLineMessageContext", () => {
       ...overrides,
     } as Partial<MessageEvent>);
 
-    await buildLineMessageContext({ event, allMedia: [], cfg, account, commandAuthorized: true });
+    await buildMessageContext({ event, allMedia: [], cfg, account, commandAuthorized: true });
 
     expect(
       resolveLineQuoteToken({ cfg, accountId: "default", chatId, messageId: "m-quotable" }),
@@ -197,7 +200,7 @@ describe("buildLineMessageContext", () => {
       message: { id: "m-audio", type: "audio", duration: 1, contentProvider: { type: "line" } },
     } as Partial<MessageEvent>);
 
-    await buildLineMessageContext({
+    await buildMessageContext({
       event,
       allMedia: [{ path: "/tmp/line-audio.m4a", contentType: "audio/mp4" }],
       cfg,
@@ -216,7 +219,7 @@ describe("buildLineMessageContext", () => {
     } as Partial<MessageEvent>);
 
     expect(
-      await buildLineMessageContext({
+      await buildMessageContext({
         event,
         allMedia: [],
         cfg,
@@ -230,9 +233,7 @@ describe("buildLineMessageContext", () => {
   });
 
   it("describes a sticker with the keywords LINE sent for it", async () => {
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({ keywords: ["Thank you", "Thanks", "Grateful", "Bowing"] }),
       allMedia: [],
       cfg,
@@ -250,9 +251,7 @@ describe("buildLineMessageContext", () => {
     // Its package id is one the deleted table claimed to know, and LINE's own
     // keywords identify the sticker as a different character than that entry
     // named — so the shipped shape, not a hand-made one, pins this projection.
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({
         id: "629316390784598646",
         stickerId: "52002734",
@@ -286,9 +285,7 @@ describe("buildLineMessageContext", () => {
   });
 
   it("uses the sender's own text for a message sticker", async () => {
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({ text: "See you tomorrow" }),
       allMedia: [],
       cfg,
@@ -303,9 +300,7 @@ describe("buildLineMessageContext", () => {
     ["  See you tomorrow  ", "[Sent a sticker:   See you tomorrow  ]"],
     ["   ", "[Sent a sticker:    ]"],
   ])("preserves sender-authored sticker whitespace", async (text, expected) => {
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({ text, keywords: ["fallback"] }),
       allMedia: [],
       cfg,
@@ -318,9 +313,7 @@ describe("buildLineMessageContext", () => {
 
   it("prefers message-sticker text over experimental keywords", async () => {
     // LINE's official message-sticker webhook example carries both properties.
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({
         stickerId: "738839",
         packageId: "12287",
@@ -338,9 +331,7 @@ describe("buildLineMessageContext", () => {
   });
 
   it("still reports a sticker that carries neither keywords nor text", async () => {
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event: stickerEvent({}),
       allMedia: [],
       cfg,
@@ -366,9 +357,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -395,9 +384,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -411,9 +398,7 @@ describe("buildLineMessageContext", () => {
   it("skips media metadata projection for text-only messages", async () => {
     const event = createMessageEvent({ type: "user", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -428,9 +413,7 @@ describe("buildLineMessageContext", () => {
   it("passes the caller-provided inbound history through to the context payload", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -450,9 +433,7 @@ describe("buildLineMessageContext", () => {
       ...cfg,
       agents: { defaults: { envelopeTimestamp: "off" } },
     };
-    await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    await buildMessageContext({
       event: createMessageEvent({ type: "user", userId: "user-1" }, {
         timestamp,
         message: { id: "baseline", type: "text", text: "BODY_MARKER" },
@@ -474,9 +455,7 @@ describe("buildLineMessageContext", () => {
     const rawBody = `${"x".repeat(199 - markerIndex)}🚀tail`;
     logVerboseMock.mockClear();
 
-    await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    await buildMessageContext({
       event: createMessageEvent({ type: "user", userId: "user-1" }, {
         timestamp,
         message: { id: "1", type: "text", text: rawBody },
@@ -503,9 +482,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       mediaUnavailable: true,
@@ -532,7 +509,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
+    const context = await buildMessageContext({
       event,
       allMedia: [{ path: "/tmp/one.png", contentType: "image/png" }],
       missingParts: 2,
@@ -557,7 +534,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
+    const context = await buildMessageContext({
       event,
       allMedia: [{ path: "/tmp/one.png", contentType: "image/png" }],
       missingParts: 1,
@@ -582,9 +559,7 @@ describe("buildLineMessageContext", () => {
       },
     } as Partial<MessageEvent>);
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [{ path: "/tmp/line-image.png", contentType: "image/png" }],
       cfg,
@@ -633,9 +608,7 @@ describe("buildLineMessageContext", () => {
   it("resolves prefixed-only group config through the inbound message context", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -658,9 +631,7 @@ describe("buildLineMessageContext", () => {
   it("resolves prefixed-only room config through the inbound message context", async () => {
     const event = createMessageEvent({ type: "room", roomId: "room-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -683,9 +654,7 @@ describe("buildLineMessageContext", () => {
   it("carries a group's configured skill scope on the inbound context", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -707,9 +676,7 @@ describe("buildLineMessageContext", () => {
   it("keeps an empty group skill scope as a scope rather than dropping it", async () => {
     const event = createMessageEvent({ type: "group", groupId: "group-1", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -736,9 +703,7 @@ describe("buildLineMessageContext", () => {
   it("leaves a direct chat without a group skill scope", async () => {
     const event = createMessageEvent({ type: "user", userId: "user-1" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -757,9 +722,7 @@ describe("buildLineMessageContext", () => {
       },
     );
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -773,9 +736,7 @@ describe("buildLineMessageContext", () => {
   it("sets CommandAuthorized=true when authorized", async () => {
     const event = createMessageEvent({ type: "user", userId: "user-auth" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -840,9 +801,7 @@ describe("buildLineMessageContext", () => {
   it("sets CommandAuthorized=false when not authorized", async () => {
     const event = createMessageEvent({ type: "user", userId: "user-noauth" });
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -859,9 +818,7 @@ describe("buildLineMessageContext", () => {
       session: { store: storePath, dmScope: "per-channel-peer" },
     };
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg: directCfg,
@@ -920,9 +877,7 @@ describe("buildLineMessageContext", () => {
       deliveryContext: { isRedelivery: false },
     } as MessageEvent;
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg: bindingCfg,
@@ -959,9 +914,7 @@ describe("buildLineMessageContext", () => {
       deliveryContext: { isRedelivery: false },
     } as MessageEvent;
 
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg: bindingCfg,
@@ -1034,9 +987,7 @@ describe("buildLineMessageContext", () => {
     });
 
     const event = createMessageEvent({ type: "user", userId });
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -1058,9 +1009,7 @@ describe("buildLineMessageContext", () => {
       groupId: "C5aeb18d690759492f1a8c391c37549a0",
       userId: "U47f0bbc534dc503c4e4cadc86e619b63",
     });
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -1082,9 +1031,7 @@ describe("buildLineMessageContext", () => {
       groupId: "C5aeb18d690759492f1a8c391c37549a0",
       userId: "U47f0bbc534dc503c4e4cadc86e619b63",
     });
-    const context = await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    const context = await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -1102,9 +1049,7 @@ describe("buildLineMessageContext", () => {
       groupId: "C5aeb18d690759492f1a8c391c37549a0",
       userId: "U47f0bbc534dc503c4e4cadc86e619b63",
     });
-    await buildLineMessageContext({
-      groupPolicy: "open",
-      groupAllowFrom: [],
+    await buildMessageContext({
       event,
       allMedia: [],
       cfg,
@@ -1153,9 +1098,7 @@ describe("buildLineMessageContext", () => {
   ])(
     "projects LINE emoji metadata without losing text: $text",
     async ({ text, spans, expected, mention }) => {
-      const context = await buildLineMessageContext({
-        groupPolicy: "open",
-        groupAllowFrom: [],
+      const context = await buildMessageContext({
         event: createMessageEvent(
           { type: "user", userId: "user-1" },
           {
