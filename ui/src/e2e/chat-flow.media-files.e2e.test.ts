@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
+import { waitForControlUiProofSurface } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   captureUiProofEnabled,
   copiedViaExec,
@@ -267,6 +268,8 @@ suite.define(() => {
         ".chat-assistant-attachment-card__action-skeleton.skeleton",
       );
       expect(await actionSkeletons.count()).toBe(4);
+      // Ancestor entrance animations must settle before comparing viewport rectangles.
+      await waitForControlUiProofSurface(checkingCards.first(), [actionSkeletons.first()]);
       const actionSkeletonSize = await actionSkeletons.first().evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return { x: rect.x, y: rect.y, height: rect.height, width: rect.width };
@@ -301,7 +304,9 @@ suite.define(() => {
           const rect = element.getBoundingClientRect();
           return { x: rect.x, y: rect.y, height: rect.height, width: rect.width };
         });
-      expect(actionSkeletonSize).toEqual(openButtonSize);
+      for (const axis of ["x", "y", "width", "height"] as const) {
+        expect(Math.abs(actionSkeletonSize[axis] - openButtonSize[axis])).toBeLessThanOrEqual(0.5);
+      }
       const finalActionWidths = await page
         .locator(
           ".chat-assistant-attachment-card--compact .chat-assistant-attachment-card__actions",

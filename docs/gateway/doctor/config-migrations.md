@@ -66,7 +66,8 @@ beyond the grace period.
       `routing.transcribeAudio`, top-level `agent.*`, or top-level `identity`
       from the pre-multi-agent config shape) no longer have a migration path;
       config using them now fails validation instead of being rewritten. Fix
-      those keys by hand against the current config reference before doctor
+      those keys by hand against the current
+      [configuration reference](/gateway/configuration-reference) before doctor
       can proceed.
     </Note>
 
@@ -132,7 +133,6 @@ beyond the grace period.
     | `gateway.controlUi.chatMessageMaxWidth`, presentation-only `ui.prefs` keys                       | removed (text scale, chat width, and live sidebar activity are browser-local) |
     | `agents.list`                                                                                    | keyed `agents.entries`                                                        |
     | top-level `defaultModel`                                                                         | `agents.defaults.model`                                                      |
-    | `messages.messagePrefix`                                                                         | `channels.whatsapp.responsePrefix`                                            |
     | `session.maintenance.pruneDays`, `session.resetByType.dm`                                        | `session.maintenance.pruneAfter`, `session.resetByType.direct`               |
     | top-level `tui`                                                                                  | removed (the TUI footer uses the compact default)                            |
     | `plugins.entries.codex.config.codexDynamicToolsProfile`                                          | removed (Codex app-server always keeps Codex-native workspace tools native) |

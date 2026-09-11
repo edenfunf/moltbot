@@ -258,6 +258,13 @@ describeCursorPolicy("Control UI cursor policy", () => {
       await page.evaluate((mode) => {
         document.documentElement.dataset.themeMode = mode;
       }, theme);
+      expect(
+        await page.locator("#new-tab-link").evaluate((element) => getComputedStyle(element).color),
+      ).toBe(
+        await page
+          .locator("#new-tab-button")
+          .evaluate((element) => getComputedStyle(element).color),
+      );
       const people = await page.locator(".sidebar-online__person").all();
       expect(people).toHaveLength(2);
       for (const person of people) {
@@ -283,6 +290,7 @@ describeCursorPolicy("Control UI cursor policy", () => {
             ".person-activity-link",
             ".markdown-github-item",
             ".markdown-file-link",
+            ".chat-position-rail__preview-copy a",
           ],
         ],
         [
@@ -292,8 +300,7 @@ describeCursorPolicy("Control UI cursor policy", () => {
             "#docs-link",
             "#chat-content-link",
             "#sidebar-content-link",
-            ".markdown-bare-url",
-            "#preview-github-link",
+            ".markdown-bare-url:not(.chat-position-rail__preview-copy a)",
             ".activity-entry__run-link",
             ".settings-row__value",
             ".memory-page__link",
@@ -315,6 +322,13 @@ describeCursorPolicy("Control UI cursor policy", () => {
         }
       }
       const personLink = page.locator("#person-link");
+      for (const link of await page.locator(".chat-position-rail__preview-copy a").all()) {
+        expect(await link.evaluate((element) => getComputedStyle(element).color)).toBe(
+          await page
+            .locator(".chat-position-rail__preview-copy")
+            .evaluate((element) => getComputedStyle(element).color),
+        );
+      }
       if (!hasTouch) {
         await personLink.hover();
         expect(

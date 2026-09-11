@@ -32,7 +32,10 @@ import {
   resolveCodexAppServerAuthProfileStore,
 } from "./auth-profile.js";
 import { resolveCodexAppServerUserHomeDir } from "./auth-start-options.js";
-import { ensureCodexAppServerClientRuntime } from "./client-runtime.js";
+import {
+  ensureCodexAppServerClientRuntime,
+  recordCodexAppServerAuthHandoff,
+} from "./client-runtime.js";
 import { CodexAppServerClient, isUnsupportedCodexAppServerVersionError } from "./client.js";
 import type { CodexAppServerStartOptions } from "./config-contracts.js";
 import {
@@ -360,7 +363,8 @@ async function resolveCodexAppServerClientStartContext(
 ): Promise<ResolvedCodexAppServerClientStartContext> {
   const agentDir = options?.agentDir ?? resolveDefaultAgentDir(options?.config ?? {});
   const requestedStartOptions =
-    options?.startOptions ?? resolveCodexAppServerRuntimeOptions().start;
+    options?.startOptions ??
+    resolveCodexAppServerRuntimeOptions({ pluginConfig: options?.pluginConfig }).start;
   const desktopGeneration = shouldTrackDesktopGeneration(
     requestedStartOptions,
     options?.pluginConfig,
@@ -1144,7 +1148,7 @@ async function startInitializedCodexAppServerClient(
       });
 
       assertStartupCurrent();
-      await waitForStartup(() =>
+      const authHandoff = await waitForStartup(() =>
         applyCodexAppServerAuthProfile({
           client,
           agentDir: params.agentDir,
@@ -1166,6 +1170,7 @@ async function startInitializedCodexAppServerClient(
       ) {
         ownCodexInferenceClient(client);
       }
+      recordCodexAppServerAuthHandoff(client, authHandoff);
       if (runtimeArtifactModule && runtimeArtifact) {
         runtimeArtifactModule.bindCodexAppServerRuntimeArtifact(client, runtimeArtifact);
       }

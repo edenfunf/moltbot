@@ -24,6 +24,12 @@ import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking"
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { buildLineQuickReplyFallbackText } from "./quick-reply-fallback.js";
 import {
+  applyLineQuoteToken,
+  canCarryLineQuoteToken,
+  reportLineQuoteCarrierMissing,
+  resolveLineQuoteToken,
+} from "./quote-tokens.js";
+import {
   createLineQuickReply,
   LINE_PRESENTATION_CAPABILITIES,
   renderLineCard,
@@ -42,8 +48,9 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
   textChunkLimit: 5000,
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
-  renderPresentation: ({ payload, presentation }) => renderLinePresentation(payload, presentation),
-  sendPayload: async ({ to, payload, accountId, cfg, onDeliveryResult }) => {
+  renderPresentation: ({ payload, presentation, sourcePresentation, ctx }) =>
+    renderLinePresentation(payload, presentation, ctx.to, sourcePresentation),
+  sendPayload: async ({ to, payload, accountId, cfg, replyToId, onDeliveryResult }) => {
     const runtime = getLineRuntime();
     const outboundRuntime = await loadLineOutboundRuntime();
     const rawLineData = (payload.channelData?.line as LineChannelData | undefined) ?? {};
@@ -228,7 +235,18 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       messages[messages.length - 1] = { ...lastMessage, quickReply };
     }
 
-    await sendMessageBatch(messages);
+    // LINE renders a quote on one bubble, so a reply spends its token on the first
+    // message able to carry it, whichever request of the batch that lands in.
+    const replyQuoteToken = resolveLineQuoteToken({
+      cfg,
+      accountId,
+      chatId: to,
+      messageId: replyToId,
+    });
+    if (replyQuoteToken && !messages.some(canCarryLineQuoteToken)) {
+      reportLineQuoteCarrierMissing(to);
+    }
+    await sendMessageBatch(applyLineQuoteToken(messages, replyQuoteToken));
     const completedResult = lastResult as LineSendResult | null;
     if (deliveryError !== undefined) {
       if (!completedResult) {
@@ -250,7 +268,10 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         ...ctx,
         payload: { text: ctx.text },
       }),
-    sendMedia: async ({ cfg, to, text, mediaUrl, accountId }) =>
+    // Core sends a single media reply through here rather than through the payload
+    // owner, so the quote has to be resolved again; sendMessageLine puts it on the
+    // caption, the one part of a media send LINE accepts a quote on.
+    sendMedia: async ({ cfg, to, text, mediaUrl, accountId, replyToId }) =>
       await (
         await loadLineOutboundRuntime()
       ).sendMessageLine(to, text, {
@@ -258,6 +279,7 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         mediaUrl,
         cfg,
         accountId: accountId ?? undefined,
+        quoteToken: resolveLineQuoteToken({ cfg, accountId, chatId: to, messageId: replyToId }),
       }),
   }),
 };
@@ -291,31 +313,29 @@ export const lineMessageAdapter = defineChannelMessageAdapter({
     capabilities: {
       text: true,
       media: true,
+      // Core withholds durable final delivery from any payload whose declared
+      // capabilities it cannot find, so a reply that names a target has to say so.
+      replyTo: true,
       messageSendingHooks: true,
     },
   },
   send: {
-    text: async ({ cfg, to, text, accountId, onDeliveryResult }) => {
+    // Core owns this context; forward it whole. Picking fields by hand is how the
+    // reply target it resolved stopped reaching the send.
+    text: async ({ onDeliveryResult, ...ctx }) => {
       const result = await lineOutboundAdapter.sendPayload!({
-        cfg,
-        to,
-        text,
-        accountId,
-        payload: { text },
+        ...ctx,
+        payload: { text: ctx.text },
         onDeliveryResult: async (deliveryResult) => {
           await onDeliveryResult?.(toLineMessageSendResult(deliveryResult, "text"));
         },
       });
       return toLineMessageSendResult(result, "text");
     },
-    media: async ({ cfg, to, text, mediaUrl, accountId, onDeliveryResult }) => {
+    media: async ({ onDeliveryResult, ...ctx }) => {
       const result = await lineOutboundAdapter.sendPayload!({
-        cfg,
-        to,
-        text,
-        mediaUrl,
-        accountId,
-        payload: { text, mediaUrl },
+        ...ctx,
+        payload: { text: ctx.text, mediaUrl: ctx.mediaUrl },
         onDeliveryResult: async (deliveryResult) => {
           await onDeliveryResult?.(toLineMessageSendResult(deliveryResult, "media"));
         },

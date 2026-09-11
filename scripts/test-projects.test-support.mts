@@ -111,6 +111,7 @@ import {
 type VitestRunPlan = {
   config: string;
   forwardedArgs: string[];
+  timingTargets?: string[];
   includePatterns: string[] | null;
   watchMode: boolean;
 };
@@ -369,7 +370,7 @@ function resolveSpecSortWeight(
   }
   // Exact selections use their file costs; a whole-config sample would price a
   // single worker proof like all tooling. Globs keep the whole-config fallback.
-  const includes = spec.includePatterns;
+  const includes = spec.timingTargets ?? spec.includePatterns;
   const estimateFileSeconds =
     spec.config === TOOLING_VITEST_CONFIG
       ? estimateVitestToolingFileSeconds
@@ -580,7 +581,7 @@ const PRECISE_SOURCE_TEST_TARGETS = new Map<string, string[]>([
     ["test/scripts/vitest-runner-task-updates.test.ts"],
   ]),
   ...[
-    "src/system-agent/setup-inference-persist.ts",
+    "src/system-agent/setup-inference-turn.ts",
     "src/agents/embedded-agent-runner/run/run-attempt-dispatch.ts",
   ].map<[string, string[]]>((sourcePath) => [
     sourcePath,
@@ -2234,9 +2235,10 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
   [".github/workflows/update-migration.yml", [packageAcceptance, workflowGuards]],
   [
     ".github/actions/setup-node-env/action.yml",
-    ["install-trufflehog", packageAcceptance, workflowGuards],
+    ["install-trufflehog", "setup-node-env-bun", packageAcceptance, workflowGuards],
   ],
   [".github/actions/setup-node-env/dependency-fingerprint.mjs", [workflowGuards]],
+  [".github/actions/setup-node-env/seed-bun-from-image.mjs", ["setup-node-env-bun"]],
   [".github/actions/setup-pnpm-store-cache/action.yml", [packageAcceptance, workflowGuards]],
   [".github/actions/setup-pnpm-store-cache/ensure-node.sh", ["setup-pnpm-store-cache-ensure-node"]],
   ["test/e2e/qa-lab/runtime/mcp-channels-docker-client.ts", [dockerE2e, pluginPrerelease]],
@@ -3347,8 +3349,12 @@ function resolvePreciseChangedTestTargets(
   options: ChangedTestTargetOptions & { skipImportGraph?: boolean },
 ) {
   const cwd = options.cwd ?? process.cwd();
+  const pluginSdkInclude = resolvePluginSdkLightIncludePattern(changedPath);
   const mappedTargets =
     SOURCE_TEST_TARGETS.get(changedPath) ??
+    (pluginSdkInclude
+      ? pluginSdkLightTestFiles.filter((file) => path.matchesGlob(file, pluginSdkInclude))
+      : null) ??
     (/^extensions\/[^/]+\/openclaw\.plugin\.json$/u.test(changedPath)
       ? [changedPath, DOCS_CONFIG_EXAMPLES_TEST_TARGET]
       : null) ??
@@ -3543,8 +3549,7 @@ function classifyTarget(arg: string, cwd: string) {
   }
   if (
     relative === "src/gateway/gateway.test.ts" ||
-    relative === "src/gateway/server.startup-matrix-migration.integration.test.ts" ||
-    relative === "src/gateway/sessions-history-http.test.ts"
+    relative === "src/gateway/server.startup-matrix-migration.integration.test.ts"
   ) {
     return "e2e";
   }
@@ -4146,7 +4151,7 @@ export function buildVitestRunPlans(
   return plans;
 }
 
-export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()) {
+export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()): VitestRunPlan[] {
   const { forwardedArgs, targetArgs, watchMode } = parseTestProjectsArgs(args, cwd);
   if (watchMode) {
     return [
@@ -4218,6 +4223,7 @@ export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()
           return chunks.map((targets) => ({
             config,
             forwardedArgs: [...forwardedArgs, ...targets],
+            timingTargets: targets,
             includePatterns: null,
             watchMode: false,
           }));
@@ -4481,6 +4487,7 @@ export function createVitestRunSpecs(
       : null;
     return {
       config: plan.config,
+      timingTargets: plan.timingTargets,
       env: includeFilePath
         ? {
             ...baseEnv,

@@ -17,6 +17,7 @@ import {
 import { lineConfigAdapter } from "./config-adapter.js";
 import { resolveLineGroupRequireMention } from "./group-policy.js";
 import { lineOutboundAdapter } from "./outbound.js";
+import { recordLineQuoteToken } from "./quote-tokens.js";
 import { setLineRuntime } from "./runtime.js";
 import { createLineSendReceipt } from "./send-receipt.js";
 
@@ -411,7 +412,10 @@ describe("line outbound sendPayload", () => {
     expect(mocks.buildTemplateMessageFromPayload).toHaveBeenCalledTimes(1);
     expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
       "line:user:1",
-      [{ type: "buttons" }, { type: "text", text: "Choose one:" }],
+      [
+        expect.objectContaining({ type: "template", altText: "Continue?" }),
+        { type: "text", text: "Choose one:" },
+      ],
       { verbose: false, accountId: "default", cfg },
     );
   });
@@ -837,7 +841,7 @@ describe("line outbound sendPayload", () => {
     ).rejects.toThrow(/require previewimageurl/i);
   });
 
-  it("declares message adapter durable text and media with receipt proofs", async () => {
+  it("declares message adapter durable text, media, and reply-to with proofs", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
     const cfg = { channels: { line: {} } } as OpenClawConfig;
@@ -875,6 +879,28 @@ describe("line outbound sendPayload", () => {
           });
           expect(result?.receipt.platformMessageIds).toEqual(["m-batch-r2", "m-batch-r2-2"]);
         },
+        replyTo: async () => {
+          recordLineQuoteToken({
+            accountId: "primary",
+            chatId: "U123",
+            messageId: "m-answered",
+            quoteToken: "q-answered",
+          });
+
+          await linePlugin.message?.send?.text?.({
+            cfg,
+            to: "line:user:U123",
+            text: "answering you",
+            replyToId: "m-answered",
+            accountId: "primary",
+          });
+
+          expect(mocks.pushMessagesLine).toHaveBeenLastCalledWith(
+            "line:user:U123",
+            [{ type: "text", text: "answering you", quoteToken: "q-answered" }],
+            { verbose: false, accountId: "primary", cfg },
+          );
+        },
         messageSendingHooks: () => {
           expect(linePlugin.message?.send?.text).toBeTypeOf("function");
         },
@@ -883,6 +909,7 @@ describe("line outbound sendPayload", () => {
 
     expect(proofResults.find((result) => result.capability === "text")?.status).toBe("verified");
     expect(proofResults.find((result) => result.capability === "media")?.status).toBe("verified");
+    expect(proofResults.find((result) => result.capability === "replyTo")?.status).toBe("verified");
     expect(proofResults.find((result) => result.capability === "messageSendingHooks")?.status).toBe(
       "verified",
     );

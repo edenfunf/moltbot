@@ -18,6 +18,7 @@ export type LineWireMessage = {
   altText?: string;
   originalContentUrl?: string;
   quickReply?: unknown;
+  quoteToken?: string;
 };
 
 // One payload now travels as batched provider requests, so the observable wire
@@ -74,7 +75,19 @@ export function createRuntime(): { runtime: PluginRuntime; mocks: LineRuntimeMoc
     },
   );
   const createQuickReplyItems = vi.fn((labels: string[]) => ({ items: labels }));
-  const buildTemplateMessageFromPayload = vi.fn(() => ({ type: "buttons" }));
+  const buildTemplateMessageFromPayload = vi.fn(() => ({
+    type: "template",
+    altText: "Continue?",
+    template: {
+      type: "confirm",
+      text: "Continue?",
+      actions: [
+        { type: "message", label: "Yes", text: "yes" },
+        { type: "message", label: "No", text: "no" },
+      ],
+    },
+  }));
+  const sendMessageLine = vi.fn(async () => lineResult("m-media"));
   const chunkMarkdownText = vi.fn((text: string) => [text]);
   const resolveTextChunkLimit = vi.fn(() => 123);
   const resolveLineAccount = vi.fn(

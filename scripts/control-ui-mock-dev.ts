@@ -54,6 +54,9 @@ import { buildCronMocks } from "./control-ui-mock-cron.ts";
 import { createStandaloneMockIsolationPlugins } from "./control-ui-mock-isolation.ts";
 import {
   buildPluginCatalogMock,
+  buildPluginDiscoveryCategoriesMock,
+  buildPluginDiscoveryMock,
+  buildPluginInspectMock,
   pluginLifecycleMockInitScript,
 } from "./control-ui-mock-plugins.ts";
 import { createControlUiPreviewInitScript } from "./control-ui-mock-preview.ts";
@@ -68,10 +71,12 @@ type CliOptions = {
   fixture?:
     | "approval"
     | "attachments"
+    | "avatars"
     | "board"
     | "code-fences"
     | "dashboards"
     | "goal"
+    | "plugins-dense"
     | "swarm"
     | "update-available"
     | "update-blocked"
@@ -104,6 +109,21 @@ const MOCK_ACTOR_MIRA: SessionActorFixture = {
 };
 // Rows carry explicit owners the way the gateway projects createdActor fallbacks.
 const MOCK_SESSION_OWNERS: readonly SessionActorFixture[] = [MOCK_ACTOR_PETER, MOCK_ACTOR_MIRA];
+const MOCK_AVATAR_PROFILES = [
+  { id: "profile-avatar-normal", name: "Mira", fill: "#5d7fc5", label: "Normal profile image" },
+  {
+    id: "profile-avatar-dark",
+    name: "Rowan",
+    fill: "#0e1015",
+    label: "Dark surface-matching profile image",
+  },
+  {
+    id: "profile-avatar-light",
+    name: "Sol",
+    fill: "#faf9f7",
+    label: "Light surface-matching profile image",
+  },
+] as const;
 
 const SESSION_PAGE_SIZE = 50;
 const TOTAL_TELEGRAM_SESSIONS = 180;
@@ -371,10 +391,12 @@ function parseFixture(value: string | undefined): CliOptions["fixture"] {
   if (
     value !== "approval" &&
     value !== "attachments" &&
+    value !== "avatars" &&
     value !== "board" &&
     value !== "code-fences" &&
     value !== "dashboards" &&
     value !== "goal" &&
+    value !== "plugins-dense" &&
     value !== "swarm" &&
     value !== "update-available" &&
     value !== "update-blocked" &&
@@ -1496,6 +1518,28 @@ function buildFixtureSummaryHistory(baseTime: number, title: string, details: st
   ];
 }
 
+function buildAvatarChatHistory(baseTime: number): unknown[] {
+  return [
+    ...MOCK_AVATAR_PROFILES.map(({ id, label, name }, index) => ({
+      ...chatHistoryMessage("user", label, baseTime + index * 60_000),
+      __openclaw: {
+        senderId: id,
+        senderIdentity: { type: "profile", id },
+        senderName: name,
+        senderProfileAvatarUrl: `/api/users/${id}/avatar`,
+      },
+    })),
+    {
+      ...chatHistoryMessage("user", "Attributed initials", baseTime + 180_000),
+      __openclaw: {
+        senderId: "profile-avatar-initials",
+        senderIdentity: { type: "profile", id: "profile-avatar-initials" },
+        senderName: "Alex Morgan",
+      },
+    },
+  ];
+}
+
 function buildCodeFenceChatHistory(baseTime: number): unknown[] {
   const proseFence = (language: string, label: string) => {
     const lines = Array.from({ length: 16 }, (_, index) => `${label} line ${index + 1}`);
@@ -1676,7 +1720,7 @@ async function createChatPickerScenario(
   ]);
   const sessionFileCases = [
     {
-      match: { sessionKey: "agent:alpha" },
+      match: { sessionKey: "agent:main:main" },
       response: {
         browser: {
           entries: [
@@ -1718,7 +1762,7 @@ async function createChatPickerScenario(
     },
   ];
   const sessionFileGetCases = sessionFiles.map((file) => ({
-    match: { sessionKey: "agent:alpha", path: file.path },
+    match: { sessionKey: "agent:main:main", path: file.path },
     response: {
       file: {
         ...file,
@@ -1731,7 +1775,7 @@ async function createChatPickerScenario(
     },
   }));
   const sessionFileSetCases = sessionFiles.map((file) => ({
-    match: { sessionKey: "agent:alpha", path: file.path },
+    match: { sessionKey: "agent:main:main", path: file.path },
     response: {
       file: {
         ...file,
@@ -1902,6 +1946,7 @@ async function createChatPickerScenario(
       activeRunIds: [PLAN_DEMO_RUN_ID],
       childSessions: ["agent:main:lisbon-trip", ...swarmChildRows.map((row) => row.key)],
       hasActiveRun: true,
+      ...(fixture === "avatars" ? { kind: "global" as const } : {}),
       status: "running",
       totalTokens: 170_000,
       totalTokensFresh: true,
@@ -1949,6 +1994,7 @@ async function createChatPickerScenario(
         environmentId: "worker:9f2c4e7a81d24b06a5c3f8e1b7d94c1a",
         providerId: "machine0",
         profileId: "team",
+        machine: { class: "medium", os: "linux", osLabel: "Linux", cpu: 4, memoryGb: 16 },
         activeOwnerEpoch: 4,
         workerBundleHash: "b".repeat(64),
         workspaceBaseManifestRef: "sha256:cloud-refactor-base",
@@ -2148,6 +2194,7 @@ async function createChatPickerScenario(
   const fixtureHistories: Partial<Record<NonNullable<CliOptions["fixture"]>, unknown[]>> = {
     approval: buildApprovalChatHistory(baseTime),
     attachments: buildChatAttachmentHistory(baseTime),
+    avatars: buildAvatarChatHistory(baseTime),
     "code-fences": buildCodeFenceChatHistory(baseTime),
     "update-blocked": buildCancelledChatHistory(baseTime),
   };
@@ -2365,6 +2412,13 @@ async function createChatPickerScenario(
     // Lights up the footer facepile and who's-online roster; the email-only
     // entry keeps the roster's no-display-name row exercised.
     presenceUsers: [
+      ...(fixture === "avatars"
+        ? MOCK_AVATAR_PROFILES.map(({ id, name }) => ({
+            id,
+            name,
+            avatarUrl: `/api/users/${id}/avatar`,
+          }))
+        : []),
       {
         self: true,
         id: selfProfile.id,
@@ -2766,6 +2820,19 @@ async function createChatPickerScenario(
           },
         ],
       },
+      "plugins.list": buildPluginCatalogMock({
+        installedCopies: fixture === "plugins-dense" ? 10 : 1,
+      }),
+      "plugins.catalog.browse": buildPluginDiscoveryMock(),
+      "plugins.catalog.categories": buildPluginDiscoveryCategoriesMock(),
+      "plugins.inspect": buildPluginInspectMock({
+        installedCopies: fixture === "plugins-dense" ? 10 : 1,
+      }),
+      "skills.status": {
+        workspaceDir: "/Users/demo/Projects/openclaw",
+        managedSkillsDir: "/Users/demo/.openclaw/skills",
+        skills: [],
+      },
       "channels.status": buildChannelsStatusMock(baseTime),
       "channels.pairing.list": buildChannelsPairingMock(baseTime),
       "channels.pairing.approve": {
@@ -3061,7 +3128,7 @@ async function createChatPickerScenario(
       "sessions.files.list": {
         cases: [
           {
-            match: { sessionKey: "agent:alpha", path: "ui" },
+            match: { sessionKey: "agent:main:main", path: "ui" },
             response: {
               browser: {
                 entries: [
@@ -3089,7 +3156,7 @@ async function createChatPickerScenario(
             },
           },
           {
-            match: { sessionKey: "agent:alpha", search: "chat" },
+            match: { sessionKey: "agent:main:main", search: "chat" },
             response: {
               browser: {
                 entries: [
@@ -3123,7 +3190,7 @@ async function createChatPickerScenario(
       "artifacts.list": {
         cases: [
           {
-            match: { sessionKey: "agent:alpha" },
+            match: { sessionKey: "agent:main:main" },
             response: { artifacts: [lobsterArtifact] },
           },
         ],
@@ -3131,7 +3198,7 @@ async function createChatPickerScenario(
       "artifacts.download": {
         cases: [
           {
-            match: { sessionKey: "agent:alpha", artifactId: lobsterArtifact.id },
+            match: { sessionKey: "agent:main:main", artifactId: lobsterArtifact.id },
             response: {
               artifact: lobsterArtifact,
               data: Buffer.from(lobsterSvg, "utf8").toString("base64"),
@@ -3360,24 +3427,27 @@ async function createMockGatewayPlugin(
       .map((plugin) => plugin.id),
   );
   const attachmentThemeToggle =
-    fixture === "attachments"
+    fixture === "attachments" || fixture === "avatars"
       ? `    <style data-openclaw-control-ui-mock-theme-toggle>
       .control-ui-mock-theme-toggle { position: fixed; right: 16px; bottom: 16px; z-index: 1000; display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--card); box-shadow: var(--shadow-md); }
       .control-ui-mock-theme-toggle button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 999px; color: var(--muted); background: transparent; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
       .control-ui-mock-theme-toggle button[aria-pressed="true"] { color: var(--text); background: var(--bg-hover); }
     </style>
-    <script data-openclaw-control-ui-mock-theme-toggle>
+    <script type="module" data-openclaw-control-ui-mock-theme-toggle>
+      import { syncControlUiSystemChrome } from "/src/app/control-ui-presentation.ts";
       addEventListener("DOMContentLoaded", () => {
         const control = document.createElement("div");
         control.className = "control-ui-mock-theme-toggle";
         control.setAttribute("aria-label", "Theme");
         const apply = (mode) => {
           const root = document.documentElement;
+          root.dataset.theme = mode;
           root.dataset.themeMode = mode;
           root.dataset.themeResolved = mode;
           root.classList.toggle("wa-light", mode === "light");
           root.classList.toggle("wa-dark", mode === "dark");
           root.style.colorScheme = mode;
+          syncControlUiSystemChrome();
           for (const button of control.querySelectorAll("button")) {
             button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
           }
@@ -3398,6 +3468,24 @@ async function createMockGatewayPlugin(
       : "";
   return {
     configureServer(server) {
+      if (fixture === "avatars") {
+        const avatarFills = new Map(
+          MOCK_AVATAR_PROFILES.map(({ fill, id }) => [`/api/users/${id}/avatar`, fill]),
+        );
+        server.middlewares.use((req, res, next) => {
+          const pathname = new URL(req.url ?? "/", "http://openclaw.invalid").pathname;
+          const fill = avatarFills.get(pathname);
+          if (!fill) {
+            next();
+            return;
+          }
+          res.statusCode = 200;
+          res.setHeader("content-type", "image/svg+xml");
+          res.end(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><rect width="36" height="36" fill="${fill}"/></svg>`,
+          );
+        });
+      }
       server.middlewares.use((req, res, next) => {
         const prefix = "/__openclaw__/plugin-icon/";
         const pathname = new URL(req.url ?? "/", "http://openclaw.invalid").pathname;

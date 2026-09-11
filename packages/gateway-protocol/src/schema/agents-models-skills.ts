@@ -223,6 +223,12 @@ export const AgentsDeleteResultSchema = closedObject({
   purgeFailed: Type.Optional(Type.Literal(true)),
 });
 
+const Sha256String = Type.String({
+  minLength: 64,
+  maxLength: 64,
+  pattern: "^[a-fA-F0-9]{64}$",
+});
+
 /** File metadata and optional content for agent-local editable files. */
 export const AgentsFileEntrySchema = closedObject({
   name: NonEmptyString,
@@ -234,6 +240,7 @@ export const AgentsFileEntrySchema = closedObject({
   expectedAbsent: Type.Optional(Type.Boolean()),
   size: Type.Optional(Type.Integer({ minimum: 0 })),
   updatedAtMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  hash: Type.Optional(Sha256String),
   content: Type.Optional(Type.String()),
 });
 
@@ -267,6 +274,7 @@ export const AgentsFilesSetParamsSchema = closedObject({
   agentId: NonEmptyString,
   name: NonEmptyString,
   content: Type.String(),
+  expectedHash: Type.Optional(Sha256String),
 });
 
 /** Result returned after writing an editable agent file. */
@@ -319,10 +327,17 @@ export const ModelsAuthStatusParamsSchema = closedObject({
   agentId: Type.Optional(Type.String()),
 });
 
+/** Rebuilds Gateway auth state after a credential or selection mutation. */
+export const ModelsAuthRefreshParamsSchema = closedObject({
+  operation: Type.Union([Type.Literal("login"), Type.Literal("logout"), Type.Literal("update")]),
+  agentId: Type.Optional(Type.String()),
+});
+
 /** Removes saved model-provider credentials from one configured agent. */
 export const ModelsAuthLogoutParamsSchema = closedObject({
   provider: NonEmptyString,
   profileIds: Type.Optional(Type.Array(NonEmptyString, { minItems: 1 })),
+  credentialType: Type.Optional(Type.Literal("api_key")),
   agentId: Type.Optional(Type.String()),
 });
 
@@ -402,11 +417,6 @@ export const SkillsBinsResultSchema = closedObject({
   bins: Type.Array(NonEmptyString),
 });
 
-const Sha256String = Type.String({
-  minLength: 64,
-  maxLength: 64,
-  pattern: "^[a-fA-F0-9]{64}$",
-});
 const SkillUploadIdempotencyKeyString = Type.String({
   minLength: 1,
   maxLength: 2048,
@@ -513,6 +523,8 @@ export const SkillsSearchResultSchema = closedObject({
     closedObject({
       score: Type.Number(),
       slug: NonEmptyString,
+      registry: NonEmptyString,
+      ownerHandle: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
       installRef: Type.String({
         minLength: 1,
         description:
@@ -1470,6 +1482,7 @@ export type ModelsListResult = Static<typeof ModelsListResultSchema>;
 export type ModelsAuthStatusParams = Static<typeof ModelsAuthStatusParamsSchema>;
 export type ModelsAuthLogoutParams = Static<typeof ModelsAuthLogoutParamsSchema>;
 export type ModelsAuthOrderSetParams = Static<typeof ModelsAuthOrderSetParamsSchema>;
+export type ModelsAuthRefreshParams = Static<typeof ModelsAuthRefreshParamsSchema>;
 export type AuthProbeStatus = Static<typeof AuthProbeStatusSchema>;
 export type ModelsProbeParams = Static<typeof ModelsProbeParamsSchema>;
 export type ModelsProbeTargetResult = Static<typeof ModelsProbeTargetResultSchema>;
