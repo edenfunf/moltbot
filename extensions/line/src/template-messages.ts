@@ -83,6 +83,7 @@ function resolveTemplateAltText(value: string | undefined, fallback: string): st
 function normalizeCarouselColumn(column: CarouselColumn): CarouselColumn {
   return {
     ...column,
+    title: column.title || undefined,
     actions: column.actions
       .map((action) => normalizeLineAction(action))
       .filter((action) => action.label !== undefined && action.label !== "")
@@ -266,9 +267,14 @@ export function createCarouselColumn(params: {
   // title or thumbnail image, and 120 chars otherwise. Sending an over-length
   // text makes LINE reject the whole carousel, so mirror the conditional limit
   // the buttons template already applies above.
-  const textLimit = resolveTemplateTextLimit({ ...params, textOnlyLimit: 120 });
+  const normalizedTitle = params.title || undefined;
+  const textLimit = resolveTemplateTextLimit({
+    ...params,
+    title: normalizedTitle,
+    textOnlyLimit: 120,
+  });
   return {
-    title: truncateOptionalTemplateText(params.title, 40),
+    title: truncateOptionalTemplateText(normalizedTitle, 40),
     text: truncateTemplateText(params.text, textLimit),
     actions: params.actions
       .map((action) => normalizeLineAction(action))

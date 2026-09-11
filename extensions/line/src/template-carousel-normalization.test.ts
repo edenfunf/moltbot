@@ -53,6 +53,45 @@ const invalidCases: Array<{
 ];
 
 describe("LINE carousel normalization", () => {
+  it("treats empty titles as absent and preserves the titleless text budget", () => {
+    const message = buildTemplateMessageFromPayload({
+      type: "carousel",
+      columns: [column("A".repeat(100), { title: "" }), column("B", { title: "" })],
+    });
+
+    expect(message).toMatchObject({
+      type: "template",
+      template: {
+        type: "carousel",
+        columns: [
+          { title: undefined, text: "A".repeat(100) },
+          { title: undefined, text: "B" },
+        ],
+      },
+    });
+  });
+
+  it("uses text fallback when an empty title is beside a real title", () => {
+    expect(
+      buildTemplateMessageFromPayload({
+        type: "carousel",
+        columns: [column("A", { title: "" }), column("B", { title: "Second" })],
+      }),
+    ).toEqual({ type: "text", text: "A (Open)\nSecond: B (Open)" });
+  });
+
+  it("normalizes empty titles in columns passed directly to the strict builder", () => {
+    const message = createTemplateCarousel([
+      { title: "", text: "A", actions: [messageAction("Open")] },
+      { text: "B", actions: [messageAction("Open")] },
+    ]);
+
+    expect(message).toMatchObject({
+      type: "template",
+      template: { type: "carousel", columns: [{ title: undefined }, { title: undefined }] },
+    });
+  });
+
   it("leaves a provider-valid carousel byte shape unchanged", () => {
     const columns = [
       createCarouselColumn({
