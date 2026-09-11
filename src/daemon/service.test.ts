@@ -32,10 +32,6 @@ beforeEach(() => {
   probePortUsage.mockRejectedValue(new Error("unexpected port probe"));
 });
 
-function setPlatform(value: NodeJS.Platform) {
-  mockProcessPlatform(value);
-}
-
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -89,14 +85,14 @@ describe("resolveGatewayService", () => {
     { platform: "linux" as const, label: "systemd user", loadedText: "enabled" },
     { platform: "win32" as const, label: "Scheduled Task", loadedText: "registered" },
   ])("returns the registered adapter for $platform", ({ platform, label, loadedText }) => {
-    setPlatform(platform);
+    mockProcessPlatform(platform);
     const service = resolveGatewayService();
     expect(service.label).toBe(label);
     expect(service.loadedText).toBe(loadedText);
   });
 
   it("returns a read-only unsupported-platform adapter", async () => {
-    setPlatform("aix");
+    mockProcessPlatform("aix");
     const service = resolveGatewayService();
 
     await expect(service.readCommand(process.env)).resolves.toBeNull();
@@ -154,7 +150,7 @@ describe("resolveGatewayService", () => {
   });
 
   it("guards every native service mutation when an external supervisor owns lifecycle", async () => {
-    setPlatform("darwin");
+    mockProcessPlatform("darwin");
     const service = resolveGatewayService();
     const env = { OPENCLAW_SUPERVISOR_MODE: "external" };
     const installArgs = {
@@ -189,6 +185,35 @@ describe("resolveGatewayService", () => {
 });
 
 describe("readGatewayServiceState", () => {
+  it("passes update loaded-only admission to every native inspection adapter", async () => {
+    const readCommand = vi.fn(async () => null);
+    const readRuntime = vi.fn(async () => ({ status: "stopped" }));
+    const readDefinitionMutationCapability = vi.fn<
+      NonNullable<GatewayService["readDefinitionMutationCapability"]>
+    >(async () => ({ kind: "writable" }));
+    const service = createService({ readCommand, readRuntime, readDefinitionMutationCapability });
+    await readGatewayServiceState(service, {
+      requireEffective: true,
+      requireLoadedCommand: true,
+      timeoutMs: 100,
+    });
+    expect(readCommand).toHaveBeenCalledWith(expect.anything(), {
+      requireEffective: true,
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+    expect(readRuntime).toHaveBeenCalledWith(expect.anything(), {
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+    expect(readDefinitionMutationCapability).toHaveBeenCalledWith({
+      env: expect.anything(),
+      environment: expect.anything(),
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+  });
+
   it.each(managerlessPreflightCases)(
     "handles managerless Linux inspection for $updateInstallKind restart=$shouldRestart ($condition)",
     async ({ updateInstallKind, shouldRestart, condition, portUsage, portSource }) => {
@@ -219,7 +244,7 @@ describe("readGatewayServiceState", () => {
       ];
       const snapshot = captureEnv(keys);
       try {
-        setPlatform("linux");
+        mockProcessPlatform("linux");
         for (const key of keys) {
           delete process.env[key];
         }

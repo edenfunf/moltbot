@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { createModelVisibilityPolicy } from "../agents/model-visibility-policy.js";
 import { startGatewayConfigReloader } from "../gateway/config-reload.js";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import * as tmpDirOwner from "../infra/tmp-openclaw-dir.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
@@ -143,6 +144,9 @@ describe("config io write", () => {
 
   beforeAll(async () => {
     await suiteRootTracker.setup();
+    vi.spyOn(tmpDirOwner, "resolvePreferredOpenClawTmpDir").mockReturnValue(
+      await suiteRootTracker.make("coordinator"),
+    );
 
     // Default: return an empty plugin list so existing tests that don't need
     // plugin-owned channel schemas keep working unchanged.
@@ -161,6 +165,7 @@ describe("config io write", () => {
   afterAll(async () => {
     closeOpenClawStateDatabaseForTest();
     resetConfigRuntimeState();
+    vi.mocked(tmpDirOwner.resolvePreferredOpenClawTmpDir).mockRestore();
     await suiteRootTracker.cleanup();
   });
 
@@ -410,7 +415,9 @@ describe("config io write", () => {
             });
           const beforePolicy = policyFor(before.config);
           expect(beforePolicy.allowAny).toBe(modelPolicy !== undefined);
-          expect(beforePolicy.allowsKey("demo/denied")).toBe(modelPolicy !== undefined);
+          expect(beforePolicy.allows({ provider: "demo", model: "denied" })).toBe(
+            modelPolicy !== undefined,
+          );
 
           await io.writeConfigFile({
             ...before.config,
@@ -427,7 +434,9 @@ describe("config io write", () => {
           expect([...afterPolicy.allowedKeys].toSorted()).toEqual(
             [...beforePolicy.allowedKeys].toSorted(),
           );
-          expect(afterPolicy.allowsKey("demo/denied")).toBe(beforePolicy.allowsKey("demo/denied"));
+          expect(afterPolicy.allows({ provider: "demo", model: "denied" })).toBe(
+            beforePolicy.allows({ provider: "demo", model: "denied" }),
+          );
           expect(after.sourceConfig.agents?.defaults?.models).toEqual(models);
           expect(after.sourceConfig.browser?.enabled).toBe(false);
           if (includeAt) {
@@ -497,24 +506,59 @@ describe("config io write", () => {
     );
   });
 
-  itWithHome("refuses direct config writes in Nix mode without changing the file", async (home) => {
-    const { configPath, raw: initialRaw } = await writeConfigFixture(home, {
-      gateway: { mode: "local" },
-    });
+  itWithHome("does not enable READONLY from config env.vars before writing", async (home) => {
+    const config = {
+      env: { vars: { OPENCLAW_CONFIG_READONLY: "1" } },
+      gateway: { mode: "local" as const },
+    };
+    const { configPath } = await writeConfigFixture(home, config);
     const io = createHomeConfigIO(home, {
       configPath,
-      env: {
-        OPENCLAW_NIX_MODE: "1",
-        OPENCLAW_TEST_FAST: "1",
-      } as NodeJS.ProcessEnv,
+      env: { OPENCLAW_TEST_FAST: "1" },
     });
-
-    await expect(io.writeConfigFile({ gateway: { mode: "local", port: 19001 } })).rejects.toThrow(
-      "Agent-first Nix setup: https://github.com/openclaw/nix-openclaw#quick-start",
-    );
-
-    await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(initialRaw);
+    expect(io.loadConfig().gateway?.mode).toBe("local");
+    const result = await io.writeConfigFile({
+      ...config,
+      gateway: { mode: "local", port: 19001 },
+    });
+    expect(result.persistedConfig.gateway?.port).toBe(19001);
+    expect((await io.readConfigFileSnapshot()).config.gateway?.port).toBe(19001);
+    expect(io.env.OPENCLAW_CONFIG_READONLY).toBeUndefined();
   });
+
+  for (const [mode, message] of [
+    [
+      "OPENCLAW_NIX_MODE",
+      "Agent-first Nix setup: https://github.com/openclaw/nix-openclaw#quick-start",
+    ],
+    ["OPENCLAW_CONFIG_READONLY", "Config is externally managed (`OPENCLAW_CONFIG_READONLY=1`)"],
+  ] as const) {
+    itWithHome(
+      `refuses direct config writes in ${mode} without changing the file`,
+      async (home) => {
+        const { configPath, raw: initialRaw } = await writeConfigFixture(home, {
+          env: { vars: { [mode]: "0" } },
+          gateway: { mode: "local" },
+        });
+        const io = createHomeConfigIO(home, {
+          configPath,
+          env: {
+            [mode]: "1",
+            OPENCLAW_TEST_FAST: "1",
+          } as NodeJS.ProcessEnv,
+        });
+
+        expect(io.loadConfig().gateway?.mode).toBe("local");
+        expect(io.env[mode]).toBe("1");
+        await expect(
+          io.writeConfigFile({ gateway: { mode: "local", port: 19001 } }),
+        ).rejects.toThrow(message);
+
+        await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(initialRaw);
+        expect((await io.readConfigFileSnapshot()).config.gateway?.mode).toBe("local");
+      },
+    );
+  }
 
   itWithHome(
     "dedupes validation warnings across writes and reloads until config becomes clean",
@@ -717,6 +761,23 @@ describe("config io write", () => {
     expect(persisted.$schema).toBe("https://openclaw.ai/config.json");
     expect(persisted.gateway).toEqual({ mode: "local", port: 18789 });
   });
+
+  for (const mode of ["OPENCLAW_CONFIG_READONLY", "OPENCLAW_NIX_MODE"]) {
+    itWithHome(mode + " preserves prefixed config without recovery snapshots", async (home) => {
+      const configPath = configPathForHome(home);
+      const originalRaw = "status output\n" + formatConfig({ gateway: { mode: "local" } });
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(configPath, originalRaw, "utf-8");
+      const io = createHomeConfigIO(home, { env: { VITEST: "true", [mode]: "1" } });
+      const snapshot = await io.readConfigFileSnapshot();
+      expect(snapshot.valid).toBe(false);
+      await expect(io.recoverConfigFromJsonRootSuffix(snapshot)).resolves.toBe(false);
+      expect(await fs.readFile(configPath, "utf-8")).toBe(originalRaw);
+      expect(
+        (await fs.readdir(path.dirname(configPath))).filter((name) => name.includes(".clobbered.")),
+      ).toHaveLength(0);
+    });
+  }
 
   itWithHome("recovers configs polluted by a leading status line", async (home) => {
     const configPath = configPathForHome(home);
@@ -2965,8 +3026,8 @@ describe("config io write", () => {
       await withSuiteHome(async (home) => {
         const entry = { alias: "friendly", params: { temperature: 0.2 } };
         const canonicalEntry = canonicalPresent ? { params: { temperature: 0.7 } } : entry;
-        const legacy = "openrouter/openrouter/hunter-alpha";
-        const canonical = "openrouter/hunter-alpha";
+        const legacy = "google/gemini-3-pro-preview";
+        const canonical = "google/gemini-3.1-pro-preview";
         const agents = {
           entries: { main: {} },
           defaults: {
