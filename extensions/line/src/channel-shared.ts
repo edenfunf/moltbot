@@ -17,19 +17,6 @@ const lineChannelMeta = {
   systemImage: "message.fill",
 } as const;
 
-/** Names each credential the config points at but that could not be read. */
-function describeLineUnconfiguredReason(account: ResolvedLineAccount): string {
-  const unavailable = [
-    account.tokenStatus === "configured_unavailable" ? `token ${account.tokenSource}` : "",
-    account.signingSecretStatus === "configured_unavailable"
-      ? `channel secret ${account.signingSecretSource}`
-      : "",
-  ].filter(Boolean);
-  return unavailable.length > 0
-    ? `not configured: ${unavailable.join(" and ")} ${unavailable.length > 1 ? "are" : "is"} configured but unavailable`
-    : "not configured";
-}
-
 export const lineChannelPluginCommon = {
   meta: {
     ...lineChannelMeta,
@@ -47,10 +34,9 @@ export const lineChannelPluginCommon = {
   configSchema: LineChannelConfigSchema,
   config: {
     ...lineConfigAdapter,
-    // Running needs both credentials resolved. A configured but unreadable credential
-    // stays configured in describeAccount below and is named by the reason instead.
+    // Running needs both credentials resolved; an unreadable credential stays
+    // configured in describeAccount below, which is what status shows.
     isConfigured: (account: ResolvedLineAccount) => hasUsableLineCredentials(account),
-    unconfiguredReason: (account: ResolvedLineAccount) => describeLineUnconfiguredReason(account),
     describeAccount: (account: ResolvedLineAccount) =>
       describeWebhookAccountSnapshot({
         account,

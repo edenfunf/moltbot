@@ -543,10 +543,8 @@ link-local, and private-network targets.
   `channelSecret` matches the LINE console.
 - **Channel is configured but does not start:** a `tokenFile` or `secretFile` that
   names a path OpenClaw cannot read keeps the account visible as configured but
-  unavailable. The Gateway does not start it, the model is not offered LINE's message
-  tool, and the account's reason names the credential, for example
-  `not configured: token file is configured but unavailable`. While the Gateway is
-  running, `openclaw status` lists the account under `Degraded secrets` (for example
+  unavailable. The Gateway does not start it and the model is not offered LINE's
+  message tool. While the Gateway is running, `openclaw status` lists the account under `Degraded secrets` (for example
   `account:line:default`), and `openclaw status --json` names the config path that
   failed in `degradedSecretOwners[].paths` (for example `channels.line.tokenFile`).
   The Gateway also logs a startup failure naming that secret owner as configured but

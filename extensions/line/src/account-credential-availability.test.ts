@@ -71,18 +71,6 @@ describe("an account whose credential file cannot be read", () => {
     expect(isLineConfigured(lineCfg(line), "default")).toBe(true);
   });
 
-  it("names the credential that could not be read", () => {
-    expect(
-      config.unconfiguredReason(accountFor({ tokenFile: missing, channelSecret: "secret" })),
-    ).toBe("not configured: token file is configured but unavailable");
-    expect(
-      config.unconfiguredReason(accountFor({ channelAccessToken: "token", secretFile: missing })),
-    ).toBe("not configured: channel secret file is configured but unavailable");
-    expect(config.unconfiguredReason(accountFor({ tokenFile: missing, secretFile: missing }))).toBe(
-      "not configured: token file and channel secret file are configured but unavailable",
-    );
-  });
-
   it("withholds the message tool the model would otherwise be told it can use", () => {
     // Offering send here hands the model a tool whose every call fails: the channel
     // refuses to start on the same credentials.
@@ -104,7 +92,6 @@ describe("an account whose credential file cannot be read", () => {
     expect(account.tokenStatus).toBe("missing");
     expect(config.isConfigured(account)).toBe(false);
     expect(config.describeAccount(account)).toMatchObject({ configured: false });
-    expect(config.unconfiguredReason(account)).toBe("not configured");
   });
 
   it("falls back to the raw values when no credential status was resolved", () => {
