@@ -1,5 +1,4 @@
 import type {
-  CacheControlEphemeral,
   ContentBlockParam,
   MessageCreateParamsStreaming,
   Tool as AnthropicTool,
@@ -17,6 +16,7 @@ import {
 } from "../internal/anthropic-inline-images.js";
 import type { AnthropicOptions, AnthropicThinkingDisplay } from "../provider-options.js";
 import {
+  bindsClaudeThinkingPrefix,
   requiresClaudeAdaptiveThinking,
   supportsClaudeAdaptiveThinking,
   supportsClaudeNativeXhighEffort,
@@ -68,14 +68,13 @@ async function convertContentBlocks(
   profile: "provider" | "transport",
   isError: boolean,
 ) {
-  const text = extractToolResultText(content);
   const mediaPlaceholder = describeToolResultMediaPlaceholder(content);
   const hasImages =
     (profile === "provider" || model.input.includes("image")) &&
     content.some(isImageWithMediaPayload);
   if (!hasImages) {
     return sanitizeNonEmptyTransportPayloadText(
-      text,
+      extractToolResultText(content),
       mediaPlaceholder ??
         (profile === "transport" ? "(no output)" : isError ? "[tool error with no output]" : ""),
     );
@@ -138,9 +137,13 @@ export async function convertAnthropicMessages(
     replayThinkingEnabled?: boolean;
     allowEmptySignature?: boolean;
     profile: "provider" | "transport";
+    /** Emitted indexes of transient carriers that cannot anchor the cached prefix. */
+    cacheBreakpointOptOutMessageIndexes?: Set<number>;
   },
 ): Promise<AnthropicWireMessage[]> {
   const params: AnthropicWireMessage[] = [];
+  // Cache eligibility follows the same model contract as session context retention.
+  const retainRuntimeContext = bindsClaudeThinkingPrefix(model);
   const imageBudget = createAnthropicInlineImageBudget();
   const allowReasoningContentReplay = options.allowReasoningContentReplay === true;
   const replayThinkingEnabled = options.replayThinkingEnabled !== false;
@@ -156,6 +159,9 @@ export async function convertAnthropicMessages(
     if (msg.role === "user") {
       if (typeof msg.content === "string") {
         if (msg.content.trim().length > 0) {
+          if (msg.runtimeContextCarrier && !retainRuntimeContext) {
+            options.cacheBreakpointOptOutMessageIndexes?.add(params.length);
+          }
           const userParam: AnthropicWireMessage = {
             role: "user",
             content: sanitizeTransportPayloadText(msg.content),
@@ -196,6 +202,9 @@ export async function convertAnthropicMessages(
       );
       if (filteredBlocks.length === 0) {
         continue;
+      }
+      if (msg.runtimeContextCarrier && !retainRuntimeContext) {
+        options.cacheBreakpointOptOutMessageIndexes?.add(params.length);
       }
       const userParam: AnthropicWireMessage = {
         role: "user",
@@ -303,22 +312,8 @@ export async function convertAnthropicMessages(
       continue;
     }
     if (msg.role === "toolResult") {
-      const toolResult = msg;
-      const toolResults: ToolResultBlockParam[] = [
-        {
-          type: "tool_result",
-          tool_use_id: toolResult.toolCallId,
-          content: await convertContentBlocks(
-            toolResult.content,
-            model,
-            imageBudget,
-            options.profile,
-            toolResult.isError,
-          ),
-          is_error: toolResult.isError,
-        },
-      ];
-      let j = i + 1;
+      const toolResults: ToolResultBlockParam[] = [];
+      let j = i;
       while (j < transformedMessages.length) {
         const nextMsg = transformedMessages.at(j);
         if (nextMsg?.role !== "toolResult") {
@@ -445,7 +440,6 @@ export function convertAnthropicTools(
   tools: Tool[],
   isOAuthTokenLocal: boolean,
   supportsEagerToolInputStreaming = false,
-  cacheControl?: CacheControlEphemeral,
 ): {
   projection: AnthropicToolProjection;
   tools: AnthropicTool[];
@@ -454,7 +448,7 @@ export function convertAnthropicTools(
     isOAuthTokenLocal ? toClaudeCodeToolName(name) : name,
   );
   const convertedTools: AnthropicTool[] = [];
-  for (const [index, tool] of projection.tools.entries()) {
+  for (const tool of projection.tools) {
     const convertedTool: AnthropicTool = {
       name: tool.wireName,
       description: tool.description,
@@ -462,9 +456,6 @@ export function convertAnthropicTools(
     };
     if (supportsEagerToolInputStreaming) {
       convertedTool.eager_input_streaming = true;
-    }
-    if (cacheControl && index === projection.tools.length - 1) {
-      convertedTool.cache_control = cacheControl;
     }
     convertedTools.push(convertedTool);
   }

@@ -2,25 +2,101 @@
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
 import {
   getGatewayRestartDrainSignal,
+  getGatewaySuspendAdmissionPhase,
   isGatewayRestartDraining,
+  onGatewaySuspendAdmissionChange,
   waitForGatewayRestartFenceSettlement,
 } from "../../process/gateway-work-admission.js";
 import { sleep } from "../../utils/sleep.js";
-import { createChannelIngressDrain, type ChannelIngressDrain } from "./ingress-drain.js";
 import {
-  CHANNEL_INGRESS_RETENTION_DEFAULTS,
-  DEFAULT_APPEND_RETRY_DELAYS_MS,
-  type ChannelIngressMonitorDeliveryResult,
-  type ChannelIngressMonitorFacts,
-  type ChannelIngressMonitorLifecycle,
-  type CreateChannelIngressMonitorOptions,
-} from "./ingress-monitor.types.js";
-import type { ChannelIngressQueue } from "./ingress-queue.js";
+  createChannelIngressDrain,
+  type ChannelIngressDrain,
+  type CreateChannelIngressDrainOptions,
+} from "./ingress-drain.js";
+import type {
+  ChannelIngressMonitorDeliveryResult,
+  ChannelIngressMonitorFacts,
+  ChannelIngressMonitorInspectionContext,
+  ChannelIngressMonitorLifecycle,
+  ChannelIngressMonitorPayloadCodec,
+  ChannelIngressMonitorRetention,
+} from "./ingress-monitor-types.js";
+import type { ChannelIngressQueue, ChannelIngressQueueClaim } from "./ingress-queue.js";
 import {
   DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
   DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
 } from "./ingress-retry-policy.js";
 import { ChannelIngressUnavailableError } from "./ingress-unavailable.js";
+
+const DEFAULT_APPEND_RETRY_DELAYS_MS = [0, 100, 300] as const;
+
+export type {
+  ChannelIngressMonitorDeliveryResult,
+  ChannelIngressMonitorFacts,
+  ChannelIngressMonitorLifecycle,
+  ChannelIngressMonitorPayloadCodec,
+} from "./ingress-monitor-types.js";
+
+/** Replay-guard retention defaults; changing a value requires a per-channel keyspace audit. */
+export const CHANNEL_INGRESS_RETENTION_DEFAULTS = Object.freeze({
+  pruneIntervalMs: 60 * 60 * 1_000,
+  completedTtlMs: 30 * 24 * 60 * 60 * 1_000,
+  completedMaxEntries: 20_000,
+  failedTtlMs: 30 * 24 * 60 * 60 * 1_000,
+  failedMaxEntries: 20_000,
+} satisfies ChannelIngressMonitorRetention);
+
+export type ChannelIngressMonitorDrainOptions<TStoredPayload, TMetadata> = Omit<
+  CreateChannelIngressDrainOptions<TStoredPayload, TMetadata>,
+  "queue" | "dispatchClaimedEvent" | "abortSignal" | "now" | "ownerId" | "claimLeaseMs"
+>;
+
+export type CreateChannelIngressMonitorOptions<TRaw, TBody, TStoredPayload, TMetadata> = {
+  queue:
+    | ChannelIngressQueue<TStoredPayload, TMetadata>
+    | (() => ChannelIngressQueue<TStoredPayload, TMetadata>);
+  inspect: (
+    raw: TRaw,
+    context: ChannelIngressMonitorInspectionContext,
+  ) => ChannelIngressMonitorFacts | null;
+  payload: ChannelIngressMonitorPayloadCodec<TRaw, TBody, TStoredPayload, TMetadata>;
+  deliver: (
+    raw: TRaw,
+    lifecycle: ChannelIngressMonitorLifecycle,
+    claim: ChannelIngressQueueClaim<TStoredPayload, TMetadata>,
+  ) =>
+    | Promise<ChannelIngressMonitorDeliveryResult | void>
+    | ChannelIngressMonitorDeliveryResult
+    | void;
+  pollIntervalMs: number;
+  retention: "standard" | Partial<ChannelIngressMonitorRetention>;
+  appendRetryDelaysMs?: readonly number[];
+  /**
+   * Runs after every durable enqueue. `isNew` means this admission inserted the queue
+   * row; a pruned event can become new again. It does not imply claim or delivery.
+   */
+  onDurableAdmission?: (
+    raw: TRaw,
+    context: { facts: ChannelIngressMonitorFacts; receivedAt: number; isNew: boolean },
+  ) => void | Promise<void>;
+  onAdmissionFailure?: (raw: TRaw, error: unknown) => void | Promise<void>;
+  /** False lets repeated requests fill drain capacity while earlier claims remain active. */
+  waitForDeliveryIdleBeforeRepump?: boolean;
+  /** Runs each pump under a channel-owned async context such as a detached request root. */
+  runPumpTask?: (work: () => Promise<void>) => Promise<void>;
+  /** False lets a channel apply its own bounded delivery grace before final disposal. */
+  waitForDeliveryIdleOnStop?: boolean;
+  /** Tracks deferred reply ownership through stop, abort, or an explicit channel-owned wait. */
+  deferredClaims?: "wait-on-stop" | "settle-on-abort" | "manual";
+  drain?: ChannelIngressMonitorDrainOptions<TStoredPayload, TMetadata>;
+  abortSignal?: AbortSignal;
+  now?: () => number;
+  onError?: (error: unknown) => void;
+  onActivityChange?: (active: boolean) => void;
+  createStoppedError?: () => Error;
+  /** Durable-after-stop preserves append-only admission for handlers selected before unregister. */
+  admissionMode?: "until-stopped" | "while-running" | "durable-after-stop";
+};
 
 /**
  * Creates the shared monitor around a durable queue and ingress drain.
@@ -73,6 +149,8 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
   let drainIdleWakeRequested = false;
   let restartFenceWake: Promise<void> | undefined;
   let releaseRestartFenceWake = () => {};
+  let suspensionDrainPending = false;
+  let unsubscribeSuspension: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let lastPrunedAt = 0;
   let admissionTail: Promise<void> = Promise.resolve();
@@ -80,6 +158,12 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
   const admissionClaimWaiters: Array<() => void> = [];
   let stopTask: Promise<void> | undefined;
   let lastReportedActive = false;
+
+  const clearSuspensionSubscription = (): void => {
+    suspensionDrainPending = false;
+    unsubscribeSuspension?.();
+    unsubscribeSuspension = undefined;
+  };
 
   const reportError = (error: unknown): void => {
     try {
@@ -406,6 +490,7 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
             shouldStop: () =>
               !running ||
               isAborted() ||
+              getGatewaySuspendAdmissionPhase() !== "accepting" ||
               (options.drain?.startLimit !== undefined &&
                 activeDeliveries.size - deferredStartCapacity >= options.drain.startLimit),
           }),
@@ -454,7 +539,14 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
       },
     );
   };
-  drainAbortSignal.addEventListener("abort", () => releaseRestartFenceWake(), { once: true });
+  drainAbortSignal.addEventListener(
+    "abort",
+    () => {
+      releaseRestartFenceWake();
+      clearSuspensionSubscription();
+    },
+    { once: true },
+  );
 
   const requestDrain = (): void => {
     if (!running || isAborted() || getGatewayRestartDrainSignal().aborted) {
@@ -471,6 +563,14 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
       publishActivity();
       return;
     }
+    if (getGatewaySuspendAdmissionPhase() !== "accepting") {
+      // Keep durable rows queued without reporting active ingress while suspension drains.
+      suspensionDrainPending = true;
+      requested = false;
+      publishActivity();
+      return;
+    }
+    suspensionDrainPending = false;
     requested = true;
     if (pumping) {
       publishActivity();
@@ -642,6 +742,22 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
       // one more anonymous channel crash.
       ensureQueueAvailable();
       running = true;
+      unsubscribeSuspension ??= onGatewaySuspendAdmissionChange((phase) => {
+        if (!running) {
+          return;
+        }
+        if (phase !== "accepting") {
+          if (requested || pumping) {
+            suspensionDrainPending = true;
+            requested = false;
+            publishActivity();
+          }
+          return;
+        }
+        if (suspensionDrainPending) {
+          requestDrain();
+        }
+      });
       pollTimer = setInterval(requestDrain, options.pollIntervalMs);
       pollTimer.unref?.();
       requestDrain();
@@ -654,6 +770,7 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
         stopped = true;
         running = false;
         requested = false;
+        clearSuspensionSubscription();
         releaseRestartFenceWake();
         clearPollTimer();
         publishActivity();
