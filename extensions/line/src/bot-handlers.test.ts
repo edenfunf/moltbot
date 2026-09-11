@@ -1730,6 +1730,47 @@ describe("handleLineWebhookEvents", () => {
     });
   });
 
+  it("makes every image of a multi-image send quotable, not just the part that anchored it", async () => {
+    downloadLineMediaMock.mockImplementation(async (messageId: string) => ({
+      path: `/media/${messageId}.png`,
+      contentType: "image/png",
+      size: 10,
+    }));
+    const processMessage = vi.fn();
+    const imagePart = (messageId: string, index: number) =>
+      createTestMessageEvent({
+        message: {
+          id: messageId,
+          type: "image",
+          contentProvider: { type: "line" },
+          quoteToken: `q-${messageId}`,
+          imageSet: { id: "image-set-quotable", index, total: 3 },
+        },
+        source: { type: "group", groupId: "group-set-quotable", userId: "user-set" },
+        webhookEventId: `evt-set-quotable-${index}`,
+      });
+
+    // LINE delivers the parts out of order; the turn is anchored on whichever came first.
+    await handleLineWebhookEvents(
+      [imagePart("m-set-2", 2), imagePart("m-set-1", 1), imagePart("m-set-3", 3)],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+        turnAdoptionLifecycle: createTurnAdoptionLifecycleSpy(),
+      }),
+    );
+
+    expect(processMessage).toHaveBeenCalledTimes(1);
+    for (const messageId of ["m-set-1", "m-set-2", "m-set-3"]) {
+      expect(resolveLineQuotedMessage("default", messageId, "group-set-quotable")).toEqual({
+        fromBot: false,
+        body: "<image>",
+        senderId: "user-set",
+      });
+    }
+  });
+
   it("skips a group message quoting a message the bot did not send", async () => {
     const processMessage = vi.fn();
     const event = createTestMessageEvent({

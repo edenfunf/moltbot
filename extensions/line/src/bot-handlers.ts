@@ -448,11 +448,7 @@ async function handleMessageEvent(
   }
 
   const { isGroup, groupId, roomId, userId } = getLineSourceInfo(event.source);
-  // Text a later quote of this message must resolve to. It is the same string the
-  // agent is given for this message — a sticker's description, a formatted
-  // location — so a quote answers with what the reader already saw. A message that
-  // carried only media has no such text and keeps its kind marker.
-  const quotableBody = extractLineMessageText(message) || `<${message.type}>`;
+  const quotableBody = resolveLineQuotableBody(message);
   if (isGroup && decision.access.activationAccess.shouldSkip) {
     const historyKey = groupId ?? roomId;
     const groupsConfigPath = resolveChannelGroupsConfigPath({
@@ -495,12 +491,7 @@ async function handleMessageEvent(
       // this message was never put in front of the agent and a later quote of
       // it must not resolve to its text.
       if (recorded.length > 0) {
-        recordLineAgentVisibleMessage(account.accountId, {
-          id: message.id,
-          conversationId: resolveLineConversationId(event.source),
-          body: quotableBody,
-          ...(userId ? { senderId: userId } : {}),
-        });
+        recordLineAgentVisibleSend(account.accountId, event, setParts);
       }
     }
     return;
@@ -587,13 +578,8 @@ async function handleMessageEvent(
     if (!messageContext) {
       logVerbose("line: skipping empty message");
     } else {
-      // This message is on its way to the agent, so a later quote of it may name it.
-      recordLineAgentVisibleMessage(account.accountId, {
-        id: message.id,
-        conversationId: resolveLineConversationId(event.source),
-        body: quotableBody,
-        ...(userId ? { senderId: userId } : {}),
-      });
+      // This send is on its way to the agent, so a later quote of any part may name it.
+      recordLineAgentVisibleSend(account.accountId, event, setParts);
       await processMessage(messageContext, {
         // The config this event resolved to, not the one the monitor booted on.
         cfg: context.cfg,
@@ -736,6 +722,36 @@ async function handlePostbackEvent(
 }
 
 /** Media reads in the order the sender picked, whatever order LINE delivered. */
+// Text a later quote of a message must resolve to. It is the same string the agent
+// is given for that message — a sticker's description, a formatted location — so a
+// quote answers with what the reader already saw. A message that carried only media
+// has no such text and keeps its kind marker.
+function resolveLineQuotableBody(message: MessageEvent["message"]): string {
+  return extractLineMessageText(message) || `<${message.type}>`;
+}
+
+/**
+ * Makes every message of one send quotable. A multi-image send reaches the agent as
+ * one turn, and a later quote may name any image in it, not only the part that
+ * anchored the turn.
+ */
+function recordLineAgentVisibleSend(
+  accountId: string,
+  event: MessageEvent,
+  setParts: readonly MessageEvent[],
+): void {
+  const { userId } = getLineSourceInfo(event.source);
+  const conversationId = resolveLineConversationId(event.source);
+  for (const part of orderedLineSetMessages(event.message, setParts)) {
+    recordLineAgentVisibleMessage(accountId, {
+      id: part.id,
+      conversationId,
+      body: resolveLineQuotableBody(part),
+      ...(userId ? { senderId: userId } : {}),
+    });
+  }
+}
+
 function orderedLineSetMessages(
   message: MessageEvent["message"],
   setParts: readonly MessageEvent[],
