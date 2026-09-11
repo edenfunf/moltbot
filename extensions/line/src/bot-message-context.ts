@@ -363,9 +363,9 @@ async function finalizeLineInboundContext(params: {
     channelAccessToken: params.account.channelAccessToken,
   };
   // LINE names a quoted message by id alone, so its text and author come from
-  // what this account already saw. An id it no longer holds still reaches the
-  // agent as a bare quote under the default visibility mode; a restrictive mode
-  // has no sender to clear and drops the quote with it.
+  // what this account already saw. An id it no longer holds has no sender to
+  // clear: `"allowlist"` drops that quote in a group whose effective groupPolicy
+  // is allowlist, and everywhere else it reaches the agent as a bare quote.
   const quoted = resolveLineQuotedMessage(
     params.account.accountId,
     params.quote?.messageId,
@@ -373,7 +373,7 @@ async function finalizeLineInboundContext(params: {
   );
   // A LINE webhook carries no display name and no group name, so each is its own
   // cached lookup. None can reject — `getUserProfile` and `getLineGroupName` answer
-  // null on any failure — so an unreachable profile costs a name, never the turn.
+  // nothing on any failure — so an unreachable profile costs a name, never the turn.
   const resolveDisplayName = (userId: string | undefined) =>
     userId
       ? getUserProfile(userId, {
@@ -415,7 +415,7 @@ async function finalizeLineInboundContext(params: {
       ? quotedSenderName && quotedSenderName !== quoted.senderId
         ? `${quotedSenderName} (${quoted.senderId})`
         : `user:${quoted.senderId}`
-      : quotedSenderName;
+      : undefined;
   // Admission only proves the quoted sender passed the gate when the message was
   // stored. That gate can narrow while the store still holds their text, so the
   // active allowlist decides again here.
@@ -431,8 +431,7 @@ async function finalizeLineInboundContext(params: {
             isLineQuoteSenderAllowed(allowFrom, quoted, quotedSenderViaAccessGroup),
         }),
         // A quote of the bot's own message keeps its author but no body: the store
-        // holds no outbound text, matching the core default that never repeats an
-        // assistant message the transcript already carries.
+        // holds no outbound text.
         ...(quoted?.body ? { body: quoted.body } : {}),
         ...(quotedSenderLabel ? { sender: quotedSenderLabel } : {}),
       }

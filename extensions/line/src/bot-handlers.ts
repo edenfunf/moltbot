@@ -212,7 +212,7 @@ type LineEventAdmission = {
     contextBinding?: ChannelIngressContextBinding,
   ) => Promise<ResolvedChannelMessageIngress>;
   mentions?: LineInboundMentionAccess;
-  /** Group gate this event was admitted under, re-read when a later quote names it. */
+  /** Group gate this event was admitted under; the context builder re-checks a quoted author against it. */
   groupPolicy: GroupPolicy;
   groupAllowFrom: string[];
 };

@@ -298,6 +298,7 @@ function createLineWebhookTestContext(params: {
   accessGroups?: Record<string, { type: "message.senders"; members: Record<string, string[]> }>;
   turnAdoptionLifecycle?: LineWebhookContext["turnAdoptionLifecycle"];
   implicitMentions?: { quotedBot?: boolean };
+  historyLimit?: number;
 }): Parameters<typeof handleLineWebhookEvents>[1] {
   const allowFrom = params.allowFrom ?? (params.dmPolicy === "open" ? ["*"] : undefined);
   const lineConfig = {
@@ -331,6 +332,7 @@ function createLineWebhookTestContext(params: {
     mediaMaxBytes: 1,
     processMessage: params.processMessage,
     ...(params.groupHistories ? { groupHistories: params.groupHistories } : {}),
+    ...(params.historyLimit === undefined ? {} : { historyLimit: params.historyLimit }),
     ...(params.turnAdoptionLifecycle
       ? { turnAdoptionLifecycle: params.turnAdoptionLifecycle }
       : {}),
@@ -1698,6 +1700,49 @@ describe("handleLineWebhookEvents", () => {
     });
     expect(resolveLineQuotedMessage("default", messageId, "group-other")).toBeUndefined();
   });
+
+  it.each([
+    { historyLimit: 1, quotable: true },
+    { historyLimit: 0, quotable: false },
+  ])(
+    "records a skipped group message as quotable only while the ambient window holds it (historyLimit $historyLimit)",
+    async ({ historyLimit, quotable }) => {
+      const processMessage = vi.fn();
+      const groupHistories = new Map<string, HistoryEntry[]>();
+      const messageId = `m-window-${historyLimit}`;
+      const event = createTestMessageEvent({
+        message: {
+          id: messageId,
+          type: "text",
+          text: "staging is on 10.0.0.5",
+          quoteToken: "q-window",
+        },
+        source: { type: "group", groupId: "group-window", userId: "user-window" },
+        webhookEventId: `evt-window-${historyLimit}`,
+      });
+
+      await handleLineWebhookEvents(
+        [event],
+        createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          requireMention: true,
+          groupHistories,
+          historyLimit,
+        }),
+      );
+
+      // Both rows take the skip branch, so the window size alone decides whether the
+      // agent will ever see the message, and with it whether a quote may resolve.
+      expect.soft(processMessage).not.toHaveBeenCalled();
+      expect.soft(groupHistories.get("group-window") ?? []).toHaveLength(quotable ? 1 : 0);
+      expect(resolveLineQuotedMessage("default", messageId, "group-window")).toEqual(
+        quotable
+          ? { fromBot: false, body: "staging is on 10.0.0.5", senderId: "user-window" }
+          : undefined,
+      );
+    },
+  );
 
   it("makes a sticker quotable as the description the agent was given", async () => {
     const processMessage = vi.fn();
