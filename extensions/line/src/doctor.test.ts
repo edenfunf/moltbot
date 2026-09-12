@@ -138,6 +138,49 @@ describe("line doctor empty group allowlist", () => {
     expect(shouldSkip(params)).toBe(true);
   });
 
+  it("reports a group whose own empty allowFrom overrides the defaults entry", () => {
+    const params = context({
+      account: {
+        groupPolicy: "allowlist",
+        groups: { "*": { allowFrom: ["U1"] }, C111: { allowFrom: [] } },
+      },
+    });
+
+    expect(extraWarnings(params)).toStrictEqual([
+      '- channels.line.groups: group "C111" sets an empty allowFrom, which overrides channels.line.groups."*".allowFrom and channels.line.groupAllowFrom — messages there are silently dropped. Add sender IDs to that group\'s own allowFrom, or remove the key so it inherits.',
+    ]);
+  });
+
+  it("reports a group whose own empty allowFrom overrides a channel-wide allowlist", () => {
+    const params = context({
+      account: {
+        groupPolicy: "allowlist",
+        groupAllowFrom: ["U1"],
+        groups: { C111: { allowFrom: [] } },
+      },
+    });
+
+    expect(extraWarnings(params)).toStrictEqual([
+      '- channels.line.groups: group "C111" sets an empty allowFrom, which overrides channels.line.groups."*".allowFrom and channels.line.groupAllowFrom — messages there are silently dropped. Add sender IDs to that group\'s own allowFrom, or remove the key so it inherits.',
+    ]);
+  });
+
+  it("treats a group disabled through the defaults entry as intentionally off", () => {
+    const params = context({
+      account: {
+        groupPolicy: "allowlist",
+        groups: {
+          "*": { enabled: false },
+          C222: { enabled: true, allowFrom: ["U1"] },
+          C333: {},
+        },
+      },
+    });
+
+    expect(shouldSkip(params)).toBe(true);
+    expect(extraWarnings(params)).toStrictEqual([]);
+  });
+
   it("stays out of the way unless groups use an allowlist", () => {
     const params = context({
       account: { groupPolicy: "open", groups: { C222: { allowFrom: ["U1"] } } },

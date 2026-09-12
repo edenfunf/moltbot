@@ -6,7 +6,13 @@ import type {
 } from "openclaw/plugin-sdk/channel-contract";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
-type LineGroupCoverage = { covered: boolean; uncovered: string[] };
+type LineGroupCoverage = {
+  covered: boolean;
+  /** Enabled groups with no sender allowlist anywhere in their resolved config. */
+  uncovered: string[];
+  /** Enabled groups whose own empty `allowFrom` masks every wider allowlist. */
+  overridden: string[];
+};
 
 const GROUP_DEFAULTS_KEY = "*";
 
@@ -50,23 +56,38 @@ function inspectLineGroupCoverage(params: {
 }): LineGroupCoverage {
   const entries = readGroupEntries(params.account, params.parent);
   if (entries.length === 0) {
-    return { covered: false, uncovered: [] };
+    return { covered: false, uncovered: [], overridden: [] };
   }
 
-  const defaultsAllowFrom = entries.find(([id]) => id === GROUP_DEFAULTS_KEY)?.[1]?.allowFrom;
-  // The defaults node and a channel-wide allowlist both reach every group, including
-  // groups that have no entry of their own.
-  if (hasAllowFromEntries(defaultsAllowFrom) || hasAllowFromEntries(params.groupAllowFrom)) {
-    return { covered: true, uncovered: [] };
-  }
+  const defaults = entries.find(([id]) => id === GROUP_DEFAULTS_KEY)?.[1];
+  const resolveAllowFrom = (group?: Record<string, unknown>): unknown =>
+    firstDefined(group?.allowFrom, params.groupAllowFrom);
 
-  const named = entries.filter(
-    ([id, group]) => id !== GROUP_DEFAULTS_KEY && group.enabled !== false,
-  );
-  const uncovered = named
-    .filter(([, group]) => !hasAllowFromEntries(firstDefined(group.allowFrom, defaultsAllowFrom)))
-    .map(([id]) => id);
-  return { covered: named.length > uncovered.length, uncovered };
+  // A group with no entry of its own resolves to the defaults node alone.
+  let covered = defaults?.enabled !== false && hasAllowFromEntries(resolveAllowFrom(defaults));
+
+  const uncovered: string[] = [];
+  const overridden: string[] = [];
+  for (const [id, group] of entries) {
+    if (id === GROUP_DEFAULTS_KEY) {
+      continue;
+    }
+    const effective = defaults ? { ...defaults, ...group } : group;
+    if (effective.enabled === false) {
+      continue;
+    }
+    const allowFrom = resolveAllowFrom(effective);
+    if (hasAllowFromEntries(allowFrom)) {
+      covered = true;
+    } else if (allowFrom === undefined) {
+      uncovered.push(id);
+    } else {
+      // An authored empty list wins over the defaults node and the channel-wide
+      // list, so pointing the operator at either of those would not help.
+      overridden.push(id);
+    }
+  }
+  return { covered, uncovered, overridden };
 }
 
 function readLineGroupCoverage(
@@ -99,21 +120,36 @@ function isLineGroupAllowlistScope(params: ChannelDoctorEmptyAllowlistAccountCon
  * one group carries its own `allowFrom`. Suppressing it alone would hide the groups that
  * really are dropped, so name those here instead.
  */
+function formatGroupIds(ids: string[]): string {
+  return ids.map((id) => `"${id}"`).join(", ");
+}
+
 function collectLineEmptyAllowlistExtraWarnings(
   params: ChannelDoctorEmptyAllowlistAccountContext,
 ): string[] {
   if (!isLineGroupAllowlistScope(params)) {
     return [];
   }
-  const { covered, uncovered } = readLineGroupCoverage(params);
-  if (!covered || uncovered.length === 0) {
-    return [];
+  const { covered, uncovered, overridden } = readLineGroupCoverage(params);
+  const warnings: string[] = [];
+
+  if (overridden.length > 0) {
+    const single = overridden.length === 1;
+    warnings.push(
+      `- ${params.prefix}.groups: ${single ? "group" : "groups"} ${formatGroupIds(overridden)} ${single ? "sets" : "set"} an empty allowFrom, which overrides ${params.prefix}.groups."*".allowFrom and ${params.prefix}.groupAllowFrom — messages there are silently dropped. Add sender IDs to ${single ? "that group's" : "each group's"} own allowFrom, or remove the key so it inherits.`,
+    );
   }
-  const names = uncovered.map((id) => `"${id}"`).join(", ");
-  const single = uncovered.length === 1;
-  return [
-    `- ${params.prefix}.groups: ${single ? "group" : "groups"} ${names} ${single ? "has" : "have"} no sender allowlist — messages there are silently dropped while your other groups keep working. Add sender IDs under ${params.prefix}.groups.<id>.allowFrom, or under ${params.prefix}.groups."*".allowFrom to cover every group, or to ${params.prefix}.groupAllowFrom.`,
-  ];
+
+  // When nothing is served the shared warning already states the whole channel is
+  // dropping group messages, so only the narrower cases are worth adding.
+  if (covered && uncovered.length > 0) {
+    const single = uncovered.length === 1;
+    warnings.push(
+      `- ${params.prefix}.groups: ${single ? "group" : "groups"} ${formatGroupIds(uncovered)} ${single ? "has" : "have"} no sender allowlist — messages there are silently dropped while your other groups keep working. Add sender IDs under ${params.prefix}.groups.<id>.allowFrom, or under ${params.prefix}.groups."*".allowFrom to cover every group, or to ${params.prefix}.groupAllowFrom.`,
+    );
+  }
+
+  return warnings;
 }
 
 export const lineDoctor: ChannelDoctorAdapter = {
