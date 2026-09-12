@@ -294,7 +294,7 @@ const enSettings = {
   },
   modelProviders: {
     title: "Configured providers",
-    configureModels: "Configure Models",
+    configureModels: "Model setup",
     login: {
       action: "Connect provider",
       title: "Connect a provider",
@@ -430,6 +430,7 @@ const enSettings = {
       utilityHelpAutomatic:
         "Automatic uses the primary model provider's recommended small model when available. Generated titles otherwise use the primary model.",
       automatic: "Automatic (provider default)",
+      automaticUnavailable: "No recommended small model",
       disabled: "Disabled",
       fallback: "Fallback Model",
       noFallback: "No fallback model",
@@ -985,6 +986,45 @@ const enSettings = {
       deleteConfirm: "Confirm before deleting sessions",
       deleteConfirmHint:
         "Applies to sidebar deletes. Stopping cloud workers and removing preserved worktrees always ask.",
+    },
+    sessionStorage: {
+      title: "Session storage",
+      description: "Transcript counts and disk usage across this Gateway's agent databases.",
+      transcripts: "Transcripts",
+      transcriptCounts: "{hot} uncompressed · {cold} archived",
+      database: "Databases",
+      walSize: "Write-ahead logs: {size}",
+      archives: "Archive files",
+      embeddedArchives: "Compressed archives in database",
+      embeddedArchivesHint: "Included in the database size above.",
+      refreshAfterError: "Refresh to check the current maintenance state.",
+      byAgent: "Details by agent",
+      agentCounts:
+        "{hot} uncompressed · {cold} archived · Database {database} · WAL {wal} · Archive files {archives} · Compressed in database {embedded}",
+      worker: "Background maintenance",
+      completed: "Last completed {time} · {count} transcripts archived",
+      notRun: "No completed maintenance run in this Gateway process.",
+      running: "Running",
+      runningProgress: "{archived} transcripts archived · {externalized} archives moved to files",
+      externalized: "{count} compressed archives moved from the database to files.",
+      idle: "Idle",
+      failed: "Needs attention",
+      adminRequired: "Administrator access is required to inspect session storage.",
+      disconnected: "Connect to the Gateway to inspect session storage.",
+      automatic: "Automatic archival",
+      enabled: "Archive older transcripts",
+      enabledHint:
+        "Workers move inactive transcripts into compressed JSONL files. Running sessions stay in the database; archived history is restored before use.",
+      afterDays: "Archive after (days)",
+      afterDaysHint:
+        "Days since the transcript last changed. Changes apply without a Gateway restart.",
+      backupHint:
+        "OpenClaw backups capture archived history with the database. Direct database copies also need the archive files. Missing or damaged archives require recovery from a backup.",
+      advanced: "Advanced session settings",
+      runNow: "Run now",
+      runHint: "Run one background batch using the saved, applied policy.",
+      runStarted: "Background batch started. You can leave this page while it runs.",
+      runCompleted: "Batch completed. {count} transcripts archived.",
     },
     sessionObserver: {
       title: "Session observer",

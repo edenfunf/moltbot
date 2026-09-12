@@ -20,6 +20,7 @@ import type { AnthropicOptions, AnthropicThinkingDisplay } from "../provider-opt
 import {
   bindsClaudeThinkingPrefix,
   requiresClaudeAdaptiveThinking,
+  resolveAnthropicThinkingEffort,
   supportsClaudeAdaptiveThinking,
   supportsClaudeNativeXhighEffort,
 } from "../providers/anthropic-model-contract.js";
@@ -404,7 +405,11 @@ export function buildAnthropicGenerationParams({
       if (supportsClaudeAdaptiveThinking(model)) {
         // Adaptive thinking: Claude decides when and how much to think.
         params.thinking = { type: "adaptive", display };
-        const effort = options?.effort ?? (mandatoryAdaptiveThinking ? "high" : undefined);
+        const effort =
+          options?.effort ??
+          (mandatoryAdaptiveThinking
+            ? resolveAnthropicThinkingEffort(model, undefined)
+            : undefined);
         if (effort) {
           params.output_config = { effort };
         }
