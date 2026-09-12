@@ -43,11 +43,11 @@ that supervise the Gateway as a child process, see
   the gateway closes or drops the frame. These events carry `surface`, byte
   sizes, limits, and a safe reason code, never message bodies, attachment
   contents, raw frame bytes, tokens, cookies, or secrets.
-- The Gateway offers `permessage-deflate`. Peers that negotiate it (browsers, `ws`
-  clients) receive frames of 4 KiB and up compressed; smaller frames such as
-  streaming deltas stay raw. Context takeover is disabled in both directions, so
-  each frame compresses independently. Peers that do not offer the extension are
-  unaffected. Payload limits apply to the inflated size.
+- The Gateway does not negotiate `permessage-deflate`. Browsers can compress
+  even tiny requests when the extension is enabled; serial decompression then
+  delays each request behind busy event-loop turns before handler scheduling.
+  Uncompressed frames preserve responsive request bursts at the cost of more
+  bandwidth for large histories and rosters. Payload limits are unchanged.
 
 Frame shapes:
 
@@ -97,6 +97,20 @@ HTTP scope failures mirror the `MISSING_SCOPE` object under `error.details` and
 use HTTP status `403`.
 
 Side-effecting methods require idempotency keys (see schema).
+
+## Connection keepalives
+
+Authenticated control connections use WebSocket ping/pong keepalives. These are
+separate from [scheduled agent heartbeats](/gateway/heartbeat); disabling agent
+heartbeats does not disable connection monitoring.
+
+A ping queued behind outgoing data is governed by transport inactivity, including
+partial write progress and incoming traffic. Once its write completes, the peer
+gets a full 25-second pong window; unrelated incoming messages do not extend that
+window. The periodic check closes expired connections and releases their owners.
+Transport inactivity is not an independent write-only deadline: a peer sending
+traffic can keep a queued write alive. Existing slow-consumer buffer limits still
+apply. Streaming transports retain their stream-owner lifecycle policy.
 
 ## Gateway-controlled WebRTC Talk
 

@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import type { SessionPlacementMachine } from "../../../packages/gateway-protocol/src/index.js";
+import type {
+  SessionPlacementMachine,
+  SessionsReclaimParams,
+} from "../../../packages/gateway-protocol/src/index.js";
 import type { DevicePlacementRequirement } from "../../agents/harness/types.js";
 import type {
   WorkerDesktopApp,
@@ -59,6 +62,8 @@ export type WorkerDesktopObserveResult = {
   wsPath: string;
   expiresAtMs: number;
   control: boolean;
+  /** Provider permission to request resizing, not negotiated RFB support. */
+  canResize?: boolean;
   vncPassword?: string;
 };
 
@@ -151,9 +156,13 @@ export type WorkerPlacementReclaimRequest = {
   sessionId: string;
   sessionKey: string;
   agentId: string;
+  recoverToGateway?: SessionsReclaimParams["recoverToGateway"];
 };
 
-export type WorkerPlacementMoveRequest = WorkerPlacementReclaimRequest & {
+export type WorkerPlacementMoveRequest = Pick<
+  WorkerPlacementReclaimRequest,
+  "sessionId" | "sessionKey" | "agentId"
+> & {
   source: WorkerPlacementMoveSource;
   target: WorkerPlacementMoveTarget;
   abandonSource?: true;
@@ -161,6 +170,15 @@ export type WorkerPlacementMoveRequest = WorkerPlacementReclaimRequest & {
 
 /** Closure-bound request authority; in-process only and never part of durable placement intent. */
 export type WorkerPlacementAuthorization = () => void;
+
+export type WorkerPlacementCancellationTarget = Readonly<
+  Pick<WorkerSessionPlacementRecord, "state" | "generation" | "environmentId" | "activeOwnerEpoch">
+>;
+
+/** Exact source eligibility may follow only transitions published by captured predecessors. */
+export type WorkerPlacementReclaimSourceCheck = (
+  predecessor?: WorkerPlacementCancellationTarget,
+) => void;
 
 // Leaf dispatch contract: GatewayRequestContext must not import the dispatch
 // runtime (it reaches agents/plugins and closes an import cycle through core).
@@ -178,7 +196,7 @@ export type WorkerPlacementDispatchContract = {
   reclaim?(
     request: WorkerPlacementReclaimRequest,
     authorize?: WorkerPlacementAuthorization,
-    beforeDrain?: WorkerPlacementAuthorization,
+    beforeDrain?: WorkerPlacementReclaimSourceCheck,
   ): Promise<Extract<WorkerSessionPlacementRecord, { state: "local" | "reclaimed" }>>;
   forceDestroyEnvironment?(
     environmentId: string,

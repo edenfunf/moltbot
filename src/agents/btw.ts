@@ -33,6 +33,7 @@ import { resolveAgentWorkspaceDir } from "./agent-scope.js";
 import { resolveExternalCliAuthOverlayScopeFromSelection } from "./auth-profiles/external-cli-auth-selection.js";
 import { resolveSessionAuthSelection } from "./auth-profiles/session-override.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
+import { reconcileAuthProfileQuotaBlocks } from "./auth-profiles/usage.js";
 import { readBtwTranscriptMessages, resolveBtwSessionTranscriptPath } from "./btw-transcript.js";
 import { executePreparedCliRun } from "./cli-runner/execute.runtime.js";
 import { prepareCliRunContext } from "./cli-runner/prepare.runtime.js";
@@ -43,12 +44,12 @@ import { resolveEmbeddedAgentStream } from "./embedded-agent-runner/stream-resol
 import { createAgentHarnessHostCapabilities } from "./harness/host-capability.js";
 import { resolveAgentHarnessOwnerPluginId } from "./harness/registry.js";
 import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
+import type { AgentHarnessPreparedModelProvider } from "./harness/selection-decision.js";
 import {
   resolveAvailableAgentHarnessPolicy,
   resolvePluginHarnessPolicyToolsAllow,
   selectAgentHarness,
   selectAgentHarnessForPreparedModelProviders,
-  type AgentHarnessPreparedModelProvider,
 } from "./harness/selection.js";
 import {
   resolveAgentHarnessPreparedAuthSupport,
@@ -529,6 +530,7 @@ async function resolveRuntimeModel(params: {
     cfg,
     provider: runtimeProvider,
     modelId: runtimeModelId,
+    agentId: params.agentId,
     harnessRuntime: params.harnessId,
     agentDir,
     sessionEntry: params.sessionEntry,
@@ -553,12 +555,14 @@ async function resolveRuntimeModel(params: {
     authProfileStoreSelection.ignoreAutoPreferredProfile && authProfileIdSource !== "user"
       ? undefined
       : authProfileId;
-  const runtimeAuthPreparation = prepareAgentRuntimeAuth({
+  const authParams = {
     provider: runtimeProvider,
     modelId: runtimeModelId,
     modelApi: model.api,
     modelBaseUrl: model.baseUrl,
     config: cfg,
+    agentId: params.agentId,
+    agentDir,
     env: process.env,
     workspaceDir,
     authProfileStore: authProfileStoreSelection.store,
@@ -567,7 +571,9 @@ async function resolveRuntimeModel(params: {
     harnessId: params.harnessId,
     harnessRuntime: params.harnessId,
     harnessAuthBootstrap: params.harnessAuthBootstrap,
-  });
+  } satisfies Parameters<typeof prepareAgentRuntimeAuth>[0];
+  await reconcileAuthProfileQuotaBlocks(authParams);
+  const runtimeAuthPreparation = prepareAgentRuntimeAuth(authParams);
   model = await materializeBtwRuntimeModel({
     provider: runtimeProvider,
     modelId: runtimeModelId,
@@ -719,7 +725,7 @@ async function withBtwPreparedRuntime(
 ): Promise<ReplyPayload | undefined> {
   return await runWithAsyncWorkResources(async (onAcquired, captureWorkContext) => {
     const lease = await acquirePublishedPreparedModelRuntime(input);
-    onAcquired(lease);
+    onAcquired({ release: () => lease[Symbol.asyncDispose]() });
     return withPluginRuntimeGenerationScope(lease.snapshot, () => {
       captureWorkContext();
       return run(lease.snapshot);
@@ -945,27 +951,32 @@ export async function runBtwSideQuestion(
               authProfileId: runtime.authProfileId,
               authProfileIdSource: runtime.authProfileIdSource,
             });
-      const runtimeAuthPreparation = authProfileStoreSelection
-        ? prepareAgentRuntimeAuth({
-            provider: runtime.model.provider,
-            modelId: runtime.model.id,
-            modelApi: runtime.model.api,
-            modelBaseUrl: runtime.model.baseUrl,
-            config: params.cfg,
-            env: process.env,
-            workspaceDir,
-            authProfileStore: authProfileStoreSelection.store,
-            sessionAuthProfileId:
-              authProfileStoreSelection.ignoreAutoPreferredProfile &&
-              runtime.authProfileIdSource !== "user"
-                ? undefined
-                : runtime.authProfileId,
-            sessionAuthProfileSource: runtime.authProfileIdSource,
-            harnessId: selectedHarness.id,
-            harnessRuntime: selectedHarness.id,
-            harnessAuthBootstrap: selectedHarness.authBootstrap,
-          })
-        : runtime.runtimeAuthPreparation;
+      let runtimeAuthPreparation = runtime.runtimeAuthPreparation;
+      if (authProfileStoreSelection) {
+        const authParams = {
+          provider: runtime.model.provider,
+          modelId: runtime.model.id,
+          modelApi: runtime.model.api,
+          modelBaseUrl: runtime.model.baseUrl,
+          config: params.cfg,
+          agentId: sessionAgentId,
+          agentDir: params.agentDir,
+          env: process.env,
+          workspaceDir,
+          authProfileStore: authProfileStoreSelection.store,
+          sessionAuthProfileId:
+            authProfileStoreSelection.ignoreAutoPreferredProfile &&
+            runtime.authProfileIdSource !== "user"
+              ? undefined
+              : runtime.authProfileId,
+          sessionAuthProfileSource: runtime.authProfileIdSource,
+          harnessId: selectedHarness.id,
+          harnessRuntime: selectedHarness.id,
+          harnessAuthBootstrap: selectedHarness.authBootstrap,
+        } satisfies Parameters<typeof prepareAgentRuntimeAuth>[0];
+        await reconcileAuthProfileQuotaBlocks(authParams);
+        runtimeAuthPreparation = prepareAgentRuntimeAuth(authParams);
+      }
       const selectedAuthProfileStore = authProfileStoreSelection?.store ?? runtime.authProfileStore;
       const implicitHarnessAuthPlan =
         selectedHarness.authBootstrap === "harness" &&

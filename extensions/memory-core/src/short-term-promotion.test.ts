@@ -1557,6 +1557,7 @@ describe("short-term promotion", () => {
 
     expect(applied.applied).toBe(0);
     expect(applied.rejectedCandidates[0]?.reason).toContain("signal threshold");
+    expect(applied.rejectedCandidates[0]?.category).toBe("signal threshold");
   });
 
   it("does not let recall days satisfy the apply-time query gate", async (workspaceDir) => {
@@ -1596,6 +1597,7 @@ describe("short-term promotion", () => {
 
     expect(applied.applied).toBe(0);
     expect(applied.rejectedCandidates[0]?.reason).toBe("query threshold (0 < 3)");
+    expect(applied.rejectedCandidates[0]?.category).toBe("query threshold");
   });
 
   it("does not rank contaminated dreaming snippets from an existing short-term store", async (workspaceDir) => {
@@ -1757,6 +1759,7 @@ describe("short-term promotion", () => {
 
     expect(applied.applied).toBe(0);
     expect(applied.rejectedCandidates[0]?.reason).toContain("age threshold");
+    expect(applied.rejectedCandidates[0]?.category).toBe("age threshold");
     await expectEnoent(fs.readFile(path.join(workspaceDir, "MEMORY.md"), "utf-8"));
   });
 
@@ -1800,6 +1803,7 @@ describe("short-term promotion", () => {
 
     expect(applied.applied).toBe(0);
     expect(applied.rejectedCandidates[0]?.reason).toBe("contamination filter");
+    expect(applied.rejectedCandidates[0]?.category).toBe("contamination");
     await expectEnoent(fs.readFile(path.join(workspaceDir, "MEMORY.md"), "utf-8"));
   });
 
@@ -1861,6 +1865,7 @@ describe("short-term promotion", () => {
     const applied = await applyAllCandidates(workspaceDir, ranked);
     expect(applied.applied).toBe(0);
     expect(applied.rejectedCandidates[0]?.reason).toBe("origin filter (untrusted)");
+    expect(applied.rejectedCandidates[0]?.category).toBe("origin");
     await expectEnoent(fs.readFile(path.join(workspaceDir, "MEMORY.md"), "utf-8"));
   });
 
@@ -3174,6 +3179,8 @@ describe("short-term promotion", () => {
           expect((await fs.stat(sharedDir)).mode & 0o7777).toBe(0o755);
 
           const secondSnippet = "Keep writing through a shared read-only directory.";
+          const lexicalCollisionPath = path.join(workspaceDir, "memory-alias.md");
+          await fs.writeFile(lexicalCollisionPath, "Do not overwrite this lexical collision.");
           await writeDailyMemoryNote(workspaceDir, "2026-04-30", [secondSnippet]);
           await recordMemoryRecalls(
             workspaceAlias,
@@ -3191,6 +3198,9 @@ describe("short-term promotion", () => {
             });
             expect(applied.applied).toBe(1);
             expect(await fs.readFile(targetPath, "utf-8")).toContain(secondSnippet);
+            expect(await fs.readFile(lexicalCollisionPath, "utf-8")).toBe(
+              "Do not overwrite this lexical collision.",
+            );
             expect((await fs.stat(sharedDir)).mode & 0o7777).toBe(0o555);
           } finally {
             await fs.chmod(sharedDir, 0o755);

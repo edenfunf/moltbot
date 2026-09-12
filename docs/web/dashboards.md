@@ -34,9 +34,11 @@ stale-data warning. Choose **Retry** to load the list again.
 
 The dashboard and its server-side thread preference follow you when you connect
 to the same Gateway from another device. The active dashboard tab and task
-layout remain per-device UI state. Ordinary task revisits restore the browser's
-saved arrangement for that task; opening a gallery card explicitly focuses the
-dashboard.
+layout remain per-device UI state. The browser retains layout and tab preferences
+for up to 500 sessions, keeping the most recently changed entries when it reaches
+that limit. Ordinary task revisits restore the browser's saved arrangement for
+that task; opening a gallery card explicitly focuses the dashboard. Increasing
+the limit does not recover preferences already evicted by an older version.
 
 The browser keeps the three most recently visited tasks in each pane loaded,
 including their dashboard widgets, while you switch tasks or visit Settings.
@@ -134,7 +136,9 @@ never needs the agent.
 - **Dashboard view.** The board can occupy the main area or a resizable side
   panel. With Dashboard active in the side panel, choose **Swap** in the task
   toolbar, then **Focus** for a dashboard-only view. **Restore split** brings
-  the side panel back.
+  the side panel back. A tab with one full-width widget fills the focused
+  dashboard edge to edge, without a card border or surrounding padding.
+  Restoring the split or adding another widget brings back the normal spacing.
 - **Agent parity.** The agent's `dashboard` tool creates or updates trusted
   plugin widgets, moves, resizes, and removes widgets, manages tabs, switches
   the visible tab, and requests a split or expanded dashboard with

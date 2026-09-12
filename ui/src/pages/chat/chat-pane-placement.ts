@@ -111,9 +111,10 @@ export function resolvePlacementComposer(params: {
     blocksSend: state.kind !== "ready" && !canSendDuringWorkspaceSync && !canSendDuringSetup,
     busyMessage,
     diskSpace: placement?.state === "active" ? placement.diskSpace : undefined,
-    runError: failureReason
-      ? { summary: t("chat.cloudWorkerFailed", { error: failureReason }) }
-      : null,
+    runError:
+      failureReason && !controls.restarting
+        ? { summary: t("chat.cloudWorkerFailed", { error: failureReason }) }
+        : null,
     failedUnavailableMessage: t("sessionsView.failedSessionUnavailable"),
   };
   if (params.startupPending || state.kind !== "failed" || !state.recoveryAction || !params.row) {
@@ -251,7 +252,7 @@ export function resolveChatPanePlacement(params: {
       ? t("sessionsView.actionUnavailable")
       : recoveryAction !== "restart"
         ? t("sessionsView.actionUnavailable")
-        : restartAccess.allowed
+        : restartAccess.allowed || reclaimAccess.allowed
           ? undefined
           : restartAccess.reason;
   const reclaimDisabledReason = reclaiming
@@ -262,7 +263,7 @@ export function resolveChatPanePlacement(params: {
         ? t("sessionsView.offlineDeviceStopUnavailable")
         : action?.blocksActiveRun && params.row?.hasActiveRun === true
           ? t("sessionsView.activeRun")
-          : action?.method !== "sessions.reclaim"
+          : !action
             ? t("sessionsView.actionUnavailable")
             : reclaimAccess.allowed
               ? undefined

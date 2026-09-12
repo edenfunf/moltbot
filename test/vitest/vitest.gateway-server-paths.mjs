@@ -1,3 +1,6 @@
+// Plugin integration tests retain Gateway runtime setup outside core source.
+export const gatewayPluginTestFiles = ["test/plugins/codex-model-catalog.gateway.test.ts"];
+
 // Canonical file ownership for the non-isolated Gateway server Vitest project.
 export const gatewayServerBackedHttpTestFiles = [
   "src/gateway/embeddings-http.test.ts",
@@ -22,6 +25,7 @@ export const gatewayMethodsIsolatedTestFiles = [
 // Gateway server tests that replace a module the Gateway reaches only through
 // re-exports. These need both a fresh graph and the plain Vitest runner.
 export const gatewayServerIsolatedTestFiles = [
+  "src/gateway/server-chat.retired-projection.test.ts",
   "src/gateway/server.sessions.compaction-read-errors.test.ts",
 ];
 

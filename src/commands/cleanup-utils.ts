@@ -444,7 +444,9 @@ export async function removeStateAndLinkedPaths(
 
   const lock = await acquireStateCleanupOwnership(cleanup);
   let lockHeld = true;
-  let stateCoordinator: ReturnType<typeof acquireOpenClawStateDatabaseFileExclusion> | undefined;
+  let stateCoordinator:
+    | Awaited<ReturnType<typeof acquireOpenClawStateDatabaseFileExclusion>>
+    | undefined;
   const releaseLock = async () => {
     if (!lockHeld) {
       return;
@@ -470,7 +472,7 @@ export async function removeStateAndLinkedPaths(
       ...process.env,
       OPENCLAW_STATE_DIR: stateDir,
     });
-    stateCoordinator = acquireOpenClawStateDatabaseFileExclusion(databasePath);
+    stateCoordinator = await acquireOpenClawStateDatabaseFileExclusion(databasePath);
     const preservePaths = requestedPreservePaths
       .map((target) =>
         isPathWithin(target, requestedStateDir)
@@ -595,7 +597,8 @@ export async function listAgentSessionDirs(stateDir: string): Promise<string[]> 
     const entries = await fs.readdir(root, { withFileTypes: true });
     return entries
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(root, entry.name, "sessions"));
+      .map((entry) => path.join(root, entry.name, "sessions"))
+      .toSorted();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return [];

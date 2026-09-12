@@ -5,11 +5,12 @@ import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { isGatewayServiceEnv, resolveGatewayProfileSuffix } from "../../daemon/constants.js";
 import { resolveLaunchAgentLabel } from "../../daemon/launchd-label.js";
 import { resolveTaskName } from "../../daemon/schtasks-layout.js";
-import {
-  isScheduledTaskDefinitelyNotRunning,
-  readWindowsStartupFallbackRuntimeForUpdate,
-} from "../../daemon/schtasks-runtime.js";
 import { ScheduledTaskAutoStartRecoveryError } from "../../daemon/schtasks-update-recovery.js";
+import {
+  formatServiceInspectionReason,
+  ServiceInspectionError,
+  type ServiceInspectionReason,
+} from "../../daemon/service-inspection-error.js";
 import { withGatewayServiceOperationLock } from "../../daemon/service-operation-lock.js";
 import {
   resolveManagedGatewayServiceCommand,
@@ -38,11 +39,16 @@ import {
   type ManagedGatewayUpdateVerdict,
 } from "./update-command-service-plan.js";
 import {
+  isManagedGatewayServiceOffline,
+  observedSystemdManagerUid,
+} from "./update-command-service-publication.js";
+import {
   createWindowsTaskAutoStartRecovery,
   UpdateCommandAbort,
   type WindowsTaskAutoStartRecovery,
 } from "./update-command-windows-task.js";
 
+export { withGatewayRuntimeArtifactPublication } from "./update-command-service-publication.js";
 export type { PreManagedServiceStop } from "./update-command-service-context-types.js";
 export { UpdateCommandAbort } from "./update-command-windows-task.js";
 
@@ -55,6 +61,9 @@ const JSON_MODE_SERVICE_STDOUT = new Writable({
 });
 
 function serviceInspectionBlockMessage(state: GatewayServiceState): string {
+  if (state.inspectionReason) {
+    return formatServiceInspectionReason(state.inspectionReason);
+  }
   const timeoutMs = state.runtime?.inspectionFailure?.timeoutMs;
   return timeoutMs === undefined
     ? GATEWAY_SERVICE_INSPECTION_BLOCK_MESSAGE
@@ -74,13 +83,6 @@ export function resolvePreparedGatewayUpdatePolicy(
   };
 }
 
-function observedSystemdManagerUid(state: GatewayServiceState): number | undefined {
-  const uid = state.runtime?.systemd?.managerUid;
-  return typeof uid === "number" && Number.isInteger(uid) && uid >= 0 && uid < 0xffffffff
-    ? uid
-    : undefined;
-}
-
 async function inspectManagedGatewayServiceBeforeUpdate(params: {
   root: string;
   state: GatewayServiceState;
@@ -90,6 +92,7 @@ async function inspectManagedGatewayServiceBeforeUpdate(params: {
   const unavailable = (): ManagedGatewayUpdateVerdict => ({
     kind: "unavailable",
     message: serviceInspectionBlockMessage(state),
+    ...(state.inspectionReason ? { inspectionReason: state.inspectionReason } : {}),
   });
   if (!command) {
     return !state.installed &&
@@ -214,6 +217,7 @@ export async function revalidateManagedGatewayServiceAfterUpdate(params: {
         ? inspection.message
         : "Gateway service ownership or manager identity changed; inspect it before restarting manually.",
       undefined,
+      inspection.kind === "unavailable" ? inspection.inspectionReason : undefined,
     );
   }
   return inspection.kind === "owned" && verdict?.kind === "owned" && !verdict.refreshDefinition
@@ -392,10 +396,15 @@ async function stopManagedServiceBeforeMutableUpdate(
   const markInspectionUnavailable = (
     base: PreManagedServiceStop,
     message: string,
+    inspectionReason?: ServiceInspectionReason,
   ): PreManagedServiceStop => ({
     ...base,
     serviceMutationAllowed: false,
-    serviceUpdateVerdict: { kind: "unavailable", message },
+    serviceUpdateVerdict: {
+      kind: "unavailable",
+      message,
+      ...(inspectionReason ? { inspectionReason } : {}),
+    },
     blockMessage: message,
   });
   const serviceMutationSkipMessage = resolveGatewayServiceManagementBlockMessageForUpdate(
@@ -432,7 +441,13 @@ async function stopManagedServiceBeforeMutableUpdate(
     if (err instanceof GatewayServiceUpdateOwnershipError) {
       return { ...uninspected, serviceMutationAllowed: false, blockMessage: err.message };
     }
-    return markInspectionUnavailable(uninspected, GATEWAY_SERVICE_INSPECTION_BLOCK_MESSAGE);
+    return markInspectionUnavailable(
+      uninspected,
+      err instanceof ServiceInspectionError
+        ? err.message
+        : GATEWAY_SERVICE_INSPECTION_BLOCK_MESSAGE,
+      err instanceof ServiceInspectionError ? err.reason : undefined,
+    );
   }
   assertCurrent();
   const serviceUpdateVerdict = await revalidateManagedGatewayServiceAfterUpdate({
@@ -451,21 +466,7 @@ async function stopManagedServiceBeforeMutableUpdate(
     inspected: true,
     runtimeInspected: ["running", "stopped"].includes(serviceState.runtime?.status ?? ""),
     running: serviceState.running,
-    // Enabled systemd units may be manually stopped; loaded LaunchAgents can
-    // respawn. Windows needs the live numeric task state, not its last result.
-    offline:
-      serviceState.runtime?.status === "stopped" &&
-      (process.platform === "darwin"
-        ? serviceState.loadState.status === "not-loaded" ||
-          (serviceState.loadState.status === "loaded" &&
-            (await service
-              .isEnabled?.({ env: serviceState.env, timeoutMs: params.timeoutMs })
-              .catch(() => undefined)) === false)
-        : process.platform === "win32"
-          ? isScheduledTaskDefinitelyNotRunning(resolveTaskName(serviceState.env)) ||
-            (await readWindowsStartupFallbackRuntimeForUpdate(serviceState.env).catch(() => null))
-              ?.status === "stopped"
-          : process.platform === "linux"),
+    offline: await isManagedGatewayServiceOffline(service, serviceState, params.timeoutMs),
     serviceEnv: serviceState.env,
     serviceDefinitionEnv:
       resolveManagedGatewayServiceCommand(serviceState.command)?.environment ?? {},
@@ -477,7 +478,11 @@ async function stopManagedServiceBeforeMutableUpdate(
   };
   assertCurrent();
   if (serviceUpdateVerdict.kind === "unavailable") {
-    return markInspectionUnavailable(inspected, serviceUpdateVerdict.message);
+    return markInspectionUnavailable(
+      inspected,
+      serviceUpdateVerdict.message,
+      serviceUpdateVerdict.inspectionReason,
+    );
   }
   if (serviceUpdateVerdict.kind === "foreign") {
     return {

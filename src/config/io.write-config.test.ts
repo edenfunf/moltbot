@@ -12,10 +12,12 @@ import {
 import { startGatewayConfigReloader } from "../gateway/config-reload.js";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import * as tmpDirOwner from "../infra/tmp-openclaw-dir.js";
+import { captureUpdateDoctorConfigWrites } from "../infra/update-doctor-result.js";
 import {
   captureManagedUpdateLeaseDatabaseIdentity,
   createManagedHandoffLeaseDatabase,
 } from "../infra/update-managed-service-handoff-database.js";
+import { UpdateRequesterRevokedError } from "../infra/update-requester-authority.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
@@ -41,6 +43,7 @@ import {
   writeConfigFile,
   type ConfigWriteOptions,
 } from "./io.js";
+import { hashConfigRaw } from "./io.read-helpers.js";
 import { replaceConfigFile, transformConfigFile, transformConfigFileWithRetry } from "./mutate.js";
 import { ConfigMutationConflictError } from "./mutation-conflict.js";
 import { createProviderConfigFixture } from "./runtime-snapshot.test-fixtures.js";
@@ -235,6 +238,120 @@ describe("config io write", () => {
     path.join(home, ".openclaw", fileName);
 
   const formatConfig = (config: unknown) => `${JSON.stringify(config, null, 2)}\n`;
+
+  it.each(["changed-input", "revoked-requester"] as const)(
+    "refuses Doctor promotion at the native writer (%s)",
+    async (failure) => {
+      await withSuiteHome(async (home) => {
+        const configPath = configPathForHome(home);
+        const original: OpenClawConfig = {
+          gateway: { mode: "local" },
+          tools: { profile: "coding" },
+        };
+        const raw = formatConfig(original);
+        const retained =
+          failure === "changed-input"
+            ? formatConfig({ ...original, tools: { profile: "minimal" } })
+            : raw;
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+        await fs.writeFile(configPath, retained);
+        const io = createConfigIO({ env: { HOME: home }, logger: silentLogger });
+        let revoked = false;
+        await captureUpdateDoctorConfigWrites(
+          configPath,
+          async (capture) => {
+            const writing = io.writeConfigFile(
+              { ...original, tools: { profile: "full" } },
+              {
+                auditOrigin: "doctor",
+                preCommitRuntimePreflight: async () => {
+                  revoked = true;
+                },
+              },
+            );
+            if (failure === "changed-input") {
+              await expect(writing).rejects.toThrow("Config changed after update validation");
+            } else {
+              await expect(writing).rejects.toMatchObject({
+                cause: expect.objectContaining({ code: "requester-revoked" }),
+              });
+            }
+            await expect(fs.readFile(configPath, "utf8")).resolves.toBe(retained);
+            expect(capture.configChanges).toEqual([]);
+          },
+          {
+            inputHash: hashConfigRaw(raw),
+            assertCurrent: () => {
+              if (revoked) {
+                throw new UpdateRequesterRevokedError();
+              }
+            },
+          },
+        );
+      });
+    },
+  );
+
+  it("captures committed Doctor keys including writer metadata without config values", async () => {
+    await withSuiteHome(async (home) => {
+      const configPath = configPathForHome(home);
+      const original: OpenClawConfig = {
+        meta: { lastTouchedVersion: "2026.9.3", migrations: { modelPolicyAllowlist: true } },
+        gateway: { mode: "local" },
+        tools: { profile: "coding" },
+      };
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(configPath, formatConfig(original));
+      const io = createConfigIO({ env: { HOME: home }, logger: silentLogger });
+      await captureUpdateDoctorConfigWrites(
+        configPath,
+        async (capture) => {
+          await io.writeConfigFile(
+            { ...original, tools: { profile: "full" } },
+            { lastTouchedVersionOverride: "2026.9.4", auditOrigin: "doctor" },
+          );
+          expect(capture).toMatchObject({
+            configChanges: [
+              { kind: "key", key: "meta" },
+              { kind: "key", key: "tools" },
+            ],
+          });
+          expect(capture.hash).not.toBe("unchanged");
+          expect(capture.inputHash).toMatch(/^[0-9a-f]{64}$/u);
+          const inputHash = capture.inputHash;
+          const next = {
+            ...original,
+            tools: { profile: "full" as const },
+            wizard: { lastRunCommand: "doctor" },
+          };
+          await io.writeConfigFile(next, {
+            lastTouchedVersionOverride: "2026.9.4",
+            auditOrigin: "doctor",
+          });
+          expect(capture.configChanges).toEqual([
+            { kind: "key", key: "meta" },
+            { kind: "key", key: "tools" },
+            { kind: "key", key: "wizard" },
+          ]);
+          expect(capture.inputHash).toBe(inputHash);
+          const committed = structuredClone(capture);
+          await expect(
+            io.writeConfigFile(
+              { ...next, gateway: { mode: "remote" } },
+              {
+                beforeCommit: async () => {
+                  throw new Error("Write owner changed.");
+                },
+              },
+            ),
+          ).rejects.toThrow("Write owner changed.");
+          expect(capture).toMatchObject(committed);
+          expect(capture.configWriteRefusal).toMatchObject({ message: "Write owner changed." });
+        },
+        { inputHash: hashConfigRaw(formatConfig(original)), assertCurrent: () => {} },
+      );
+    });
+  });
 
   const createExistingConfigSnapshot = (
     configPath: string,
@@ -1666,9 +1783,15 @@ describe("config io write", () => {
         { baseSnapshot: snapshot, assertConfigPathForWrite },
       );
       await expect(pending).rejects.toThrow("config path changed since last load");
-      await expect(pending).rejects.toBeInstanceOf(ConfigMutationConflictError);
-      await expect(pending).rejects.toHaveProperty("retryable", false);
-      await expect(pending).rejects.toBe(originalConflict);
+      const failure = await pending.catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "ConfigWritePostCommitError",
+        configPath,
+        rollbackStatus: "restored",
+        cause: expect.any(ConfigMutationConflictError),
+      });
+      expect(failure).toHaveProperty("cause.retryable", false);
+      expect(requireRecord(failure, "post-commit config write error").cause).toBe(originalConflict);
 
       await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(originalRaw);
       expect(listConfigAuditRecordsForTests({ env: io.env, homedir: () => home })).toEqual(
@@ -3733,7 +3856,52 @@ describe("config io write", () => {
     });
   }
 
-  for (const publication of [
+  itWithHome(
+    "rejects changed includes before copy fallback creates a missing root",
+    async (home) => {
+      const configPath = configPathForHome(home);
+      const includePath = path.join(path.dirname(configPath), "included.json");
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await writeConfigJson(includePath, { logging: { level: "info" } });
+      let renameDenied = false;
+      let includeChanged = false;
+      const io = createFastConfigIO(home, {
+        configPath,
+        fs: {
+          ...fsNode,
+          renameSync: (source, destination) => {
+            if (destination !== configPath) {
+              return fsNode.renameSync(source, destination);
+            }
+            renameDenied = true;
+            throw Object.assign(new Error("rename denied"), { code: "EPERM" });
+          },
+          readSync: new Proxy(fsNode.readSync, {
+            apply(target, thisArg, args) {
+              if (renameDenied && !includeChanged) {
+                fsNode.writeFileSync(includePath, JSON.stringify({ logging: { level: "debug" } }));
+                includeChanged = true;
+              }
+              return Reflect.apply(target, thisArg, args);
+            },
+          }),
+        },
+      });
+      const nextConfig = {
+        $include: "included.json",
+        gateway: { mode: "local" as const },
+      };
+
+      await expect(io.writeConfigFile(nextConfig)).rejects.toThrow("included config");
+
+      expect(renameDenied).toBe(true);
+      expect(includeChanged).toBe(true);
+      await expect(fs.stat(configPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readPersistedConfig(includePath)).toEqual({ logging: { level: "debug" } });
+    },
+  );
+
+  const copyFallbackPublications = [
     "ordinary",
     "prepared-direct",
     "prepared-runtime",
@@ -3741,24 +3909,31 @@ describe("config io write", () => {
     "guarded",
     "executor-explicit",
     "executor-ambient",
-  ] as const) {
-    const guarded = publication === "guarded" || publication.startsWith("executor-");
+  ] as const;
+  for (const { publication, layout } of copyFallbackPublications.flatMap((publicationKind) =>
+    (["plain", "include"] as const).map((configLayout) => ({
+      publication: publicationKind,
+      layout: configLayout,
+    })),
+  )) {
     itWithHome(
-      `${guarded ? "rejects" : "preserves"} copy fallback for ${publication} publication`,
+      `preserves copy fallback for ${publication} publication with ${layout} config`,
       async (home) => {
-        const { configPath, raw } = await writeConfigFixture(home, {
+        const { configPath } = await writeConfigFixture(home, {
           gateway: { mode: "local", port: 18789 },
+          ...(layout === "include" ? { logging: { $include: "logging.json" } } : {}),
         });
+        const includePath = path.join(path.dirname(configPath), "logging.json");
+        if (layout === "include") {
+          await writeConfigJson(includePath, { level: "info" });
+        }
         const denied = Object.assign(new Error("rename denied"), { code: "EPERM" });
         const io = createFastConfigIO(home, {
           configPath,
           fs: {
             ...fsNode,
-            promises: {
-              ...fsNode.promises,
-              rename: async () => {
-                throw denied;
-              },
+            renameSync: () => {
+              throw denied;
             },
           },
         });
@@ -3776,7 +3951,10 @@ describe("config io write", () => {
             skipPluginValidation: true,
             skipRuntimeSnapshotRefresh: true,
           };
-          const nextConfig = { gateway: { mode: "local" as const, port: 19001 } };
+          const nextConfig = {
+            gateway: { mode: "local" as const, port: 19001 },
+            ...(layout === "include" ? { logging: { level: "info" as const } } : {}),
+          };
           const write =
             publication === "prepared-runtime"
               ? writeConfigFile(nextConfig, options)
@@ -3787,28 +3965,26 @@ describe("config io write", () => {
                     writeOptions: options,
                   })
                 : io.writeConfigFile(nextConfig, options);
-          if (guarded) {
-            await expect(write).rejects.toBe(denied);
-            expect(await fs.readFile(configPath, "utf8")).toBe(raw);
-          } else {
-            await write;
-            expect(await readPersistedConfig(configPath)).toMatchObject({
-              gateway: { port: 19001 },
-            });
-            expect(
-              listConfigAuditRecordsForTests({ env: io.env, homedir: () => home }),
-            ).toContainEqual(
-              expect.objectContaining({
-                event: "config.write",
-                configPath,
-                result: "copy-fallback",
-              }),
-            );
-          }
+          await write;
+          expect(await readPersistedConfig(configPath)).toMatchObject({
+            gateway: { port: 19001 },
+            ...(layout === "include" ? { logging: { $include: "logging.json" } } : {}),
+          });
+          expect(
+            listConfigAuditRecordsForTests({ env: io.env, homedir: () => home }),
+          ).toContainEqual(
+            expect.objectContaining({
+              event: "config.write",
+              configPath,
+              result: "copy-fallback",
+            }),
+          );
         };
         const rename =
           publication === "prepared-runtime" || publication === "prepared-mutation"
-            ? vi.spyOn(fsNode.promises, "rename").mockRejectedValue(denied)
+            ? vi.spyOn(fsNode, "renameSync").mockImplementation(() => {
+                throw denied;
+              })
             : undefined;
         try {
           await withEnvAsync(
@@ -3857,6 +4033,9 @@ describe("config io write", () => {
         } else {
           expect(beforeCommit).not.toHaveBeenCalled();
         }
+        if (layout === "include") {
+          expect(await readPersistedConfig(includePath)).toEqual({ level: "info" });
+        }
       },
     );
   }
@@ -3887,13 +4066,10 @@ describe("config io write", () => {
             configPath,
             fs: {
               ...fsNode,
-              promises: {
-                ...fsNode.promises,
-                rename: async () => {
-                  releaseUpdateCommandPreflightForHandoff(fence);
-                  revoked = true;
-                  throw primaryError;
-                },
+              renameSync: () => {
+                releaseUpdateCommandPreflightForHandoff(fence);
+                revoked = true;
+                throw primaryError;
               },
             },
           });
@@ -3946,7 +4122,7 @@ describe("config io write", () => {
       const configPath = configPathForHome(home);
       const envKey = "OPENCLAW_TEST_RUNTIME_ROLLBACK_ENV";
       const initialConfig = { gateway: { mode: "local", port: 18789 } } satisfies OpenClawConfig;
-      const initialRaw = formatConfig(initialConfig);
+      const initialRaw = formatConfig(initialConfig).replace("{", "{ // retained rollback comment");
 
       await fs.mkdir(path.dirname(configPath), { recursive: true });
       await fs.writeFile(configPath, initialRaw, "utf-8");
@@ -3965,12 +4141,14 @@ describe("config io write", () => {
               },
             });
 
-            await expect(
-              writeConfigFile({
-                gateway: { mode: "local", port: 19001 },
-                env: { vars: { [envKey]: "written-env-value" } },
-              }),
-            ).rejects.toThrow(/runtime snapshot refresh failed: synthetic refresh failure/);
+            await captureUpdateDoctorConfigWrites(configPath, async () => {
+              await expect(
+                writeConfigFile({
+                  gateway: { mode: "local", port: 19001 },
+                  env: { vars: { [envKey]: "written-env-value" } },
+                }),
+              ).rejects.toThrow(/runtime snapshot refresh failed: synthetic refresh failure/);
+            });
 
             await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(initialRaw);
             expect(process.env[envKey]).toBeUndefined();
@@ -4085,20 +4263,18 @@ describe("config io write", () => {
         OPENCLAW_TEST_FAST: "1",
       } as NodeJS.ProcessEnv;
       const readFile = fsNode.promises.readFile.bind(fsNode.promises);
-      const rename = fsNode.promises.rename.bind(fsNode.promises);
+      const rename = fsNode.renameSync;
       let committed = false;
       let rollbackReadUsedInjectedFs = false;
       const injectedFs = {
         ...fsNode,
-        promises: {
-          ...fsNode.promises,
-          rename: async (from, to) => {
-            await rename(from, to);
-            if (!committed && to === configPath) {
-              committed = true;
-              env.OPENCLAW_CONFIG_PATH = otherConfigPath;
-            }
-          },
+        promises: { ...fsNode.promises },
+        renameSync: (from, to) => {
+          rename(from, to);
+          if (!committed && to === configPath) {
+            committed = true;
+            env.OPENCLAW_CONFIG_PATH = otherConfigPath;
+          }
         },
       } satisfies typeof fsNode;
       vi.spyOn(injectedFs.promises, "readFile").mockImplementation(async (target, options) => {
@@ -4119,8 +4295,14 @@ describe("config io write", () => {
         },
       );
       await expect(pending).rejects.toThrow("config path changed since last load");
-      await expect(pending).rejects.toBeInstanceOf(ConfigMutationConflictError);
-      await expect(pending).rejects.toHaveProperty("retryable", false);
+      const failure = await pending.catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "ConfigWritePostCommitError",
+        configPath,
+        rollbackStatus: "restored",
+        cause: expect.any(ConfigMutationConflictError),
+      });
+      expect(failure).toHaveProperty("cause.retryable", false);
 
       expect(rollbackReadUsedInjectedFs).toBe(true);
       await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(initialRaw);

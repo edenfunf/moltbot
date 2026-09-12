@@ -1,11 +1,9 @@
 // Chat-item projection, expansion, reply hydration, and guarded row rendering.
 import { nothing } from "lit";
 import { classifySessionKind } from "../../../../../src/sessions/classify-session-kind.js";
-import { i18n, t } from "../../../i18n/index.ts";
-import { latestBrowserTabCards } from "../../../lib/chat/browser-tab-preview.ts";
-import type { ChatItem, MessageGroup } from "../../../lib/chat/chat-types.ts";
+import { i18n } from "../../../i18n/index.ts";
+import type { MessageGroup } from "../../../lib/chat/chat-types.ts";
 import { extractTextCached } from "../../../lib/chat/message-extract.ts";
-import { formatSessionArchiveReason } from "../../../lib/sessions/session-archive-reason.ts";
 import {
   isUiGlobalScopeConfigured,
   isSubagentSessionKey,
@@ -33,9 +31,10 @@ import {
 } from "../chat-thread.ts";
 import { hasForwardedSource } from "../chat-turn-boundary.ts";
 import { renderAgentRunFrame } from "./chat-agent-run-frame.ts";
+import { createAsyncQuestionPresentation } from "./chat-async-question.ts";
 import { resolveChatDefaultAvatarPlacement } from "./chat-author-avatar.ts";
 import { renderBackgroundTasksStatusRow } from "./chat-background-tasks-status.ts";
-import { renderChatDivider, renderChatNotice } from "./chat-divider.ts";
+import { buildChatArchiveNotice, renderChatDivider, renderChatNotice } from "./chat-divider.ts";
 import { resolveMessageGroupSenderLabel } from "./chat-message-group.ts";
 import { resolveMessageReplyText } from "./chat-message-markdown.ts";
 import { assistantMediaPolicyKey } from "./chat-message-media.ts";
@@ -78,6 +77,7 @@ export function projectChatTranscript(
   transcript: ChatTranscriptSession,
 ): ChatTranscriptProjection {
   const state = getTranscriptState(props.paneId);
+  const asyncQuestions = createAsyncQuestionPresentation(state, props);
   const requestUpdate = props.onRequestUpdate ?? (() => {});
   const displayStream = props.stream ?? null;
   const sessionHost = props.sessionHost ?? null;
@@ -91,32 +91,25 @@ export function projectChatTranscript(
       isUiGlobalScopeConfigured(sessionHost) &&
       resolveUiGlobalAliasAgentId(sessionHost, props.sessionKey) !== null);
   const showReasoning = props.showThinking && activeSession?.reasoningLevel === "on";
+  const assistantAgentId = props.currentAgentId ?? props.fullMessageAgentId;
+  const assistantAvatar = resolveAssistantDisplayAvatar({
+    currentAgentId: assistantAgentId,
+    agents: props.agents,
+    assistantAvatar: props.assistantAvatar,
+    assistantAvatarUrl: props.assistantAvatarUrl,
+  });
   const assistantIdentity = {
+    agentId: assistantAgentId,
     name: props.assistantName,
-    avatar: resolveAssistantDisplayAvatar(props),
+    avatar: assistantAvatar.avatar,
+    textAvatar: assistantAvatar.textAvatar,
   };
   const locale = i18n.getLocale();
   const searchFiltering = state.searchOpen && Boolean(state.searchQuery.trim());
-  const archiveActor = activeSession?.archivedBy;
-  const archiveLabel = archiveActor?.id
-    ? t("sessionsView.archivedBy", { name: archiveActor.label ?? archiveActor.id })
-    : activeSession?.archiveReason
-      ? formatSessionArchiveReason(activeSession.archiveReason)
-      : undefined;
-  const archiveNotice =
-    activeSession?.archived && activeSession.archivedAt !== undefined && archiveLabel
-      ? ({
-          kind: "notice",
-          key: `archive:${activeSession.sessionId ?? activeSession.key}:${activeSession.archivedAt}`,
-          label: archiveLabel,
-          text: "",
-          timestamp: activeSession.archivedAt,
-        } satisfies Extract<ChatItem, { kind: "notice" }>)
-      : undefined;
   const chatItems = buildCachedChatItems({
     paneId: props.paneId,
     sessionKey: props.sessionKey,
-    archiveNotice,
+    archiveNotice: buildChatArchiveNotice(activeSession),
     runId: props.runId ?? null,
     compactionStatus: props.compactionStatus,
     locale,
@@ -127,6 +120,7 @@ export function projectChatTranscript(
     stream: displayStream,
     streamStartedAt: props.streamStartedAt,
     queue: props.queue,
+    initialTurnId: props.initialTurnId,
     pendingInputs: props.pendingInputs,
     workerSetupPending: ["requested", "provisioning", "syncing", "starting"].includes(
       activeSession?.placement?.state ?? "",
@@ -150,10 +144,7 @@ export function projectChatTranscript(
   const runOutputTokens = workingIndicator?.runId
     ? (props.runUsageById?.get(workingIndicator.runId)?.outputTokens ?? null)
     : null;
-  const latestBrowserTabs =
-    props.browserTabPreviewsActive === false
-      ? latestBrowserTabCards([], [])
-      : latestBrowserTabCards(props.messages, props.toolMessages);
+  const latestBrowserTabs = props.latestBrowserTabs;
   syncToolCardExpansionState(
     props.sessionKey,
     chatItems,
@@ -286,6 +277,7 @@ export function projectChatTranscript(
     boardProvider: props.boardProvider,
     agentId: props.currentAgentId ?? props.fullMessageAgentId,
     runActive: props.runActive,
+    asyncQuestions,
     onOpenWorkspaceFile: props.onOpenWorkspaceFile,
     onRequestUpdate: requestUpdate,
     resourceBasePath: props.resourceBasePath,
@@ -302,7 +294,7 @@ export function projectChatTranscript(
     fetchLinkFavicon: props.fetchLinkFavicon,
     pluginToolIcons: props.pluginToolIcons,
     githubRepo: props.githubRepo,
-    showAssistantAvatar: avatarPlacement === "gutter" && Boolean(assistantIdentity.avatar),
+    showAssistantAvatar: avatarPlacement === "gutter",
   } satisfies StreamGroupOptions;
   const streamGroupOptions = {
     ...sharedMessageRenderOptions,
@@ -343,6 +335,8 @@ export function projectChatTranscript(
       onToggleToolExpanded: toggleToolCardExpanded,
       assistantName: props.assistantName,
       assistantAvatar: assistantIdentity.avatar,
+      assistantTextAvatar: assistantIdentity.textAvatar,
+      agentId: assistantIdentity.agentId,
       agents: props.agents,
       senderAgentAvatars: props.senderAgentAvatars,
       mainKey: props.mainKey,
@@ -646,7 +640,7 @@ export function projectChatTranscript(
     getChatMediaRenderVersion(),
     // The host minute poll requests an update; this key crosses row guard() memoization.
     Math.floor(Date.now() / 60_000),
-    JSON.stringify([...latestBrowserTabs]),
+    JSON.stringify([...(latestBrowserTabs ?? [])]),
     props.sessionKey,
     props.presented,
     props.transcriptVisible,
@@ -668,6 +662,7 @@ export function projectChatTranscript(
     Boolean(props.autoExpandToolCalls),
     props.assistantName,
     assistantIdentity.avatar,
+    assistantIdentity.textAvatar,
     props.currentAgentId,
     props.agents,
     props.senderAgentAvatars,
@@ -688,6 +683,7 @@ export function projectChatTranscript(
     props.githubRepo?.repo,
     threadContextWindow,
     Boolean(props.onSetReply),
+    Boolean(props.onAsyncQuestionSubmit),
     Boolean(props.onRetryQueuedMessage),
     Boolean(props.onDiscardQueuedMessage),
     props.queuedMessageAction?.id,
@@ -700,6 +696,7 @@ export function projectChatTranscript(
     props.runStatus?.occurredAt ?? 0,
   ]);
   state.transcriptRenderContext.onSetReply = props.onSetReply;
+  state.transcriptRenderContext.onAsyncQuestionSubmit = props.onAsyncQuestionSubmit;
   state.transcriptRenderContext.onOpenReply = (replyToId) => {
     const loaded = loadedReplySources.get(replyToId);
     if (loaded && resolveMessageReplyText(loaded.message)) {

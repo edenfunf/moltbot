@@ -1,8 +1,8 @@
-import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 // Cron edit command registration and patch construction for existing jobs.
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
+  readNonBlankString,
 } from "@openclaw/normalization-core/string-coerce";
 import type { Command } from "commander";
 import type { CronJob } from "../../cron/types.js";
@@ -26,6 +26,7 @@ import {
 import {
   getCronChannelOptions,
   handleCronCliError,
+  parseCronIntegerOption,
   warnIfCronSchedulerDisabled,
   requireCronJobId,
 } from "./shared.js";
@@ -182,7 +183,7 @@ export function registerCronEditCommand(cron: Command) {
           if (deliveryModeFlagCount > 1) {
             throw new CronCliError("Choose at most one of --announce, --no-deliver, or --webhook.");
           }
-          const triggerScriptPath = normalizeOptionalString(opts.triggerScript);
+          const triggerScriptPath = readNonBlankString(opts.triggerScript);
           if (typeof opts.triggerScript === "string" && !triggerScriptPath) {
             throw new CronCliError("--trigger-script must not be blank");
           }
@@ -398,13 +399,10 @@ export function registerCronEditCommand(cron: Command) {
           } else if (failureAlertFlag === true || hasFailureAlertFields) {
             const failureAlert: Record<string, unknown> = {};
             if (hasFailureAlertAfter) {
-              const after = parseStrictPositiveInteger(opts.failureAlertAfter);
-              if (after === undefined) {
-                throw new CronCliError(
-                  "Invalid --failure-alert-after (must be a positive integer).",
-                );
-              }
-              failureAlert.after = after;
+              failureAlert.after = parseCronIntegerOption(
+                opts.failureAlertAfter,
+                "--failure-alert-after",
+              );
             }
             if (hasFailureAlertChannel) {
               failureAlert.channel = normalizeOptionalLowercaseString(opts.failureAlertChannel);

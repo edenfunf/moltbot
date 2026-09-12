@@ -2,6 +2,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { defaultRuntime } from "../../runtime.js";
+import { VERSION } from "../../version.js";
 import { withOwnedManagedUpdateEnv } from "./update-command-service-env.js";
 
 const mocks = vi.hoisted(() => ({
@@ -160,8 +161,17 @@ vi.mock("./update-command-plugins.js", () => ({
   }),
 }));
 
+// Process fixtures cover runtime generation with real lifecycle ownership.
+vi.mock("./update-command-runtime.js", () => ({
+  completeSourceUpdateRuntime: vi.fn(async () => {
+    record("runtime-completion");
+    return { changed: false };
+  }),
+}));
+
 vi.mock("./update-command-post-core.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./update-command-post-core.js")>()),
+  continuePostCoreUpdateInFreshProcess: vi.fn(),
   readPostCorePluginInstallRecordsFile: vi.fn(async () => {
     record("handoff-records");
     return {};
@@ -170,6 +180,7 @@ vi.mock("./update-command-post-core.js", async (importOriginal) => ({
   writePostCorePluginUpdateResultFile: vi.fn(async () => undefined),
 }));
 
+import { readPackageVersion } from "./shared.js";
 import { convergeUpdatePlugins } from "./update-command-convergence.js";
 import { updateFinalizeCommand } from "./update-command-finalize.js";
 import {
@@ -177,6 +188,7 @@ import {
   runUpdateFinalizationDoctorInFreshProcess,
 } from "./update-command-fresh-doctor.js";
 import { updatePluginsAfterCoreUpdate } from "./update-command-plugins.js";
+import { continuePostCoreUpdateInFreshProcess } from "./update-command-post-core.js";
 import { resumePostCoreUpdate } from "./update-command-resume.js";
 
 function expectLifecycleBoundary(preLeaseEvent: string): void {
@@ -203,6 +215,11 @@ describe("update plugin lifecycle lease boundaries", () => {
     mocks.events = [];
     mocks.leaseActive = false;
     mocks.doctorWarnings = [];
+    vi.mocked(readPackageVersion).mockResolvedValue(VERSION);
+    vi.mocked(continuePostCoreUpdateInFreshProcess).mockImplementation(async () => {
+      record("target-convergence");
+      return { resumed: true, pluginUpdate: { ...successfulPluginUpdate, changed: false } };
+    });
     mocks.readConfig.mockImplementation(async () => {
       record("read-config");
       return validConfigSnapshot;
@@ -213,25 +230,105 @@ describe("update plugin lifecycle lease boundaries", () => {
     vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => undefined);
   });
 
-  it("keeps an unchanged already-current update on the no-op path", async () => {
+  it.each([
+    { installedVersion: VERSION, previousInstallRoot: "/tmp/openclaw", resumed: true },
+    { installedVersion: "2026.8.27", previousInstallRoot: "/tmp/openclaw", resumed: true },
+    { installedVersion: "2026.8.27", previousInstallRoot: "/tmp/openclaw", resumed: false },
+    { installedVersion: VERSION, previousInstallRoot: "/tmp/openclaw-source", resumed: true },
+  ])(
+    "keeps already-current $installedVersion convergence owned by its runtime from $previousInstallRoot (resumed=$resumed)",
+    async ({ installedVersion, previousInstallRoot, resumed }) => {
+      const needsTargetRuntime =
+        installedVersion !== VERSION || previousInstallRoot !== "/tmp/openclaw";
+      vi.mocked(readPackageVersion).mockResolvedValue(installedVersion);
+      if (!needsTargetRuntime) {
+        vi.mocked(updatePluginsAfterCoreUpdate).mockImplementationOnce(async () => {
+          record("plugin-update");
+          return {
+            ...successfulPluginUpdate,
+            assessment: { kind: "no-payload-repair" as const },
+            changed: false,
+          };
+        });
+      }
+      vi.mocked(continuePostCoreUpdateInFreshProcess).mockImplementation(async () => {
+        record("target-convergence");
+        return {
+          resumed,
+          ...(resumed ? { pluginUpdate: { ...successfulPluginUpdate, changed: false } } : {}),
+        };
+      });
+
+      const result = await convergeUpdatePlugins({
+        coreAlreadyCurrent: true,
+        result: {
+          status: "skipped",
+          mode: "npm",
+          root: "/tmp/openclaw",
+          reason: "already-current",
+          before: { version: installedVersion },
+          after: { version: installedVersion },
+          steps: [],
+          durationMs: 1,
+        },
+        root: "/tmp/openclaw",
+        previousInstallRoot,
+        installKindChanged: false,
+        configSnapshot: validConfigSnapshot,
+        requestedChannel: null,
+        storedChannel: null,
+        channel: "stable",
+        downgradeRisk: false,
+        opts: {},
+        preUpdatePluginInstallRecords: {},
+        startedAt: 1,
+        updateStepTimeoutMs: 1_000,
+      });
+
+      if (needsTargetRuntime) {
+        expect(mocks.events).toEqual(["target-convergence:false"]);
+        expect(updatePluginsAfterCoreUpdate).not.toHaveBeenCalled();
+      } else {
+        expect(continuePostCoreUpdateInFreshProcess).not.toHaveBeenCalled();
+        expect(mocks.events).toContain("plugin-update:true");
+      }
+      expect(completePostCorePluginUpdate).not.toHaveBeenCalled();
+      expect(result.resultWithPostUpdate).toMatchObject(
+        resumed
+          ? { status: "skipped", reason: "already-current" }
+          : { status: "error", reason: "post-core-update-failed" },
+      );
+    },
+  );
+
+  it("keeps the plugin and error class when convergence fails", async () => {
     vi.mocked(updatePluginsAfterCoreUpdate).mockResolvedValueOnce({
       ...successfulPluginUpdate,
+      status: "error",
+      assessment: { kind: "unsafe", reason: "convergence-failed" },
       changed: false,
+      npm: {
+        changed: false,
+        outcomes: [
+          {
+            pluginId: "example",
+            status: "error",
+            code: "incompatible_plugin_api",
+            message: "Plugin requires a newer host API.",
+          },
+        ],
+      },
     });
-
-    const result = await convergeUpdatePlugins({
+    const { resultWithPostUpdate } = await convergeUpdatePlugins({
       coreAlreadyCurrent: true,
       result: {
         status: "skipped",
         mode: "npm",
-        root: "/tmp/openclaw",
         reason: "already-current",
-        before: { version: "2026.9.3" },
-        after: { version: "2026.9.3" },
         steps: [],
         durationMs: 1,
       },
-      root: "/tmp/openclaw",
+      root: "/fixture/openclaw",
       installKindChanged: false,
       configSnapshot: validConfigSnapshot,
       requestedChannel: null,
@@ -241,14 +338,21 @@ describe("update plugin lifecycle lease boundaries", () => {
       opts: {},
       preUpdatePluginInstallRecords: {},
       startedAt: 1,
-      updateStepTimeoutMs: 1_000,
+      updateStepTimeoutMs: 1000,
     });
-
-    expect(completePostCorePluginUpdate).not.toHaveBeenCalled();
-    expect(result.resultWithPostUpdate).toMatchObject({
-      status: "skipped",
-      reason: "already-current",
-    });
+    expect(resultWithPostUpdate.steps).toContainEqual(
+      expect.objectContaining({
+        exitCode: 1,
+        failureFacts: [
+          {
+            check: "plugin-update",
+            code: "incompatible_plugin_api",
+            pluginId: "example",
+            message: "Plugin requires a newer host API.",
+          },
+        ],
+      }),
+    );
   });
 
   it.each(["copied", "live"] as const)(
@@ -314,6 +418,12 @@ describe("update plugin lifecycle lease boundaries", () => {
     });
 
     expectLifecycleBoundary("handoff-records");
+    expect(mocks.events.indexOf("runtime-completion:true")).toBeGreaterThan(
+      mocks.events.indexOf("lease-enter:false"),
+    );
+    expect(mocks.events.indexOf("runtime-completion:true")).toBeLessThan(
+      mocks.events.indexOf("prepare-config:true"),
+    );
     expect(mocks.events).not.toContain("fresh-doctor:false");
     expect(mocks.events).not.toContain("fresh-doctor:true");
     expect(mocks.events).not.toContain("config-snapshot:false");

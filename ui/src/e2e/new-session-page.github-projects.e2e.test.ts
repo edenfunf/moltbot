@@ -381,9 +381,9 @@ suite.define(() => {
       });
       await gateway.resolveDeferred("chat.startup");
       await expect.poll(() => metadataRequested).toBe(true);
-      expect(await page.locator(".chat-notice").count()).toBe(0);
       const working = page.locator('.chat-working-indicator[role="status"]');
       await pollLocatorText(working).toContain("Preparing workspace…");
+      expect(await page.locator(".chat-notice").count()).toBe(0);
       if (artifactDir) {
         await writeFile(
           path.join(artifactDir, "preparing.png"),

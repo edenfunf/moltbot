@@ -3,7 +3,7 @@ import { shouldForwardModelCommandToServer } from "../../../../src/auto-reply/co
 import { normalizeChatFollowUpModeOverride } from "../../app/settings.ts";
 import { t } from "../../i18n/index.ts";
 import type { ChatAttachment, HumanMention } from "../../lib/chat/chat-types.ts";
-import { isChatControlCommand, parseSlashCommand } from "../../lib/chat/commands.ts";
+import { canSubmitBeforeChatHistory, parseSlashCommand } from "../../lib/chat/commands.ts";
 import { extractCompanionCommandQuestion } from "../../lib/chat/companion-question.ts";
 import { resolveCurrentUserIdentity } from "../../lib/chat/current-user-identity.ts";
 import type { ControlUiFollowUpMode } from "../../lib/chat/follow-up-mode.ts";
@@ -88,6 +88,9 @@ export type ChatSendSubmitOptions = {
   intent?: ChatSendIntent;
   attachmentsOverride?: readonly ChatAttachment[];
   mentionsOverride?: readonly HumanMention[];
+  replyTargetOverride?: ChatHost["chatReplyTarget"];
+  /** Ordinary message admission transfers retry custody, including volatile sends. */
+  onOutboxAdmitted?: () => void;
   followUpMode?: ControlUiFollowUpMode;
   /** Only the inline queued-row submit may resume and replace an edited row. */
   resumeQueuedMessageEditId?: string;
@@ -155,7 +158,9 @@ export async function handleSendChat(
 ) {
   if (
     isInitialChatHistoryUnavailable(host) &&
-    (opts?.intent || !isChatControlCommand(messageOverride ?? host.chatMessage))
+    (opts?.intent ||
+      opts?.resumeQueuedMessageEditId ||
+      !canSubmitBeforeChatHistory(messageOverride ?? host.chatMessage))
   ) {
     return undefined;
   }
@@ -500,7 +505,8 @@ export async function handleSendChat(
     }
   }
 
-  const replyTarget = isInlineEditSubmission ? null : host.chatReplyTarget;
+  const { replyTargetOverride = host.chatReplyTarget } = opts ?? {};
+  const replyTarget = isInlineEditSubmission ? null : replyTargetOverride;
   // Persisted ids use replyToId; synthetic replies fall back to a quote.
   const replyToId = isInlineEditSubmission
     ? inlineEdit.replyToId
@@ -525,22 +531,19 @@ export async function handleSendChat(
     end: mention.end + mentionOffset,
   }));
 
-  const refreshSessions = Boolean(intent) || isChatResetCommand(message);
   // A row edit and a composer send may intentionally carry the same payload.
   // Keep their guards independent so submitting one cannot suppress the other.
-  const submitKind = requestedEditId ? "queued-edit" : intent ? "goal" : "message";
   const submitKey = chatSubmitKey(
     host,
-    submitKind,
+    requestedEditId ? "queued-edit" : intent ? "goal" : "message",
     effectiveMessage,
     attachmentsToSend,
     effectiveMentions,
   );
   let accepted = false;
   const submitMessage = async () => {
-    if (host.chatLoading) {
-      // A terminal event can render before its authoritative leaf arrives.
-      // Reuse the in-flight history request before fencing the follow-up send.
+    if (host.chatLoading && (intent || rawParsedCommand || isInlineEditSubmission)) {
+      // Commands and row edits retain their draft until history resolves.
       if (!(await loadChatHistory(host))) {
         return;
       }
@@ -564,8 +567,7 @@ export async function handleSendChat(
       setChatError(host, t("chat.goals.busy"));
       return;
     }
-    // History can await while the operator cancels or changes the row edit.
-    // Never admit a replacement captured from a stale row-local draft.
+    // History may settle after the operator cancels or changes the row edit.
     const resumedEditCandidate = activeQueuedMessageEdit(host);
     if (
       isInlineEditSubmission &&
@@ -580,15 +582,14 @@ export async function handleSendChat(
       return;
     }
     let pendingSettings = getPendingChatPickerPatch(host, submittedSessionKey);
-    let waitingForSettings = Boolean(pendingSettings);
-    const directRunActive = hasDirectSessionRun(host);
+    const applyRunPolicy = hasDirectSessionRun(host) || isInitialChatHistoryUnavailable(host);
     // Only an explicit browser override replaces inherited Gateway policy.
     const followUpMode =
       opts?.followUpMode ??
       host.chatFollowUpMode ??
       normalizeChatFollowUpModeOverride(host.settings?.chatFollowUpMode);
     const activeRunQueueMode =
-      !intent && directRunActive && followUpMode !== "queue" ? followUpMode : undefined;
+      !intent && applyRunPolicy && followUpMode !== "queue" ? followUpMode : undefined;
     // The edited row hands its place to the replacement and is retired by the same
     // store write, so a rejected write leaves the original queued and editable.
     const resumedEdit =
@@ -597,9 +598,9 @@ export async function handleSendChat(
       host,
       effectiveMessage,
       deliveredAttachments.length ? deliveredAttachments : undefined,
-      refreshSessions,
+      Boolean(intent) || isChatResetCommand(message),
       submittedAtMs,
-      waitingForSettings ? "waiting-model" : reconnectSafeQueuedSendState(host),
+      pendingSettings ? "waiting-model" : reconnectSafeQueuedSendState(host),
       replyToId,
       resumedEdit?.orderKey,
       activeRunQueueMode,
@@ -638,8 +639,7 @@ export async function handleSendChat(
       // Retain a picker captured before storage, including its rejected result;
       // delivery follows the latest picker tail before issuing the request.
       pendingSettings ??= getPendingChatPickerPatch(host, submittedSessionKey);
-      waitingForSettings = Boolean(pendingSettings);
-      queued.sendState = waitingForSettings ? "waiting-model" : reconnectSafeQueuedSendState(host);
+      queued.sendState = pendingSettings ? "waiting-model" : reconnectSafeQueuedSendState(host);
     }
     const cleared =
       messageOverride == null
@@ -677,7 +677,7 @@ export async function handleSendChat(
       // A still-open edit means its stored source outlived the rejected write;
       // sending the replacement from memory would strand the original as a duplicate.
       !activeQueuedMessageEdit(host) &&
-      !waitingForSettings &&
+      !pendingSettings &&
       canSendVolatileQueueItem(host, queued, submittedSessionKey);
     if (!admittedDurably && !canSendFromMemory) {
       retireOutboxPayload(queued);
@@ -689,6 +689,7 @@ export async function handleSendChat(
       setChatError(host, OFFLINE_QUEUE_STORAGE_ERROR);
       return;
     }
+    opts?.onOutboxAdmitted?.();
     let deliveryItem: typeof queued | null = queued;
     if (admittedDurably && submissionAction && typeof MessageChannel !== "undefined") {
       // The outbox now owns the prompt across reloads. Return control before
@@ -711,7 +712,7 @@ export async function handleSendChat(
           previousDraft: cleared.previousDraft,
           previousAttachments: cleared.previousAttachments,
           previousMentions: cleared.previousMentions,
-          ...(intent || (directRunActive && followUpMode !== "queue")
+          ...(intent || (applyRunPolicy && followUpMode !== "queue")
             ? { allowActiveRunSend: true }
             : {}),
           ...(expectedLeafEntryId !== undefined ? { expectedLeafEntryId } : {}),

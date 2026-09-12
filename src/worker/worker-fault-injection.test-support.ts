@@ -4,7 +4,8 @@ import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { rawDataToString } from "@openclaw/gateway-client/websocket-data";
 import { expectDefined } from "@openclaw/normalization-core";
-import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { WebSocket, type RawData } from "ws";
+import { WebSocketServer } from "../../packages/gateway-client/src/websocket.test-support.js";
 import {
   type WorkerLiveEventParams,
   WORKER_PROTOCOL_FEATURES,
@@ -692,7 +693,7 @@ export class ComposedGatewayHarness {
     });
   }
 
-  private send(socket: WebSocket, frame: unknown): void {
+  private send(socket: WebSocket, frame: unknown) {
     const response =
       frame && typeof frame === "object" && !Array.isArray(frame)
         ? (frame as { event?: unknown; id?: unknown; payload?: { seq?: unknown } })
@@ -712,17 +713,18 @@ export class ComposedGatewayHarness {
       } else {
         socket.terminate();
       }
-      return;
+      return { kind: "unavailable" } as const;
     }
     if (socket.readyState !== WebSocket.OPEN) {
-      return;
+      return { kind: "unavailable" } as const;
     }
     const encoded = JSON.stringify(frame);
     if (fault?.kind === "partition-after-inference-event") {
       socket.send(encoded, () => socket.terminate());
-      return;
+    } else {
+      socket.send(encoded);
     }
-    socket.send(encoded);
+    return { kind: "sent" } as const;
   }
 
   private terminateSockets(): void {

@@ -92,27 +92,6 @@ export function schemaWithDefault(schema: JsonSchema, value: unknown): JsonSchem
   return { ...schema, default: value };
 }
 
-function formatComparablePrimitive(value: unknown): string | null {
-  if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    typeof value === "bigint"
-  ) {
-    return String(value);
-  }
-  return null;
-}
-
-function matchesComparablePrimitiveValue(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) {
-    return true;
-  }
-  const leftComparable = formatComparablePrimitive(left);
-  const rightComparable = formatComparablePrimitive(right);
-  return leftComparable !== null && leftComparable === rightComparable;
-}
-
 export function isSecretRefObject(value: unknown): value is {
   source: string;
   id: string;
@@ -277,21 +256,6 @@ export function renderFieldRow(params: {
   `;
 }
 
-export function renderFlatDefaultRow(
-  description: TemplateResult | typeof nothing,
-): TemplateResult | typeof nothing {
-  if (description === nothing) {
-    return nothing;
-  }
-  return html`
-    <div class="settings-row">
-      <div class="settings-row__text">
-        <span class="settings-row__desc">${description}</span>
-      </div>
-    </div>
-  `;
-}
-
 export function renderCollectionDefaultDescription(
   params: ConfigNodeRenderParams,
   effectiveValue: unknown,
@@ -326,7 +290,7 @@ export function renderSegmentedControl(params: {
   onSelect: (value: unknown) => boolean | void;
 }): TemplateResult {
   const selectedIndex = params.options.findIndex((option) =>
-    matchesComparablePrimitiveValue(option, params.resolvedValue),
+    configValuesEqual(option, params.resolvedValue),
   );
   return renderSettingsSegmented({
     value: selectedIndex < 0 ? "" : String(selectedIndex),
