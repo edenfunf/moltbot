@@ -6,12 +6,15 @@ import type {
 } from "openclaw/plugin-sdk/channel-contract";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
+/** Which key supplied the allowlist a group actually resolves to. */
+type AllowFromSource = "group" | "defaults" | "channel";
+
 type LineGroupCoverage = {
   covered: boolean;
   /** Enabled groups with no sender allowlist anywhere in their resolved config. */
   uncovered: string[];
-  /** Enabled groups whose own empty `allowFrom` masks every wider allowlist. */
-  overridden: string[];
+  /** Enabled groups whose resolved allowlist is empty, keyed by the key that supplies it. */
+  empty: Record<AllowFromSource, string[]>;
 };
 
 const GROUP_DEFAULTS_KEY = "*";
@@ -54,40 +57,52 @@ function inspectLineGroupCoverage(params: {
   parent?: Record<string, unknown>;
   groupAllowFrom?: unknown;
 }): LineGroupCoverage {
+  const empty: Record<AllowFromSource, string[]> = { group: [], defaults: [], channel: [] };
   const entries = readGroupEntries(params.account, params.parent);
   if (entries.length === 0) {
-    return { covered: false, uncovered: [], overridden: [] };
+    return { covered: false, uncovered: [], empty };
   }
 
   const defaults = entries.find(([id]) => id === GROUP_DEFAULTS_KEY)?.[1];
-  const resolveAllowFrom = (group?: Record<string, unknown>): unknown =>
-    firstDefined(group?.allowFrom, params.groupAllowFrom);
+  const resolveAllowFrom = (
+    group?: Record<string, unknown>,
+  ): { value: unknown; source?: AllowFromSource } => {
+    if (group?.allowFrom !== undefined) {
+      return { value: group.allowFrom, source: group === defaults ? "defaults" : "group" };
+    }
+    if (defaults?.allowFrom !== undefined) {
+      return { value: defaults.allowFrom, source: "defaults" };
+    }
+    if (params.groupAllowFrom !== undefined) {
+      return { value: params.groupAllowFrom, source: "channel" };
+    }
+    return { value: undefined };
+  };
 
   // A group with no entry of its own resolves to the defaults node alone.
-  let covered = defaults?.enabled !== false && hasAllowFromEntries(resolveAllowFrom(defaults));
+  let covered =
+    defaults?.enabled !== false && hasAllowFromEntries(resolveAllowFrom(defaults).value);
 
   const uncovered: string[] = [];
-  const overridden: string[] = [];
   for (const [id, group] of entries) {
     if (id === GROUP_DEFAULTS_KEY) {
       continue;
     }
-    const effective = defaults ? { ...defaults, ...group } : group;
-    if (effective.enabled === false) {
+    if (firstDefined(group.enabled, defaults?.enabled) === false) {
       continue;
     }
-    const allowFrom = resolveAllowFrom(effective);
-    if (hasAllowFromEntries(allowFrom)) {
+    const { value, source } = resolveAllowFrom(group);
+    if (hasAllowFromEntries(value)) {
       covered = true;
-    } else if (allowFrom === undefined) {
+    } else if (source === undefined) {
       uncovered.push(id);
     } else {
-      // An authored empty list wins over the defaults node and the channel-wide
-      // list, so pointing the operator at either of those would not help.
-      overridden.push(id);
+      // The remedy depends on which key supplies the empty list: the group's own
+      // entry, the defaults node, or the channel-wide list.
+      empty[source].push(id);
     }
   }
-  return { covered, uncovered, overridden };
+  return { covered, uncovered, empty };
 }
 
 function readLineGroupCoverage(
@@ -130,13 +145,25 @@ function collectLineEmptyAllowlistExtraWarnings(
   if (!isLineGroupAllowlistScope(params)) {
     return [];
   }
-  const { covered, uncovered, overridden } = readLineGroupCoverage(params);
+  const { covered, uncovered, empty } = readLineGroupCoverage(params);
   const warnings: string[] = [];
 
-  if (overridden.length > 0) {
-    const single = overridden.length === 1;
+  const dropped = (ids: string[]) =>
+    `- ${params.prefix}.groups: ${ids.length === 1 ? "group" : "groups"} ${formatGroupIds(ids)} ${ids.length === 1 ? "resolves" : "resolve"} to an empty sender allowlist — messages there are silently dropped.`;
+
+  if (empty.group.length > 0) {
     warnings.push(
-      `- ${params.prefix}.groups: ${single ? "group" : "groups"} ${formatGroupIds(overridden)} ${single ? "sets" : "set"} an empty allowFrom, which overrides ${params.prefix}.groups."*".allowFrom and ${params.prefix}.groupAllowFrom — messages there are silently dropped. Add sender IDs to ${single ? "that group's" : "each group's"} own allowFrom, or remove the key so it inherits.`,
+      `${dropped(empty.group)} The empty list is authored on ${empty.group.length === 1 ? "that entry" : "those entries"} and overrides every wider list, so add sender IDs there, or remove the allowFrom key to inherit.`,
+    );
+  }
+  if (empty.defaults.length > 0) {
+    warnings.push(
+      `${dropped(empty.defaults)} The empty list comes from ${params.prefix}.groups."*".allowFrom, so add sender IDs to that entry, or give ${empty.defaults.length === 1 ? "the group" : "each group"} its own allowFrom.`,
+    );
+  }
+  if (empty.channel.length > 0) {
+    warnings.push(
+      `${dropped(empty.channel)} The empty list comes from ${params.prefix}.groupAllowFrom, so add sender IDs there, or give ${empty.channel.length === 1 ? "the group" : "each group"} its own allowFrom.`,
     );
   }
 

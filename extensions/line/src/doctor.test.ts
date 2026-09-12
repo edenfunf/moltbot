@@ -138,7 +138,7 @@ describe("line doctor empty group allowlist", () => {
     expect(shouldSkip(params)).toBe(true);
   });
 
-  it("reports a group whose own empty allowFrom overrides the defaults entry", () => {
+  it("blames the group's own entry when it authors the empty allowFrom", () => {
     const params = context({
       account: {
         groupPolicy: "allowlist",
@@ -147,11 +147,11 @@ describe("line doctor empty group allowlist", () => {
     });
 
     expect(extraWarnings(params)).toStrictEqual([
-      '- channels.line.groups: group "C111" sets an empty allowFrom, which overrides channels.line.groups."*".allowFrom and channels.line.groupAllowFrom — messages there are silently dropped. Add sender IDs to that group\'s own allowFrom, or remove the key so it inherits.',
+      '- channels.line.groups: group "C111" resolves to an empty sender allowlist — messages there are silently dropped. The empty list is authored on that entry and overrides every wider list, so add sender IDs there, or remove the allowFrom key to inherit.',
     ]);
   });
 
-  it("reports a group whose own empty allowFrom overrides a channel-wide allowlist", () => {
+  it("blames the group's own entry over a channel-wide allowlist", () => {
     const params = context({
       account: {
         groupPolicy: "allowlist",
@@ -161,7 +161,35 @@ describe("line doctor empty group allowlist", () => {
     });
 
     expect(extraWarnings(params)).toStrictEqual([
-      '- channels.line.groups: group "C111" sets an empty allowFrom, which overrides channels.line.groups."*".allowFrom and channels.line.groupAllowFrom — messages there are silently dropped. Add sender IDs to that group\'s own allowFrom, or remove the key so it inherits.',
+      '- channels.line.groups: group "C111" resolves to an empty sender allowlist — messages there are silently dropped. The empty list is authored on that entry and overrides every wider list, so add sender IDs there, or remove the allowFrom key to inherit.',
+    ]);
+  });
+
+  it("blames the defaults entry when the empty allowFrom is inherited from it", () => {
+    const params = context({
+      account: {
+        groupPolicy: "allowlist",
+        groupAllowFrom: ["U1"],
+        groups: { "*": { allowFrom: [] }, C111: {} },
+      },
+    });
+
+    expect(extraWarnings(params)).toStrictEqual([
+      '- channels.line.groups: group "C111" resolves to an empty sender allowlist — messages there are silently dropped. The empty list comes from channels.line.groups."*".allowFrom, so add sender IDs to that entry, or give the group its own allowFrom.',
+    ]);
+  });
+
+  it("blames the channel-wide list when the empty allowFrom is inherited from it", () => {
+    const params = context({
+      account: {
+        groupPolicy: "allowlist",
+        groupAllowFrom: [],
+        groups: { C111: {} },
+      },
+    });
+
+    expect(extraWarnings(params)).toStrictEqual([
+      '- channels.line.groups: group "C111" resolves to an empty sender allowlist — messages there are silently dropped. The empty list comes from channels.line.groupAllowFrom, so add sender IDs there, or give the group its own allowFrom.',
     ]);
   });
 
