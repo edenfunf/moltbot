@@ -29,6 +29,16 @@ The current CLI reads a local package directory, `CLAW.md`, or grouped JSON mani
 Publishing, searching, and installing whole Claws through ClawHub are a
 separate registry track and are not part of this command surface yet.
 
+## Bundled role Claws
+
+The bundled `coordinator`, `researcher`, `writer`, and `reviewer` roles are Claw
+sources at `docs/reference/templates/roles/<role>` in a source checkout, with no
+`package.json` requirement. Use [`agents add --role`](/cli/agents#role-templates)
+or `openclaw claws add docs/reference/templates/roles/<role>` through the
+[preview and consent flow](/cli/claws#inspect-and-preview).
+[`agents team create`](/cli/agents#agents-team-create) owns delegation wiring;
+the role Claws will carry those settings once separate Claw profile support lands.
+
 ## Create a Claw package
 
 A package contains `package.json`, a `CLAW.md` manifest, and any conventional
@@ -450,7 +460,7 @@ imported heartbeat tasks, uncorroborated monitors, and jobs in another scheduler
 remain blockers.
 Modified files and resources with another current owner are retained or
 blocked. Cleanup choices are part of the plan digest; `--yes` never broadens
-them. Globally installed plugins are retained while this Claw's reference is
+them. By default, globally installed plugins are retained while this Claw's reference is
 released. Removal reports which retained requirements Claw add introduced; use
 the ordinary plugin lifecycle separately when you intend to uninstall a
 process-wide plugin.
@@ -480,7 +490,8 @@ its cleanup record. Correct the reported error, preview removal again, and retry
 to finish cleanup before recreating the agent.
 
 To remove unchanged Claw-introduced references that have no other current
-owner, include `--remove-unused` in both preview and apply. To select exact
+owner, include `--remove-unused` in both preview and apply. Global plugins are
+excluded from this generic cleanup mode. To select exact
 referenced resources instead, repeat `--remove-referenced`:
 
 ```bash
@@ -492,6 +503,22 @@ openclaw claws remove incident-triage \
 Use `--force-referenced` only after reviewing the displayed dependents,
 independent owners, and pre-existing origin. It allows selected cleanup despite
 those conflicts; it does not skip plan-integrity consent.
+
+For a selected plugin, the serving Gateway withdraws its runtime capabilities
+and attempts cleanup before deleting its installed files. The command waits for
+runtime application and reports the resulting Gateway generation without
+restarting the Gateway. Ownership and artifact changes after preview require a
+fresh plan. Cleanup is best effort: warnings appear in the result's `warnings`
+list and in human-readable output, without turning a completed removal into a
+failed result.
+
+If package cleanup fails, removal reports `partial` with `package_cleanup_failed`
+and retains its cleanup record. Earlier removal steps are not rolled back.
+A Gateway runtime replacement failure stops the remaining package phase and
+reports unattempted packages as retained, alongside earlier outcomes and warnings.
+Ordinary package errors continue best-effort cleanup of the other selections.
+Resolve the reported failure, preview again, and retry; a lost connection never
+causes an automatic local uninstall.
 
 ## Export an installed agent
 
