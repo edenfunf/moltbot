@@ -6,7 +6,7 @@ import {
   resolveChannelApprovalCapability,
 } from "../../channels/plugins/index.js";
 import { logVerbose } from "../../globals.js";
-import { isApprovalNotFoundError } from "../../infra/approval-errors.js";
+import { isApprovalKindMismatchError } from "../../infra/approval-errors.js";
 import { resolveApprovalOverGateway } from "../../infra/approval-gateway-resolver.js";
 import type { ChannelApprovalKind } from "../../infra/approval-types.js";
 import { resolveApprovalCommandAuthorization } from "../../infra/channel-approval-auth.js";
@@ -251,7 +251,7 @@ export async function handleApproveCommandFromContext(
       break;
     } catch (error) {
       const isLastMethod = index === methods.length - 1;
-      if (!isApprovalNotFoundError(error)) {
+      if (!isApprovalKindMismatchError(error)) {
         return {
           shouldContinue: false,
           reply: { text: `❌ Failed to submit approval: ${formatApprovalSubmitError(error)}` },

@@ -23,7 +23,7 @@ import {
   buildApprovalPendingReplyPayload,
   buildPluginApprovalPendingReplyPayload,
 } from "./approval-renderers.js";
-import { isApprovalNotFoundError } from "./error-runtime.js";
+import { isApprovalAuthorityError, isApprovalNotFoundError } from "./error-runtime.js";
 import type { ReplyPayload } from "./reply-payload.js";
 export { shouldSuppressLocalNativeExecApprovalPrompt } from "./approval-native-helpers.js";
 export {
@@ -128,15 +128,19 @@ export async function settleApprovalReaction(params: {
 }): Promise<"denied" | "resolved" | "not-found"> {
   const { request, logVerboseMessage } = params;
   const { channel, approvalId, senderId } = request;
-  if (params.approvers.length === 0) {
+  // Every refusal keeps the reaction binding: the approval is still waiting, so the control
+  // stays usable for whoever the account does list.
+  const deny = (why: string): "denied" => {
     logVerboseMessage?.(
-      `${channel}: approval reaction denied id=${approvalId}; reactions require explicit approvers`,
+      `${channel}: approval reaction denied id=${approvalId} sender=${senderId}; ${why}`,
     );
     return "denied";
+  };
+  if (params.approvers.length === 0) {
+    return deny("reactions require explicit approvers");
   }
   if (!params.authorizeActorAction({ ...request, action: "approve" }).authorized) {
-    logVerboseMessage?.(`${channel}: approval reaction denied id=${approvalId} sender=${senderId}`);
-    return "denied";
+    return deny("sender is not a listed approver");
   }
   const resolve = await params.loadResolver();
   let result: ApprovalResolveResult;
@@ -149,6 +153,10 @@ export async function settleApprovalReaction(params: {
         `${channel}: approval reaction ignored for expired approval id=${approvalId} sender=${senderId}`,
       );
       return "not-found";
+    }
+    if (isApprovalAuthorityError(error)) {
+      // The approver list changed while this reaction was in flight; replaying refuses again.
+      return deny("the account no longer lists this approver");
     }
     params.onError?.(error);
     logVerboseMessage?.(

@@ -236,6 +236,26 @@ export function respondUnknownOrExpiredApproval(respond: RespondFn): void {
   );
 }
 
+/**
+ * A reviewer the channel will not let decide. Distinct from an approval that is gone: the
+ * caller is holding this approval's control, so answering that it no longer exists is untrue,
+ * unactionable, and leaves every channel retiring a control a listed approver can still use.
+ */
+export function respondApprovalAuthorityRequired(respond: RespondFn): void {
+  respond(
+    false,
+    undefined,
+    errorShape(ErrorCodes.FORBIDDEN, "approval decision requires a listed approver", {
+      // FORBIDDEN alone also carries missing-scope failures, which would send an operator
+      // looking at an approver list for a problem that is not one.
+      details: {
+        reason: ErrorCodes.APPROVAL_AUTHORITY_REQUIRED,
+        remediation: "List this reviewer as an approver for the channel account.",
+      },
+    }),
+  );
+}
+
 export function respondPendingApprovalLookupError(params: {
   respond: RespondFn;
   response: PendingApprovalLookupError;

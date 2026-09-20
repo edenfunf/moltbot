@@ -4,7 +4,12 @@ import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway
 import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
-import { isApprovalNotFoundError } from "openclaw/plugin-sdk/error-runtime";
+import {
+  APPROVAL_AUTHORITY_REQUIRED_TEXT,
+  isApprovalAuthorityError,
+  isApprovalKindMismatchError,
+  isApprovalNotFoundError,
+} from "openclaw/plugin-sdk/error-runtime";
 import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
 import {
   parseStrictFiniteNumber,
@@ -724,6 +729,10 @@ async function handleSlackApprovalInteraction(params: {
     );
     // The clicker must see an outcome: pruned/expired records and gateway
     // outages otherwise ack the click silently (Discord's sibling responds).
+    if (isApprovalAuthorityError(error)) {
+      await respondEphemeral(params.respond, APPROVAL_AUTHORITY_REQUIRED_TEXT);
+      return true;
+    }
     if (isApprovalNotFoundError(error)) {
       await respondEphemeral(params.respond, "This approval is no longer pending.");
       return true;
@@ -799,7 +808,7 @@ async function handleSlackLegacyApprovalInteraction(params: {
       }
       return true;
     } catch (error) {
-      if (index + 1 < resolveMethods.length && isApprovalNotFoundError(error)) {
+      if (index + 1 < resolveMethods.length && isApprovalKindMismatchError(error)) {
         continue;
       }
       params.ctx.runtime.log?.(

@@ -19,6 +19,8 @@ export const ErrorCodes = {
   FORBIDDEN: "FORBIDDEN",
   /** Approval resolution referenced a missing or expired approval request. */
   APPROVAL_NOT_FOUND: "APPROVAL_NOT_FOUND",
+  /** The reviewer's own channel does not let them decide this approval. */
+  APPROVAL_AUTHORITY_REQUIRED: "APPROVAL_AUTHORITY_REQUIRED",
   /** Gateway service or required backend is temporarily unavailable. */
   UNAVAILABLE: "UNAVAILABLE",
 } as const;

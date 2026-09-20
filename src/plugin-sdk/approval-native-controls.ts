@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { isApprovalNotFoundError } from "../infra/approval-errors.js";
+import { isApprovalAuthorityError, isApprovalNotFoundError } from "../infra/approval-errors.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 
 type NativeApprovalBinding = { token: string; expiresAtMs: number };
@@ -68,6 +68,7 @@ export function createNativeApprovalControlRegistry<
       | { kind: "missing" }
       | { kind: "in-flight" }
       | { kind: "not-found"; binding: TBinding }
+      | { kind: "not-authorized"; binding: TBinding }
       | { kind: "settled"; binding: TBinding; result: TResult }
     > {
       const binding = get(token);
@@ -86,6 +87,12 @@ export function createNativeApprovalControlRegistry<
         if (isApprovalNotFoundError(error)) {
           complete(token);
           return { kind: "not-found", binding };
+        }
+        if (isApprovalAuthorityError(error)) {
+          // The approval is still waiting, so the control outlives the refusal: whoever the
+          // account does list can use the same control.
+          resolving.delete(token);
+          return { kind: "not-authorized", binding };
         }
         resolving.delete(token);
         throw error;

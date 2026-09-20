@@ -9,7 +9,7 @@ import { isWellFormedApprovalId } from "../../packages/gateway-protocol/src/sche
 import { findChatChannelLabel } from "../channels/ids.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withOperatorApprovalsGatewayClient } from "../gateway/operator-approvals-client.js";
-import { isApprovalNotFoundError } from "./approval-errors.js";
+import { isApprovalKindMismatchError } from "./approval-errors.js";
 import { getGatewayNativeApprovalRuntime } from "./approval-gateway-runtime-context.js";
 import type { GatewayNativeApprovalMethod } from "./approval-gateway-runtime-methods.js";
 import type { ChannelApprovalKind } from "./approval-types.js";
@@ -176,7 +176,7 @@ export async function resolveApprovalOverGateway(
     try {
       await requestLegacyResolve("exec.approval.resolve");
     } catch (error) {
-      if (allowPluginFallback !== true || !isApprovalNotFoundError(error)) {
+      if (allowPluginFallback !== true || !isApprovalKindMismatchError(error)) {
         throw error;
       }
       await requestLegacyResolve("plugin.approval.resolve");

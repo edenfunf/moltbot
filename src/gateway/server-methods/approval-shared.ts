@@ -24,6 +24,7 @@ import {
   resolvePendingApprovalRecord,
   resolveResolvedApprovalRecord,
   respondPendingApprovalLookupError,
+  respondApprovalAuthorityRequired,
   respondUnknownOrExpiredApproval,
 } from "./approval-record-lookup.js";
 import { buildWaitResponse, type WaitReasonResolver } from "./approval-wait-response.js";
@@ -515,7 +516,7 @@ export async function handleApprovalResolve<
       })
     : null;
   if (params.reviewer && !custody) {
-    respondUnknownOrExpiredApproval(params.respond);
+    respondApprovalAuthorityRequired(params.respond);
     return;
   }
   const recordFilter = custody
