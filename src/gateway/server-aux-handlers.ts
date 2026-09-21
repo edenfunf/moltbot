@@ -3,10 +3,12 @@
 import { randomUUID } from "node:crypto";
 import { resolveProjectedMcpCodexToolApprovalMode } from "../agents/mcp-codex-tool-approval.js";
 import { getRuntimeConfig } from "../config/io.js";
+import type { AgentRunApprovalClosureReason } from "../infra/agent-run-approval-leases.js";
 import {
   type AgentRunDelegatedAuthority,
   registerAgentRunDelegatedAuthorityClosedHandler,
 } from "../infra/agent-run-registry.js";
+import type { ApprovalNativeRouteCoordinator } from "../infra/approval-native-route-coordinator.js";
 import type { ChannelApprovalKind } from "../infra/approval-types.js";
 import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js";
 import {
@@ -76,10 +78,15 @@ export function createGatewayAuxHandlers(
   params: GatewaySecretsReloaderParams & {
     log: GatewayAuxHandlerLogger;
     onApprovalLifecycle?: (event: OperatorApprovalLifecycleEvent) => void;
-    onAgentRunAuthorityClosed?: (authority: AgentRunDelegatedAuthority) => void;
+    onAgentRunAuthorityClosed?: (
+      authority: AgentRunDelegatedAuthority,
+      approvalReason?: AgentRunApprovalClosureReason,
+    ) => void;
     validateAgentRuntimeDelegatedAuthority?: (authority: AgentRuntimeDelegatedAuthority) => boolean;
     /** Abort-wins guard: a tombstoned run must not mint standing authority. */
     hasRunAbortMarker?: (runId: string) => boolean;
+    /** Native approval handlers of this Gateway's channel accounts register here. */
+    getNativeApprovalRouteCoordinator: () => ApprovalNativeRouteCoordinator | undefined;
     /** Config-driven default expiry stamp for freshly minted standing grants. */
     resolveGrantDefaultExpiresAtMs?: (nowMs: number) => number | null;
     chatAbortControllers?: Map<string, ChatAbortControllerEntry>;
@@ -155,7 +162,9 @@ export function createGatewayAuxHandlers(
       };
     },
   );
-  const execApprovalForwarder = createExecApprovalForwarder();
+  const execApprovalForwarder = createExecApprovalForwarder({
+    getNativeApprovalRouteCoordinator: params.getNativeApprovalRouteCoordinator,
+  });
   const approvalWebPushDelivery = createApprovalWebPushDelivery({
     getRuntimeConfig,
     log: params.log,
@@ -295,9 +304,7 @@ export function createGatewayAuxHandlers(
         }
       }
       questionManager.cancelClosedAuthorities();
-      if (!approvalReason) {
-        params.onAgentRunAuthorityClosed?.(authority);
-      }
+      params.onAgentRunAuthorityClosed?.(authority, approvalReason);
     },
   );
   const unregisterWorkerTurnClaimClosedObserver = params.registerWorkerTurnClaimClosedHandler?.(
@@ -444,6 +451,8 @@ export function createGatewayAuxHandlers(
     execApprovalManager,
     cancelRunBoundApprovals,
     forwardPluginApprovalRequest: execApprovalForwarder.handlePluginApprovalRequested,
+    forwardExecApprovalRequest: execApprovalForwarder.handleRequested,
+    execApprovalIosPushDelivery,
     approvalWebPushDelivery,
     pluginApprovalIosPushDelivery,
     pluginApprovalManager,

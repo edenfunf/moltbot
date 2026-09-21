@@ -161,6 +161,8 @@ function writeLaunchAgentActionLine(
 }
 
 async function ensureLaunchAgentLoadedAfterFailure(params: {
+  skipEnable?: boolean;
+  preserveAutoStart?: boolean;
   domain: string;
   serviceTarget: string;
   plistPath: string;
@@ -177,6 +179,8 @@ async function ensureLaunchAgentLoadedAfterFailure(params: {
       plistPath: params.plistPath,
       actionHint: "openclaw gateway start",
       onMutation: params.onMutation,
+      skipEnable: params.skipEnable,
+      preserveAutoStart: params.preserveAutoStart,
     });
     return { loaded: true };
   } catch (error) {
@@ -236,7 +240,8 @@ export async function startLaunchAgent({
       plistPath,
       actionHint: "openclaw gateway start",
       onMutation: reportMutation,
-      skipEnable: preserveAutoStart || enabled,
+      skipEnable: enabled,
+      preserveAutoStart,
       assertCurrent,
     });
     // Loading does not start demand-only jobs. Without -k, an auto-started job is left running.
@@ -253,6 +258,7 @@ export async function startLaunchAgent({
 
 export async function restartLaunchAgent({
   preserveDefinition,
+  preserveAutoStart,
   stdout,
   env,
   warn,
@@ -268,10 +274,15 @@ export async function restartLaunchAgent({
 
   const detached = await isCurrentProcessInsideLaunchdService(label);
   if (!detached) {
-    const { port: cleanupPort, probeHosts } = await resolveLaunchAgentGatewayContext(serviceEnv);
+    const {
+      env: cleanupEnv,
+      port: cleanupPort,
+      probeHosts,
+    } = await resolveLaunchAgentGatewayContext(serviceEnv);
     if (cleanupPort !== null) {
       assertGatewayServiceUpdateCurrent();
       cleanStaleGatewayProcessesSync(cleanupPort, {
+        env: cleanupEnv,
         assertCurrent: assertGatewayServiceUpdateCurrent,
         // Resolve after lsof captures its listener snapshot. A KeepAlive respawn
         // during enumeration must be protected before candidate filtering/signals.
@@ -339,9 +350,11 @@ export async function restartLaunchAgent({
 
   // `openclaw gateway restart` is an explicit operator request to bring the
   // LaunchAgent back, so clear any persisted disabled state before restart.
-  const enable = await execLaunchctl(["enable", serviceTarget]);
-  if (enable.code === 0) {
-    reportMutation("enable");
+  if (!preserveAutoStart) {
+    const enable = await execLaunchctl(["enable", serviceTarget]);
+    if (enable.code === 0) {
+      reportMutation("enable");
+    }
   }
 
   if (plistReloadNeeded) {
@@ -359,6 +372,7 @@ export async function restartLaunchAgent({
         plistPath,
         actionHint: "openclaw gateway restart",
         onMutation: reportMutation,
+        preserveAutoStart,
         retryPendingTeardown: true,
       });
     } catch (error) {
@@ -370,6 +384,7 @@ export async function restartLaunchAgent({
         serviceTarget,
         plistPath,
         onMutation: reportMutation,
+        preserveAutoStart,
       });
       if (restored.loaded) {
         throw error;
@@ -402,6 +417,7 @@ export async function restartLaunchAgent({
       serviceTarget,
       plistPath,
       onMutation: reportMutation,
+      preserveAutoStart,
     });
     const failure = `launchctl kickstart failed: ${start.stderr || start.stdout}`.trim();
     if (restored.loaded) {
@@ -425,6 +441,7 @@ export async function restartLaunchAgent({
     plistPath,
     actionHint: "openclaw gateway restart",
     onMutation: reportMutation,
+    preserveAutoStart,
   });
   if (preserveDefinition) {
     const kick = await execLaunchctl(["kickstart", serviceTarget]);

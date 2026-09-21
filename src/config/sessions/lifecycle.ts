@@ -1,8 +1,9 @@
 // Session lifecycle timestamps prefer store metadata and fall back to transcript headers.
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import type { SessionLifecycleTimestamps } from "./lifecycle.types.js";
 import { canonicalizeMainSessionAlias } from "./main-session.js";
-import { loadTranscriptHeaderSync, readTranscriptStatsSync } from "./session-accessor.js";
+import { loadTranscriptHeaderSync, readTranscriptMutationStateSync } from "./session-accessor.js";
 import {
   isTerminalSessionStatus,
   type InternalSessionEntry,
@@ -174,6 +175,7 @@ function readSessionHeaderStartedAtMs(params: {
   agentId?: string;
   sessionKey?: string;
   storePath?: string;
+  readHeader?: (sessionId: string) => unknown;
 }): number | undefined {
   const sessionId = params.entry.sessionId?.trim();
   const sessionKey = params.sessionKey?.trim();
@@ -183,12 +185,16 @@ function readSessionHeaderStartedAtMs(params: {
     return undefined;
   }
   try {
-    const header = loadTranscriptHeaderSync({
-      agentId,
-      sessionId,
-      ...(params.storePath ? { storePath: params.storePath } : {}),
-      ...(sessionKey ? { sessionKey } : {}),
-    }) as { type?: unknown; id?: unknown; timestamp?: unknown } | undefined;
+    const header = (
+      params.readHeader
+        ? params.readHeader(sessionId)
+        : loadTranscriptHeaderSync({
+            agentId,
+            sessionId,
+            ...(params.storePath ? { storePath: params.storePath } : {}),
+            ...(sessionKey ? { sessionKey } : {}),
+          })
+    ) as { type?: unknown; id?: unknown; timestamp?: unknown } | undefined;
     if (
       header?.type !== "session" ||
       (typeof header.id === "string" && header.id.trim() && header.id !== sessionId)
@@ -206,7 +212,8 @@ export function resolveSessionLifecycleTimestamps(params: {
   agentId?: string;
   sessionKey?: string;
   storePath?: string;
-}): { sessionStartedAt?: number; lastInteractionAt?: number } {
+  readHeader?: (sessionId: string) => unknown;
+}): SessionLifecycleTimestamps {
   const entry = params.entry;
   if (!entry) {
     return {};
@@ -236,6 +243,13 @@ function resolveTerminalMainSessionTranscriptRegistryCheck(
     sessionKey: params.sessionKey,
   });
   if (candidateSessionKey !== configuredMainSessionKey) {
+    return undefined;
+  }
+  if (params.entry.status === "running") {
+    // A yielded parent keeps status "running" next to the settled run's endedAt
+    // (see deriveGatewaySessionLifecycleSnapshot). That timestamp records run
+    // timing, not a terminal session: sibling completions must keep reusing the
+    // same session generation instead of rotating the parent mid-preparation.
     return undefined;
   }
   const hasTerminalLifecycle =
@@ -286,17 +300,17 @@ export function hasTerminalMainSessionTranscriptNewerThanRegistrySync(
   try {
     // Runtime transcripts are SQLite-only. Legacy-looking sessionFile values still
     // resolve through agent/session/store scope, so a file stat would read stale state.
-    const stats = readTranscriptStatsSync({
+    const mutation = readTranscriptMutationStateSync({
       agentId: params.agentId,
       sessionId: check.sessionId,
       storePath: params.storePath,
     });
-    if (stats.lastMutationAtMs === undefined) {
+    if (mutation.updatedAt === null) {
       return false;
     }
     return isTranscriptMutationNewerThanRegistry({
-      transcriptMutationAtMs: stats.lastMutationAtMs,
-      registryTimestampMs: stats.lastObservedMutationAtMs ?? check.registryTimestampMs,
+      transcriptMutationAtMs: mutation.updatedAt,
+      registryTimestampMs: mutation.observedAt ?? check.registryTimestampMs,
     });
   } catch {
     return false;

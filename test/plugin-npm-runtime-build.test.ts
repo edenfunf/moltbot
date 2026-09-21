@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   symlinkSync,
   writeFileSync,
@@ -41,6 +42,50 @@ function expectPluginNpmRuntimeBuildPlan(
 }
 
 describe("plugin npm runtime build planning", () => {
+  it.each([
+    "missing-directory",
+    "missing-manifest",
+    "malformed-manifest",
+    "no-extensions",
+    "javascript-only",
+  ])("reports selected package input without touching output (%s)", async (scenario) => {
+    const packageDir = path.join(tempDirs.make("openclaw-plugin-runtime-input-"), "selected");
+    const manifestPath = path.join(packageDir, "package.json");
+    const outDir = path.join(packageDir, "dist");
+    if (scenario !== "missing-directory") {
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(path.join(outDir, "sentinel.js"), "keep\n");
+    }
+    if (scenario === "malformed-manifest") {
+      writeFileSync(manifestPath, "{");
+    } else if (scenario === "no-extensions" || scenario === "javascript-only") {
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          name: "input-fixture",
+          version: "1.0.0",
+          ...(scenario === "javascript-only" ? { openclaw: { extensions: ["./index.js"] } } : {}),
+        }),
+      );
+      writeFileSync(path.join(packageDir, "index.js"), "export default {};\n");
+    }
+
+    const result = buildPluginNpmRuntime({ repoRoot, packageDir, logLevel: "silent" });
+    if (scenario === "missing-directory" || scenario === "missing-manifest") {
+      await expect(result).rejects.toMatchObject({ code: "ENOENT", path: manifestPath });
+    } else if (scenario === "malformed-manifest") {
+      await expect(result).rejects.toBeInstanceOf(SyntaxError);
+    } else {
+      await expect(result).resolves.toBeNull();
+    }
+    if (scenario === "missing-directory") {
+      expect(existsSync(packageDir)).toBe(false);
+    } else {
+      expect(readdirSync(outDir)).toEqual(["sentinel.js"]);
+      expect(readFileSync(path.join(outDir, "sentinel.js"), "utf8")).toBe("keep\n");
+    }
+  });
+
   it("builds a private worker without registering it as a plugin entry", async () => {
     const packageDir = tempDirs.make("openclaw-plugin-runtime-worker-");
     mkdirSync(path.join(packageDir, "src"));
@@ -57,7 +102,18 @@ describe("plugin npm runtime build planning", () => {
         },
       }),
     );
-    writeFileSync(path.join(packageDir, "index.ts"), 'export default { id: "worker-fixture" };\n');
+    writeFileSync(
+      path.join(packageDir, "index.ts"),
+      `import { resolveRuntimeWorkerUrl } from ${JSON.stringify(path.join(repoRoot, "src/infra/runtime-worker-url.ts").replaceAll("\\", "/"))};
+` +
+        `export const workerUrl = resolveRuntimeWorkerUrl({
+          currentModuleUrl: import.meta.url,
+          sourceWorkerName: "store.worker",
+          distWorkerPath: "extensions/worker-fixture/src/store.worker.js",
+          package: { name: "@openclaw/worker-fixture", distWorkerPath: "src/store.worker.js" },
+        });
+`,
+    );
     writeFileSync(
       path.join(packageDir, "src/store.worker.ts"),
       'import { parentPort, isMainThread } from "node:worker_threads";\n' +
@@ -68,7 +124,8 @@ describe("plugin npm runtime build planning", () => {
       await buildPluginNpmRuntime({ repoRoot, packageDir, logLevel: "silent" }),
     );
     expect(plan.runtimeExtensions).toEqual(["./dist/index.js"]);
-    const worker = new Worker(path.join(packageDir, "dist/src/store.worker.js"));
+    const { workerUrl } = await import(pathToFileURL(path.join(packageDir, "dist/index.js")).href);
+    const worker = new Worker(workerUrl);
     try {
       const result = await new Promise((resolve, reject) => {
         worker.once("message", resolve);
@@ -164,6 +221,12 @@ describe("plugin npm runtime build planning", () => {
       expectDistRelativePaths(plan.runtimeExtensions);
       expectDistRelativePaths(plan.runtimeBuildOutputs);
       expect(plan.packageFiles).toContain("dist/**");
+      if (existsSync(path.join(plan.packageDir, "assets", "activity.svg"))) {
+        expect(plan.packageFiles).toContain("assets/activity.svg");
+      }
+      if (existsSync(path.join(plan.packageDir, "assets", "activity"))) {
+        expect(plan.packageFiles).toContain("assets/activity/*.svg");
+      }
       expect(plan.packagePeerMetadata.peerDependencies.openclaw).toBe(
         plan.packageJson.openclaw?.compat?.pluginApi,
       );
@@ -186,6 +249,8 @@ describe("plugin npm runtime build planning", () => {
       "dist/**",
       "openclaw.plugin.json",
       "README.md",
+      "assets/icon.png",
+      "assets/activity.svg",
       "skills/**",
     ]);
   });

@@ -186,12 +186,11 @@ export function createPluginCandidatesFromManifestRegistry(
   });
 }
 
-class PluginLoadFailureError extends Error {
+export class PluginLoadFailureError extends Error {
   readonly pluginIds: string[];
   readonly registry: PluginRegistry;
 
-  constructor(registry: PluginRegistry) {
-    const failedPlugins = registry.plugins.filter((entry) => entry.status === "error");
+  constructor(registry: PluginRegistry, failedPlugins: readonly PluginRecord[]) {
     const summary = failedPlugins
       .map((entry) => `${entry.id}: ${entry.error ?? "unknown plugin load error"}`)
       .join("; ");
@@ -281,9 +280,10 @@ function createManifestPluginRecord(params: {
   manifestRecord: PluginManifestRecord;
   enabled: boolean;
   activationState: PluginActivationState;
+  shouldLoadModules: boolean;
 }): PluginRecord {
   const { candidate, manifestRecord } = params;
-  return createPluginRecord({
+  const record = createPluginRecord({
     id: manifestRecord.id,
     nativeSessionCatalog:
       manifestRecord.setup?.nativeSessionCatalog ??
@@ -317,6 +317,14 @@ function createManifestPluginRecord(params: {
     controlUi: manifestRecord.controlUi,
     mcpServers: manifestRecord.mcpServers,
   });
+  if (!params.shouldLoadModules) {
+    record.cliBackendIds = [
+      ...(manifestRecord.cliBackends ?? []),
+      ...(manifestRecord.setup?.cliBackends ?? []),
+    ];
+    record.commands = (manifestRecord.commandAliases ?? []).map((alias) => alias.name);
+  }
+  return record;
 }
 
 /** Prepares one candidate; import and registration policy stays with each loader. */
@@ -325,7 +333,7 @@ export function preparePluginLoadRecord(params: {
   manifestRecord: PluginManifestRecord;
   context: Pick<
     PluginLoadCacheContext,
-    "cfg" | "normalized" | "activationSource" | "autoEnabledReasons"
+    "cfg" | "normalized" | "activationSource" | "autoEnabledReasons" | "shouldLoadModules"
   >;
   onlyPluginIdSet: ReadonlySet<string> | null;
   dreamingSidecar: AuthorizedDreamingSidecar | null;
@@ -375,6 +383,7 @@ export function preparePluginLoadRecord(params: {
       manifestRecord,
       enabled: false,
       activationState,
+      shouldLoadModules: context.shouldLoadModules,
     });
     markPluginActivationDisabled(duplicate, `overridden by ${existingOrigin} plugin`);
     params.registry.plugins.push(duplicate);
@@ -399,6 +408,7 @@ export function preparePluginLoadRecord(params: {
     manifestRecord,
     enabled: enableState.enabled,
     activationState,
+    shouldLoadModules: context.shouldLoadModules,
   });
   record.kind = manifestRecord.kind;
   record.configUiHints = manifestRecord.configUiHints;
@@ -408,25 +418,20 @@ export function preparePluginLoadRecord(params: {
   return { pluginId, policyId, isDreamingSidecar, activationState, enableState, entry, record };
 }
 
-export function applyManifestSnapshotMetadata(
-  record: PluginRecord,
-  manifestRecord: PluginManifestRecord,
-): void {
-  record.channelIds = [...(manifestRecord.channels ?? [])];
-  record.providerIds = [...(manifestRecord.providers ?? [])];
-  record.cliBackendIds = [
-    ...(manifestRecord.cliBackends ?? []),
-    ...(manifestRecord.setup?.cliBackends ?? []),
-  ];
-  record.commands = (manifestRecord.commandAliases ?? []).map((alias) => alias.name);
-}
-
 export function maybeThrowOnPluginLoadError(
   registry: PluginRegistry,
   throwOnLoadError: boolean | undefined,
+  retained?: ReadonlyMap<string, PluginRecord>,
 ): void {
-  if (throwOnLoadError && registry.plugins.some((entry) => entry.status === "error")) {
-    throw new PluginLoadFailureError(registry);
+  if (!throwOnLoadError) {
+    return;
+  }
+  // Startup diagnostics remain visible; only newly evaluated failures reject a replacement.
+  const failedPlugins = registry.plugins.filter(
+    (entry) => entry.status === "error" && retained?.get(entry.id) !== entry,
+  );
+  if (failedPlugins.length > 0) {
+    throw new PluginLoadFailureError(registry, failedPlugins);
   }
 }
 

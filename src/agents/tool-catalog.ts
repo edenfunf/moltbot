@@ -292,6 +292,13 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "theme",
+    description: "List, select, and create appearance themes",
+    sectionId: "ui",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "dashboard",
     description: "Read and arrange the session dashboard",
     sectionId: "ui",
@@ -348,7 +355,21 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   },
   {
     id: "gateway",
-    description: "Read Gateway config/schema; owner-only OpenClaw self-update",
+    description: "Update OpenClaw; read Gateway config/schema when permitted",
+    sectionId: "automation",
+    profiles: ["minimal", "coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "plugins",
+    description: "Manage and reload plugins",
+    sectionId: "automation",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "openclaw",
+    description: "Delegate OpenClaw setup and repair",
     sectionId: "automation",
     profiles: [],
     includeInOpenClawGroup: true,
@@ -362,7 +383,7 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   },
   {
     id: "computer",
-    description: "Control a paired computer node desktop",
+    description: "Control the Gateway desktop or a paired computer",
     sectionId: "nodes",
     profiles: [],
     includeInOpenClawGroup: true,
@@ -454,6 +475,13 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "tts",
     description: "Text-to-speech conversion",
+    sectionId: "media",
+    profiles: [],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "pdf",
+    description: "PDF reading and extraction",
     sectionId: "media",
     profiles: [],
     includeInOpenClawGroup: true,

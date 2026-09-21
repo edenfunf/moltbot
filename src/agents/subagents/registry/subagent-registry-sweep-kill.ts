@@ -16,6 +16,7 @@ import {
 } from "../../../tasks/detached-task-runtime.js";
 import { isProvisionalSubagentKillTask } from "../../../tasks/task-cancellation-state.js";
 import type { TaskRecord } from "../../../tasks/task-registry.types.js";
+import { reconcileRetiredSubagentCancellation } from "../completion/subagent-completion-admission.store.js";
 import {
   SUBAGENT_ENDED_REASON_COMPLETE,
   SUBAGENT_ENDED_REASON_ERROR,
@@ -32,7 +33,6 @@ import {
 import {
   loadSubagentSessionEntry,
   resolveCompletionFromSessionEntry,
-  type SubagentSessionStoreCache,
 } from "./subagent-session-reconciliation.js";
 
 function findNextSubagentRunCreatedAt(
@@ -305,7 +305,6 @@ export async function reconcileProvisionalSubagentKill(params: {
   entry: SubagentRunRecord;
   now: number;
   runs: Map<string, SubagentRunRecord>;
-  storeCache: SubagentSessionStoreCache;
   completeSubagentRunWithRecovery: (
     completion: SubagentCompletionRequest,
     source: string,
@@ -336,6 +335,12 @@ export async function reconcileProvisionalSubagentKill(params: {
   const taskResolution = initialGeneration.taskResolution;
   const task = taskResolution.task;
   const nextRunCreatedAt = initialGeneration.nextRunCreatedAt;
+  if (taskResolution.lookup === "available" && !task && nextRunCreatedAt === undefined) {
+    const retired = reconcileRetiredSubagentCancellation(entry, now);
+    if (retired !== undefined) {
+      return retired;
+    }
+  }
   const hasStableTaskCancellation = isStableCancellation(task);
   const killedAt = killReconciliation.killedAt;
   const isCurrentKill = () =>
@@ -364,7 +369,6 @@ export async function reconcileProvisionalSubagentKill(params: {
   }
   const sessionEntry = loadSubagentSessionEntry({
     childSessionKey: entry.childSessionKey,
-    storeCache: params.storeCache,
   });
   const completion = resolveCompletionFromSessionEntry(sessionEntry, now, {
     notBeforeMs: entry.execution.startedAt ?? entry.createdAt,

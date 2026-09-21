@@ -14,7 +14,8 @@ import {
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { writeConfigFile } from "../config/config.js";
 import type { GatewayAuthConfig, GatewayOperatorRolesConfig } from "../config/types.gateway.js";
-import { loadOriginDeviceToken, storeOriginDeviceToken } from "../infra/device-auth-store.js";
+import { loadOriginDeviceToken } from "../infra/device-auth-store.js";
+import { seedOriginDeviceToken } from "../infra/device-auth-store.test-support.js";
 import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import { getPairedDevice, listDevicePairing } from "../infra/device-pairing.js";
 import { connectUserModelAccount } from "../state/user-model-accounts.js";
@@ -112,6 +113,20 @@ describe("gateway identity scope grants", () => {
       expectedScopes: NARROW_SCOPES,
     },
     {
+      label: "read-only from an admin-only identity grant",
+      assignedRole: "read-only",
+      identityScopes: ["operator.admin"] satisfies OperatorScope[],
+      deviceScopes: [],
+      expectedScopes: ["operator.read"],
+    },
+    {
+      label: "write-only from an admin-only identity grant",
+      assignedRole: "write-only",
+      identityScopes: ["operator.admin"] satisfies OperatorScope[],
+      deviceScopes: [],
+      expectedScopes: ["operator.write"],
+    },
+    {
       label: "empty",
       assignedRole: "denied",
       deviceScopes: NARROW_SCOPES,
@@ -148,6 +163,11 @@ describe("gateway identity scope grants", () => {
               agents: "*",
               scopes: ["operator.admin"],
             },
+            "read-only": {
+              sessions: { others: "view" },
+              agents: "*",
+              scopes: ["operator.read"],
+            },
             "write-only": {
               sessions: { others: "write" },
               agents: "*",
@@ -177,6 +197,14 @@ describe("gateway identity scope grants", () => {
         expect(connected.ok).toBe(true);
         expect((await rpcReq(ws, "status")).ok).toBe(scenario.expectedScopes.length > 0);
         expect(responseScopes(connected)).toEqual(scenario.expectedScopes);
+        if (scenario.assignedRole === "read-only") {
+          expect(
+            await rpcReq(ws, "sessions.patch", { key: "agent:main:denied", label: "denied" }),
+          ).toMatchObject({
+            ok: false,
+            error: { message: expect.stringContaining("operator.write") },
+          });
+        }
         expect((connected.payload as { auth?: { deviceToken?: string } }).auth?.deviceToken).toBe(
           undefined,
         );
@@ -561,13 +589,13 @@ describe("gateway identity scope grants", () => {
         if (!auth.deviceToken) {
           throw new Error("expected a Gateway-issued device token");
         }
-        storeOriginDeviceToken({ ...cacheKey, token: auth.deviceToken, scopes: auth.scopes });
+        seedOriginDeviceToken({ ...cacheKey, token: auth.deviceToken, scopes: auth.scopes });
       } finally {
         initialWs.close();
         expect(await waitForWsClose(initialWs, 1_000)).toBe(true);
       }
 
-      const cached = loadOriginDeviceToken(cacheKey);
+      const cached = await loadOriginDeviceToken(cacheKey);
       if (!cached) {
         throw new Error("expected the first connection's cached device token");
       }

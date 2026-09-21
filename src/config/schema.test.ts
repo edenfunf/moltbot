@@ -3,7 +3,6 @@ import { SENSITIVE_URL_HINT_TAG } from "@openclaw/net-policy/redact-sensitive-ur
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildConfigSchemaCore, lookupConfigSchema } from "./schema.js";
-import { applyDerivedTags } from "./schema.tags.js";
 import { applyResolvedConfigTierHints } from "./schema.tiers.js";
 import { validateConfigObjectRaw } from "./validation.js";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
@@ -171,9 +170,7 @@ describe("config schema", () => {
     }
     expect(res.uiHints["channels.sms.authToken"]?.presentation).toBeUndefined();
     expect(res.uiHints["channels.signal.configPath"]?.presentation).toBeUndefined();
-    expect(res.uiHints["proxy.tls.caFile"]?.tags).toEqual(
-      expect.arrayContaining(["security", "network", "storage"]),
-    );
+    expect(res.uiHints["proxy.tls.caFile"]?.tags).toBeUndefined();
     expect(res.version).toBeTypeOf("string");
     expect(res.version.trim().length).toBeGreaterThan(0);
     expect(res.generatedAt).toBeTypeOf("string");
@@ -850,46 +847,6 @@ describe("config schema", () => {
     ).toBeUndefined();
   });
 
-  it("derives tags for security, network, storage, tools, and performance paths", () => {
-    const tagged = applyDerivedTags({
-      "gateway.auth.token": {},
-      "proxy.tls.caFile": {},
-      "tools.web.fetch.timeoutSeconds": {},
-      "SESSION.SHARING.peer": {
-        tags: [" Custom ", "AUTH", "security", "custom", "unknown"],
-      },
-    });
-    expect(tagged["gateway.auth.token"]?.tags).toEqual(
-      expect.arrayContaining(["security", "auth"]),
-    );
-    expect(tagged["proxy.tls.caFile"]?.tags).toEqual(
-      expect.arrayContaining(["security", "network", "storage"]),
-    );
-    expect(tagged["tools.web.fetch.timeoutSeconds"]?.tags).toEqual(
-      expect.arrayContaining(["tools", "performance"]),
-    );
-    expect(tagged["SESSION.SHARING.peer"]?.tags).toEqual([
-      "security",
-      "auth",
-      "access",
-      "privacy",
-      "storage",
-      "custom",
-      "unknown",
-    ]);
-  });
-
-  it("only derives the advanced tag from an explicit advanced hint", () => {
-    const tagged = applyDerivedTags({
-      "update.channel": { advanced: false },
-      "update.auto.enabled": { advanced: false },
-      "update.auto.interval": { advanced: true },
-    });
-    expect(tagged["update.channel"]?.tags).toEqual([]);
-    expect(tagged["update.auto.enabled"]?.tags).toEqual([]);
-    expect(tagged["update.auto.interval"]?.tags).toEqual(["performance", "advanced"]);
-  });
-
   it("rejects removed Firecrawl config from the core web fetch schema", () => {
     const result = ToolsSchema.safeParse({
       web: {
@@ -1024,10 +981,14 @@ describe("config schema", () => {
           model: {
             primary: "openrouter/anthropic/claude-sonnet-4-6",
           },
+          thinking: "low",
+          fastMode: true,
           timeoutMs: 15_000,
         },
       },
     });
+    expect(tools?.exec?.reviewer?.thinking).toBe("low");
+    expect(tools?.exec?.reviewer?.fastMode).toBe(true);
     expect(tools?.exec?.reviewer?.model).toEqual({
       primary: "openrouter/anthropic/claude-sonnet-4-6",
     });
@@ -1041,6 +1002,8 @@ describe("config schema", () => {
               exec: {
                 reviewer: {
                   model: "openai/gpt-5.5",
+                  thinking: "high",
+                  fastMode: false,
                 },
               },
             },
@@ -1049,6 +1012,14 @@ describe("config schema", () => {
       },
     });
     expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.model).toBe("openai/gpt-5.5");
+    expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.thinking).toBe("high");
+    expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.fastMode).toBe(false);
+    expect(ToolsSchema.safeParse({ exec: { reviewer: { fastMode: "priority" } } }).success).toBe(
+      false,
+    );
+    expect(ToolsSchema.safeParse({ exec: { reviewer: { thinking: "turbo" } } }).success).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -1165,7 +1136,6 @@ describe("config schema", () => {
           enabled: true,
           runtime: "quickjs-wasi",
           mode: "only",
-          languages: ["javascript", "typescript"],
           timeoutMs: 5000,
           memoryLimitBytes: 67_108_864,
           maxOutputBytes: 65_536,
@@ -1180,7 +1150,6 @@ describe("config schema", () => {
       enabled: true,
       runtime: "quickjs-wasi",
       mode: "only",
-      languages: ["javascript", "typescript"],
       timeoutMs: 5000,
       memoryLimitBytes: 67_108_864,
       maxOutputBytes: 65_536,
@@ -1208,6 +1177,7 @@ describe("config schema", () => {
     });
     expect(ToolsSchema.safeParse({ codeMode: "on" }).success).toBe(false);
     expect(ToolsSchema.safeParse({ codeMode: { enabled: "always" } }).success).toBe(false);
+    expect(ToolsSchema.safeParse({ codeMode: { languages: ["javascript"] } }).success).toBe(false);
   });
 
   it.each([undefined, {}, { maxConcurrent: 3 }, false, { enabled: false }])(
@@ -1335,6 +1305,17 @@ describe("config schema", () => {
     expect(baseSchema.uiHints["gateway.reload.mode"]?.advanced).toBe(true);
     expect(baseSchema.uiHints["agents.defaults.workspace"]?.advanced).toBe(false);
     expect(baseSchema.uiHints["agents.defaults.compaction.timeoutSeconds"]?.advanced).toBe(true);
+    for (const path of [
+      "tools.swarm",
+      "tools.swarm.enabled",
+      "tools.swarm.maxConcurrent",
+      "tools.loopDetection.enabled",
+      "gateway.cliAgents.enabled",
+      "logging.audit.messages",
+    ]) {
+      expect(baseSchema.uiHints[path]?.advanced, path).toBe(false);
+    }
+    expect(baseSchema.uiHints["agents.defaults.experimental.localModelLean"]?.advanced).toBe(true);
   });
 
   it("preserves explicit common hints on numeric leaves while defaulting tuning advanced", () => {

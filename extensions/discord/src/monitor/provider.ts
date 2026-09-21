@@ -23,6 +23,7 @@ import {
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
 import { resolveDiscordAccountAllowFrom, resolveDiscordAccountDmPolicy } from "../accounts.js";
 import type { DiscordCommandDeployHashStore } from "../command-deploy-store.js";
+import { getDiscordEndpointRuntime } from "../endpoint-runtime.js";
 import { GatewayCloseCodes } from "../internal/gateway.js";
 import { parseApplicationIdFromToken } from "../probe.js";
 import { normalizeDiscordToken } from "../token.js";
@@ -182,6 +183,9 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const sessionPrefix = "discord:slash";
   const ephemeralDefault = slashCommand.ephemeral;
   const voiceEnabled = resolveDiscordVoiceEnabled(discordCfg.voice);
+  if (voiceEnabled && getDiscordEndpointRuntime()) {
+    throw new Error("Discord voice transport is unavailable while DISCORD_API_URL is configured");
+  }
 
   const allowlistResolved = await resolveDiscordAllowlistConfig({
     token,
@@ -278,7 +282,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   });
   const voiceManagerRef: { current: DiscordVoiceManager | null } = { current: null };
   const threadBindings = threadBindingsEnabled
-    ? discordProviderSessionRuntime.createThreadBindingManager({
+    ? await discordProviderSessionRuntime.createThreadBindingManager({
         accountId: account.accountId,
         token,
         cfg,
@@ -286,41 +290,10 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         maxAgeMs: threadBindingMaxAgeMs,
       })
     : discordProviderSessionRuntime.createNoopThreadBindingManager(account.accountId);
-  if (threadBindingsEnabled) {
-    const uncertainProbeKeys = new Set<string>();
-    const reconciliation = await discordProviderSessionRuntime.reconcileAcpThreadBindingsOnStartup({
-      cfg,
-      accountId: account.accountId,
-      sendFarewell: false,
-      healthProbe: async ({ sessionKey, session }) => {
-        const probe = await probeDiscordAcpBindingHealth({
-          cfg,
-          sessionKey,
-          agentId: session.agentId,
-          storedState: session.acp?.state,
-          lastActivityAt: session.acp?.lastActivityAt,
-          providerSessionRuntime: discordProviderSessionRuntime,
-        });
-        if (probe.status === "uncertain") {
-          uncertainProbeKeys.add(`${sessionKey}${probe.reason ? ` (${probe.reason})` : ""}`);
-        }
-        return probe;
-      },
-    });
-    if (reconciliation.removed > 0) {
-      logVerbose(
-        `discord: removed ${reconciliation.removed}/${reconciliation.checked} stale ACP thread bindings on startup for account ${account.accountId}: ${reconciliation.staleSessionKeys.join(", ")}`,
-      );
-    }
-    if (uncertainProbeKeys.size > 0) {
-      logVerbose(
-        `discord: ACP thread-binding health probe uncertain for account ${account.accountId}: ${[...uncertainProbeKeys].join(", ")}`,
-      );
-    }
-  }
   let lifecycleStarted = false;
   let gatewaySupervisor: ReturnType<typeof createDiscordGatewaySupervisor> | undefined;
   let deactivateMessageHandler: (() => Promise<void>) | undefined;
+  let stopMonitorListeners: (() => Promise<void>) | undefined;
   let autoPresenceController: Awaited<
     ReturnType<typeof createDiscordMonitorClient>
   >["autoPresenceController"] = null;
@@ -328,6 +301,45 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   let earlyGatewayEmitter = gatewaySupervisor?.emitter;
   let onEarlyGatewayDebug: ((msg: unknown) => void) | undefined;
   try {
+    if (opts.abortSignal?.aborted) {
+      return;
+    }
+    if (threadBindingsEnabled) {
+      const uncertainProbeKeys = new Set<string>();
+      const reconciliation =
+        await discordProviderSessionRuntime.reconcileAcpThreadBindingsOnStartup({
+          cfg,
+          accountId: account.accountId,
+          sendFarewell: false,
+          healthProbe: async ({ sessionKey, session }) => {
+            const probe = await probeDiscordAcpBindingHealth({
+              cfg,
+              sessionKey,
+              agentId: session.agentId,
+              storedState: session.acp?.state,
+              lastActivityAt: session.acp?.lastActivityAt,
+              providerSessionRuntime: discordProviderSessionRuntime,
+            });
+            if (probe.status === "uncertain") {
+              uncertainProbeKeys.add(`${sessionKey}${probe.reason ? ` (${probe.reason})` : ""}`);
+            }
+            return probe;
+          },
+        });
+      if (reconciliation.removed > 0) {
+        logVerbose(
+          `discord: removed ${reconciliation.removed}/${reconciliation.checked} stale ACP thread bindings on startup for account ${account.accountId}: ${reconciliation.staleSessionKeys.join(", ")}`,
+        );
+      }
+      if (uncertainProbeKeys.size > 0) {
+        logVerbose(
+          `discord: ACP thread-binding health probe uncertain for account ${account.accountId}: ${[...uncertainProbeKeys].join(", ")}`,
+        );
+      }
+    }
+    if (opts.abortSignal?.aborted) {
+      return;
+    }
     // SAFETY: Gateway startup supplies the full plugin channel runtime; the surface type is the minimal external view.
     const pluginChannelRuntime = opts.channelRuntime as PluginRuntime["channel"] | undefined;
     const { commands, components, modals } = createDiscordProviderInteractionSurface({
@@ -491,7 +503,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
           opts.setStatus?.({ lastEventAt: at, lastInboundAt: at });
         }
       : undefined;
-    registerDiscordMonitorListeners({
+    stopMonitorListeners = registerDiscordMonitorListeners({
       readPolicy,
       cfg,
       client,
@@ -549,6 +561,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   } finally {
     await cleanupDiscordProviderStartup({
       deactivateMessageHandler,
+      stopMonitorListeners,
       autoPresenceController,
       setStatus: opts.setStatus,
       onEarlyGatewayDebug,

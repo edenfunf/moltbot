@@ -3,6 +3,10 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthProfileCredential, AuthProfileStore } from "../../agents/auth-profiles.js";
+import {
+  createApiKeyCredential,
+  createAuthProfileStoreFixture,
+} from "../../agents/auth-profiles/credential-fixtures.test-support.js";
 import { registerModelsCli } from "../../cli/models-cli.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createDirectChatContext } from "../../gateway/server-chat.agent-events.test-helpers.js";
@@ -68,6 +72,9 @@ vi.mock("./auth-refresh.js", () => ({
 
 vi.mock("../../gateway/server-methods/models-auth-refresh.js", () => ({
   modelsAuthRefreshHandlers: {},
+}));
+
+vi.mock("../../gateway/model-auth-refresh.js", () => ({
   refreshModelAuthStateAfterMutation: vi.fn(async () => undefined),
 }));
 
@@ -131,10 +138,14 @@ async function dispatchAuthLogout(
     }),
   });
   expect(respond).toHaveBeenCalledOnce();
-  const [ok, , error] = expectDefined(respond.mock.calls[0], "Gateway logout response");
+  const [ok, payload, error] = expectDefined(respond.mock.calls[0], "Gateway logout response");
   if (!ok) {
     throw new Error(expectDefined(error, "Gateway logout error").message);
   }
+  expect(payload).toHaveProperty(
+    "warning",
+    "Credentials were removed, but the Gateway has not confirmed applying the change. Run `openclaw gateway restart` to apply it.",
+  );
 }
 
 function createRuntime(): RuntimeEnv & { logs: string[] } {
@@ -356,11 +367,7 @@ describe("models auth logout", () => {
     { name: "throws", failure: new Error("store write failed"), throws: true },
   ])("restores surviving config when store removal $name", async ({ failure, throws }) => {
     const profileId = "openai:manual";
-    const credential: AuthProfileCredential = {
-      type: "api_key",
-      provider: "openai",
-      key: "synthetic-key",
-    };
+    const credential: AuthProfileCredential = createApiKeyCredential("openai", "synthetic-key");
     let liveConfig: OpenClawConfig = {
       auth: {
         profiles: { [profileId]: { provider: "openai", mode: "api_key" } },
@@ -372,10 +379,9 @@ describe("models auth logout", () => {
         },
       },
     };
-    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-      version: 1,
-      profiles: { [profileId]: credential },
-    });
+    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+      createAuthProfileStoreFixture({ [profileId]: credential }),
+    );
     mocks.updateConfig.mockImplementation(
       async (
         mutator: (
@@ -412,11 +418,7 @@ describe("models auth logout", () => {
   it("restores only surviving references after partial multi-store removal", async () => {
     const removedId = "openai:removed";
     const survivorId = "openai:survivor";
-    const survivor: AuthProfileCredential = {
-      type: "api_key",
-      provider: "openai",
-      key: "synthetic-survivor",
-    };
+    const survivor: AuthProfileCredential = createApiKeyCredential("openai", "synthetic-survivor");
     let liveConfig: OpenClawConfig = {
       auth: {
         profiles: {
@@ -431,10 +433,12 @@ describe("models auth logout", () => {
         },
       },
     };
-    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-      version: 1,
-      profiles: { [removedId]: { ...survivor, key: "synthetic-removed" }, [survivorId]: survivor },
-    });
+    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+      createAuthProfileStoreFixture({
+        [removedId]: { ...survivor, key: "synthetic-removed" },
+        [survivorId]: survivor,
+      }),
+    );
     mocks.updateConfig.mockImplementation(
       async (
         mutator: (
@@ -450,19 +454,17 @@ describe("models auth logout", () => {
       .mockReset()
       .mockImplementationOnce(async (params) => {
         await params.beforeRemove?.(params.profileIds);
-        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-          version: 1,
-          profiles: { [survivorId]: survivor },
-        });
+        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+          createAuthProfileStoreFixture({ [survivorId]: survivor }),
+        );
         await params.onIncomplete?.(new Map([[survivorId, survivor]]));
         return false;
       })
       .mockImplementationOnce(async (params) => {
         await params.beforeRemove?.(params.profileIds);
-        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-          version: 1,
-          profiles: {},
-        });
+        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+          createAuthProfileStoreFixture({}),
+        );
         return true;
       });
 
@@ -485,11 +487,7 @@ describe("models auth logout", () => {
   it("preserves an untargeted token binding through failed API-key removal and retry", async () => {
     const keyId = "openai:key";
     const tokenId = "openai:token";
-    const key: AuthProfileCredential = {
-      type: "api_key",
-      provider: "openai",
-      key: "synthetic-key",
-    };
+    const key: AuthProfileCredential = createApiKeyCredential("openai", "synthetic-key");
     const token: AuthProfileCredential = {
       type: "token",
       provider: "openai",
@@ -509,10 +507,9 @@ describe("models auth logout", () => {
         },
       },
     };
-    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-      version: 1,
-      profiles: { [keyId]: key, [tokenId]: token },
-    });
+    mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+      createAuthProfileStoreFixture({ [keyId]: key, [tokenId]: token }),
+    );
     mocks.updateConfig.mockImplementation(
       async (
         mutator: (
@@ -533,10 +530,9 @@ describe("models auth logout", () => {
       })
       .mockImplementationOnce(async (params) => {
         await params.beforeRemove?.(params.profileIds);
-        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-          version: 1,
-          profiles: { [tokenId]: token },
-        });
+        mocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+          createAuthProfileStoreFixture({ [tokenId]: token }),
+        );
         return true;
       });
 

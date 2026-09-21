@@ -1,9 +1,11 @@
 /** Frozen backup ownership and resource policy shared by archive traversal and SQLite discovery. */
-import type { Dirent } from "node:fs";
+import { statSync, type Dirent, type Stats } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { isVolatileBackupPath } from "../infra/backup-volatile-filter.js";
+import { isTransientBackupPath, isVolatileBackupPath } from "../infra/backup-volatile-filter.js";
 import { hasErrnoCode } from "../infra/errno.js";
+import { sameFileIdentity } from "../infra/fs-safe-advanced.js";
+import { walkDirectory } from "../infra/fs-safe.js";
 import { isUpdateCapturePath } from "../infra/update-capture-paths.js";
 import type { ResolvedPluginBackupResource } from "../plugins/manifest-backup-resources.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
@@ -27,7 +29,22 @@ type BackupRegenerableRoot = Readonly<{
   sourcePath: string;
 }>;
 
-export type BackupResourceInventory = Readonly<{
+export type BackupCoreDatabase = Readonly<
+  {
+    sourcePath: string;
+    identity?: Stats;
+  } & ({ role: "global" | "quarantine" } | { role: "agent"; agentId: string })
+>;
+
+/** Ephemeral coverage of a captured canonical image; never part of the archive manifest. */
+export type BackupSqliteSnapshotFact = Readonly<
+  { sourcePath: string; dev: number; ino: number } & (
+    | { role: "global" }
+    | { role: "agent"; agentId: string }
+  )
+>;
+
+type BackupResourcePolicy = Readonly<{
   stateDir: string;
   agentRoots: readonly BackupAgentRoot[];
   regenerableRoots: readonly BackupRegenerableRoot[];
@@ -36,6 +53,22 @@ export type BackupResourceInventory = Readonly<{
   isPackageContent: (sourcePath: string) => boolean;
   isVolatile: (sourcePath: string) => boolean;
 }>;
+
+export type BackupResourcePlan = BackupResourcePolicy &
+  Readonly<{
+    protectedPaths: readonly string[];
+    excludedPaths: readonly string[];
+    pluginResourceRoots: readonly string[];
+  }>;
+
+export type BackupResourceInventory = BackupResourcePolicy &
+  Readonly<{
+    coreDatabases: readonly BackupCoreDatabase[];
+    resolveSqliteSource: (
+      sourcePath: string,
+      identity?: Stats,
+    ) => BackupCoreDatabase | { role: "plugin" } | { role: "unresolvable-link" } | undefined;
+  }>;
 
 const MANAGED_STATE_ROOTS = ["dev", "git", "npm", "npm-runtime", "tmp", "tools"] as const;
 
@@ -48,39 +81,9 @@ async function listDefaultAgentTemporaryRoots(
   const customAgentRoots = agentRoots.filter(
     ({ agentId, sourcePath }) => sourcePath !== path.join(stateDir, "agents", agentId, "agent"),
   );
+  const isCustomAgentPath = (candidate: string) =>
+    customAgentRoots.some(({ sourcePath }) => isPathWithin(candidate, sourcePath));
   const temporaryRoots: string[] = [];
-
-  const visit = async (directoryPath: string): Promise<void> => {
-    if (customAgentRoots.some(({ sourcePath }) => isPathWithin(directoryPath, sourcePath))) {
-      return;
-    }
-
-    let entries: Dirent[];
-    try {
-      entries = await fs.readdir(directoryPath, { withFileTypes: true });
-    } catch (error) {
-      if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
-        return;
-      }
-      throw error;
-    }
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const entryPath = path.join(directoryPath, entry.name);
-      if (customAgentRoots.some(({ sourcePath }) => isPathWithin(entryPath, sourcePath))) {
-        continue;
-      }
-      if (entry.name === "tmp" || entry.name === ".tmp") {
-        temporaryRoots.push(entryPath);
-        continue;
-      }
-      await visit(entryPath);
-    }
-  };
-
   let agentDirectories: Dirent[];
   try {
     agentDirectories = await fs.readdir(path.join(stateDir, "agents"), { withFileTypes: true });
@@ -91,15 +94,32 @@ async function listDefaultAgentTemporaryRoots(
     throw error;
   }
   for (const directory of agentDirectories) {
-    if (directory.isDirectory()) {
-      await visit(path.join(stateDir, "agents", directory.name, "agent"));
+    const agentRoot = path.join(stateDir, "agents", directory.name, "agent");
+    if (!directory.isDirectory() || isCustomAgentPath(agentRoot)) {
+      continue;
     }
+    const scan = await walkDirectory(agentRoot, {
+      symlinks: "skip",
+      include: (entry) =>
+        entry.kind === "directory" &&
+        (entry.name === "tmp" || entry.name === ".tmp") &&
+        !isCustomAgentPath(entry.path),
+      descend: (entry) =>
+        entry.name !== "tmp" && entry.name !== ".tmp" && !isCustomAgentPath(entry.path),
+    });
+    const failure = scan.failedDirs.find(
+      ({ error }) => !hasErrnoCode(error, "ENOENT") && !hasErrnoCode(error, "ENOTDIR"),
+    );
+    if (failure) {
+      throw failure.error;
+    }
+    temporaryRoots.push(...scan.entries.map((entry) => entry.path));
   }
   return temporaryRoots;
 }
 
-/** Build the one immutable owner inventory used by backup planning and archive consumers. */
-export async function createBackupResourceInventory(params: {
+/** Prepare declared backup resources without opening live SQLite databases. */
+export async function createBackupResourcePlan(params: {
   stateDir: string;
   configPaths: readonly string[];
   oauthDirs: readonly string[];
@@ -109,8 +129,9 @@ export async function createBackupResourceInventory(params: {
   pluginResources: readonly ResolvedPluginBackupResource[];
   pluginRoots: readonly string[];
   onlyConfig?: boolean;
-}): Promise<BackupResourceInventory> {
+}): Promise<BackupResourcePlan> {
   const stateDir = path.resolve(params.stateDir);
+  const pluginResourceRoots: string[] = [];
   const configPaths = new Set(params.configPaths.map((configPath) => path.resolve(configPath)));
   const agentRoots = Object.freeze(
     params.agentRoots.map((root) =>
@@ -160,6 +181,7 @@ export async function createBackupResourceInventory(params: {
         }
         if (resource.disposition === "include") {
           protectedPathSet.add(sourcePath);
+          pluginResourceRoots.push(sourcePath);
         } else {
           exclude("plugin resource", sourcePath);
         }
@@ -196,6 +218,27 @@ export async function createBackupResourceInventory(params: {
     ].toSorted((left, right) => right.length - left.length || left.localeCompare(right)),
   );
 
+  const resources = {
+    stateDir,
+    agentRoots,
+    regenerableRoots: uniqueRegenerableRoots,
+    protectedPaths,
+    excludedPaths,
+    pluginResourceRoots: Object.freeze(pluginResourceRoots),
+  };
+  return Object.freeze({ ...resources, ...createBackupPathPolicy(resources) });
+}
+
+function createBackupPathPolicy({
+  stateDir,
+  agentRoots,
+  regenerableRoots,
+  protectedPaths,
+  excludedPaths,
+}: Pick<
+  BackupResourcePlan,
+  "stateDir" | "agentRoots" | "regenerableRoots" | "protectedPaths" | "excludedPaths"
+>): BackupResourcePolicy {
   const isIncluded = (sourcePath: string): boolean => {
     const candidate = path.resolve(sourcePath);
     if (isUpdateCapturePath(candidate, stateDir)) {
@@ -256,21 +299,106 @@ export async function createBackupResourceInventory(params: {
   const volatilePlan = { stateDirs: [stateDir] };
   const isVolatile = (sourcePath: string): boolean => {
     const candidate = path.resolve(sourcePath);
-    // Explicit owners survive volatile filters; excluded ancestors stay pruned
-    // and the planner archives a selected link through its own asset instead.
+    // State-specific rules do not apply inside explicit owners. Transient names
+    // apply everywhere, while selected paths and their ancestors stay reachable.
     const ownedPath = protectedPaths.some((protectedPath) =>
       isPathWithin(candidate, protectedPath),
     );
-    return !ownedPath && isVolatileBackupPath(candidate, volatilePlan);
+    return (
+      (candidate !== stateDir &&
+        !protectedPaths.some((protectedPath) => isPathWithin(protectedPath, candidate)) &&
+        isTransientBackupPath(candidate)) ||
+      (!ownedPath && isVolatileBackupPath(candidate, volatilePlan))
+    );
   };
 
-  return Object.freeze({
+  return {
     stateDir,
     agentRoots,
-    regenerableRoots: uniqueRegenerableRoots,
+    regenerableRoots,
     isIncluded,
     isTraversable,
     isPackageContent,
     isVolatile,
+  };
+}
+
+/** Bind archive ownership to the registrations captured in its online root snapshot. */
+export function sealBackupResourceInventory(
+  resources: BackupResourcePlan,
+  coreDatabases: readonly BackupCoreDatabase[],
+): BackupResourceInventory {
+  const owners = Object.freeze(coreDatabases.map((owner) => Object.freeze({ ...owner })));
+  const protectedPaths = Object.freeze(
+    [
+      ...new Set([...resources.protectedPaths, ...owners.map(({ sourcePath }) => sourcePath)]),
+    ].toSorted(),
+  );
+  const resolveSqliteSource: BackupResourceInventory["resolveSqliteSource"] = (
+    sourcePath,
+    identity,
+  ) => {
+    const candidate = path.resolve(sourcePath);
+    const exact = owners.filter((database) => path.resolve(database.sourcePath) === candidate);
+    let current = identity;
+    let unresolvableLink = false;
+    if (!exact.length && !current) {
+      try {
+        current = statSync(candidate, { throwIfNoEntry: false });
+      } catch (error) {
+        if (!hasErrnoCode(error, "ELOOP")) {
+          throw error;
+        }
+        unresolvableLink = true;
+      }
+    }
+    const aliases = exact.length
+      ? exact
+      : current
+        ? owners.filter(
+            (database) => database.identity && sameFileIdentity(database.identity, current),
+          )
+        : [];
+    if (aliases.length > 1) {
+      throw new Error(`SQLite path aliases multiple core database owners: ${candidate}`);
+    }
+    return (
+      aliases[0] ??
+      (resources.pluginResourceRoots.some((root) => isPathWithin(candidate, root))
+        ? { role: "plugin" }
+        : unresolvableLink
+          ? { role: "unresolvable-link" }
+          : undefined)
+    );
+  };
+
+  return Object.freeze({
+    ...createBackupPathPolicy({ ...resources, protectedPaths }),
+    coreDatabases: owners,
+    resolveSqliteSource,
   });
+}
+
+/** Report only canonical sources present in the completed snapshot generation. */
+export function describeCapturedBackupSqliteSnapshots(
+  inventory: BackupResourceInventory,
+  capturedSourcePaths: readonly string[],
+): readonly BackupSqliteSnapshotFact[] {
+  const capturedPaths = new Set(capturedSourcePaths);
+  return Object.freeze(
+    inventory.coreDatabases.flatMap((owner) =>
+      owner.role !== "quarantine" && owner.identity && capturedPaths.has(owner.sourcePath)
+        ? [
+            Object.freeze({
+              sourcePath: owner.sourcePath,
+              dev: owner.identity.dev,
+              ino: owner.identity.ino,
+              ...(owner.role === "agent"
+                ? { role: "agent" as const, agentId: owner.agentId }
+                : { role: "global" as const }),
+            }),
+          ]
+        : [],
+    ),
+  );
 }

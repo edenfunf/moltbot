@@ -81,6 +81,19 @@ type AnthropicMessagesModel = Model<"anthropic-messages">;
 type AnthropicStreamFn = ReturnType<typeof createAnthropicMessagesTransportStreamFn>;
 type AnthropicStreamContext = Parameters<AnthropicStreamFn>[1];
 type AnthropicStreamOptions = NonNullable<Parameters<AnthropicStreamFn>[2]>;
+type AnthropicReplayCase = {
+  name: string;
+  model: NonNullable<Parameters<typeof makeAnthropicTransportModel>[0]> & { id: string };
+  content: AssistantMessage["content"];
+  options: AnthropicStreamOptions;
+  expectedContent: Array<Record<string, unknown>>;
+  firstUser?: string;
+  toolResult?: { text: string; toolName?: string; continueAfter?: boolean };
+  expectedReasoning?: string;
+  expectedThinking?: { type: "disabled" };
+  omitThinking?: boolean;
+  absent?: string[];
+};
 type RequestTransportConfig = {
   proxy?: unknown;
   tls?: unknown;
@@ -279,6 +292,7 @@ function makeAnthropicTransportModel(
     maxTokens?: number;
     input?: AnthropicMessagesModel["input"];
     thinkingLevelMap?: AnthropicMessagesModel["thinkingLevelMap"];
+    compat?: AnthropicMessagesModel["compat"];
     headers?: Record<string, string>;
     authHeader?: boolean;
     requestTransport?: RequestTransportConfig;
@@ -298,6 +312,7 @@ function makeAnthropicTransportModel(
       contextWindow: 200000,
       maxTokens: params.maxTokens ?? 8192,
       ...(params.thinkingLevelMap ? { thinkingLevelMap: params.thinkingLevelMap } : {}),
+      ...(params.compat ? { compat: params.compat } : {}),
       ...(params.headers ? { headers: params.headers } : {}),
       ...(params.authHeader !== undefined ? { authHeader: params.authHeader } : {}),
     } satisfies AnthropicMessagesModel,
@@ -307,6 +322,18 @@ function makeAnthropicTransportModel(
       },
     },
   );
+}
+
+function makeAnthropicToolUseMessage(content: AssistantMessage["content"]) {
+  return {
+    role: "assistant",
+    provider: "anthropic",
+    api: "anthropic-messages",
+    model: "claude-sonnet-4-6",
+    stopReason: "toolUse",
+    timestamp: 0,
+    content,
+  };
 }
 
 function makeSonnet5PrefillContext(): AnthropicStreamContext {
@@ -569,10 +596,20 @@ describe("anthropic transport stream", () => {
             model: "claude-sonnet-4-6",
             usage: { input_tokens: 50_001, output_tokens: 0 },
           }),
-          anthropicContentBlockStart(0, { type: "compaction", content: null }),
+          anthropicContentBlockStart(0, {
+            type: "compaction",
+            content: null,
+            encrypted_content: "opaque-initial-compaction",
+          }),
           anthropicContentBlockDelta(0, {
             type: "compaction_delta",
-            content: "summary checkpoint",
+            content: "summary ",
+            encrypted_content: "opaque-partial-compaction",
+          }),
+          anthropicContentBlockDelta(0, {
+            type: "compaction_delta",
+            content: "checkpoint",
+            encrypted_content: "opaque-final-compaction",
           }),
           { type: "content_block_stop", index: 0 },
           anthropicContentBlockStart(1, { type: "text", text: "Done." }),
@@ -658,7 +695,11 @@ describe("anthropic transport stream", () => {
       "user",
     ]);
     expect(replayMessages[0]?.content).toEqual([
-      { type: "compaction", content: "summary checkpoint" },
+      {
+        type: "compaction",
+        content: "summary checkpoint",
+        encrypted_content: "opaque-final-compaction",
+      },
       { type: "text", text: "Done." },
     ]);
     const pressure = resolveCompactionReplayPressure(
@@ -1116,13 +1157,18 @@ describe("anthropic transport stream", () => {
       options,
     );
 
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toBe(
-      'HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens exceeded the per-minute rate limit."}}; Retry-After: 30 seconds',
-    );
+    expect(result).toMatchObject({ stopReason: "error", errorCode: "429" });
+    expect(result.errorMessage).toMatch(/^429: .*; Retry-After: 30 seconds$/);
+    expect(JSON.parse(result.errorBody ?? "null")).toEqual({
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message: "Number of request tokens exceeded the per-minute rate limit.",
+      },
+    });
     expect(acceptanceObserver).not.toHaveBeenCalled();
     expect(onResponse).toHaveBeenCalledWith(
-      { status: 429, headers: { "content-type": "text/plain;charset=UTF-8", "retry-after": "30" } },
+      { status: 429, headers: expect.objectContaining({ "retry-after": "30" }) },
       expect.objectContaining({ provider: "anthropic" }),
     );
   });
@@ -1159,9 +1205,71 @@ describe("anthropic transport stream", () => {
     );
 
     expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toBe(`HTTP 500: ${"x".repeat(400)}…`);
+    expect(result.errorMessage).toBe(`500: ${"x".repeat(400)}…`);
     expect(pullCount).toBeGreaterThanOrEqual(2);
     expect(cancelCount).toBe(1);
+  });
+
+  it("preserves nested Anthropic proxy rejection details beyond the preview limit", async () => {
+    const message = "A maximum of 4 blocks with cache_control may be provided. Found 5.";
+    const credential = "synthetic-proxy-credential";
+    const media = "c3ludGhldGljLXByaXZhdGUtaW1hZ2U=";
+    const body = {
+      error: {
+        message: "All target providers failed.",
+        attempts: Array.from({ length: 4 }, (_, index) => ({
+          status: 400,
+          details: {
+            type: "error",
+            error: { type: "invalid_request_error", message },
+            request_id: `req_synthetic_${index}`,
+          },
+          request: {
+            headers: { authorization: `Bearer ${credential}`, api_key: credential },
+            image: { type: "image", data: media },
+          },
+        })),
+      },
+    };
+    guardedFetchMock.mockResolvedValueOnce(new Response(JSON.stringify(body), { status: 400 }));
+
+    const result = await runTransportStream(
+      makeAnthropicTransportModel({ id: "claude-sonnet-4-5" }),
+      { messages: [{ role: "user", content: "hello" }] } as AnthropicStreamContext,
+      { apiKey: "test-api-key" } as AnthropicStreamOptions,
+    );
+
+    expect(result).toMatchObject({ stopReason: "error", errorCode: "400" });
+    expect(result.errorMessage).toContain(message);
+    expect(JSON.parse(result.errorMessage?.slice("400: ".length) ?? "null")).toMatchObject({
+      error: {
+        message: "All target providers failed.",
+        attempts: body.error.attempts.map(({ status, details }) => ({ status, details })),
+      },
+    });
+    expect(result.errorBody?.length).toBeLessThanOrEqual(515);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(credential);
+    expect(serialized).not.toContain(media);
+    expect(serialized).not.toContain("Malformed diagnostic JSON");
+  });
+
+  it("retains Anthropic HTTP status when an oversized JSON error body must be redacted", async () => {
+    guardedFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { message: "x".repeat(9 * 1024) } }), {
+        status: 400,
+      }),
+    );
+
+    const result = await runTransportStream(
+      makeAnthropicTransportModel({ id: "claude-sonnet-4-5" }),
+      { messages: [{ role: "user", content: "hello" }] } as AnthropicStreamContext,
+      { apiKey: "test-api-key" } as AnthropicStreamOptions,
+    );
+
+    expect(result).toMatchObject({ stopReason: "error", errorCode: "400" });
+    expect(result.errorMessage).toContain("400");
+    expect(result.errorMessage).not.toContain("x".repeat(400));
   });
 
   it("aborts stalled streamed Anthropic error responses", async () => {
@@ -1196,7 +1304,7 @@ describe("anthropic transport stream", () => {
 
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toBe(
-      "HTTP 500: Anthropic Messages error response stalled: no data received for 10000ms",
+      "500: Anthropic Messages error response stalled: no data received for 10000ms",
     );
     expect(cancelReason).toBeInstanceOf(Error);
     expect((cancelReason as Error).message).toBe(
@@ -1445,39 +1553,25 @@ describe("anthropic transport stream", () => {
     expect(latestAnthropicRequestHeaders().get("anthropic-beta")).toBeNull();
   });
 
-  it("ignores non-positive runtime maxTokens overrides and falls back to the model limit", async () => {
-    await runTransportStream(
-      makeAnthropicTransportModel(),
-      {
-        messages: [{ role: "user", content: "hello" }],
-      } as AnthropicStreamContext,
-      {
-        apiKey: "sk-ant-api",
-        maxTokens: 0,
-      } as AnthropicStreamOptions,
-    );
+  it.each([0, 0.5])(
+    "falls back to the model limit when runtime maxTokens=%s floors to zero",
+    async (maxTokens) => {
+      await runTransportStream(
+        makeAnthropicTransportModel(),
+        {
+          messages: [{ role: "user", content: "hello" }],
+        } as AnthropicStreamContext,
+        {
+          apiKey: "sk-ant-api",
+          maxTokens,
+        } as AnthropicStreamOptions,
+      );
 
-    expect(latestAnthropicRequest().payload.model).toBe("claude-sonnet-4-6");
-    expect(latestAnthropicRequest().payload.max_tokens).toBe(8192);
-    expect(latestAnthropicRequest().payload.stream).toBe(true);
-  });
-
-  it("ignores fractional runtime maxTokens overrides that floor to zero", async () => {
-    await runTransportStream(
-      makeAnthropicTransportModel(),
-      {
-        messages: [{ role: "user", content: "hello" }],
-      } as AnthropicStreamContext,
-      {
-        apiKey: "sk-ant-api",
-        maxTokens: 0.5,
-      } as AnthropicStreamOptions,
-    );
-
-    expect(latestAnthropicRequest().payload.model).toBe("claude-sonnet-4-6");
-    expect(latestAnthropicRequest().payload.max_tokens).toBe(8192);
-    expect(latestAnthropicRequest().payload.stream).toBe(true);
-  });
+      expect(latestAnthropicRequest().payload.model).toBe("claude-sonnet-4-6");
+      expect(latestAnthropicRequest().payload.max_tokens).toBe(8192);
+      expect(latestAnthropicRequest().payload.stream).toBe(true);
+    },
+  );
 
   it("forwards stop sequences as Anthropic stop_sequences", async () => {
     await runTransportStream(
@@ -2326,7 +2420,7 @@ describe("anthropic transport stream", () => {
     const firstCallParams = latestAnthropicRequest().payload;
     const system = requireArray(firstCallParams.system, "system");
     expect(requireRecord(system[0], "billing system item").text).toBe(
-      "x-anthropic-billing-header: cc_version=2.1.75; cc_entrypoint=sdk-cli;",
+      "x-anthropic-billing-header: cc_version=2.1.278; cc_entrypoint=sdk-cli;",
     );
     expect(
       system.some(
@@ -3092,7 +3186,22 @@ describe("anthropic transport stream", () => {
     expect(toolUse.input).toEqual({});
   });
 
-  it.each([
+  it.each<AnthropicReplayCase>([
+    ...[undefined, false, true].map<AnthropicReplayCase>((allowEmptySignature) => ({
+      name: `replays empty thinking signatures with allowEmptySignature=${allowEmptySignature}`,
+      model: {
+        id: "k3",
+        name: "Kimi K3",
+        provider: "kimi",
+        baseUrl: "https://api.kimi.com/coding",
+        compat: { allowEmptySignature },
+      },
+      content: [{ type: "thinking", thinking: "Retained thought", thinkingSignature: "" }],
+      options: { apiKey: "synthetic-kimi-key", reasoning: "high" },
+      expectedContent: allowEmptySignature
+        ? [{ type: "thinking", thinking: "Retained thought", signature: "" }]
+        : [{ type: "text", text: "Retained thought" }],
+    })),
     {
       name: "replays reasoning_content from compatible Anthropic thinking blocks",
       model: {
@@ -3317,7 +3426,7 @@ describe("anthropic transport stream", () => {
     await runTransportStream(
       makeAnthropicTransportModel(testCase.model),
       { messages } as unknown as AnthropicStreamContext,
-      testCase.options as AnthropicStreamOptions,
+      testCase.options,
     );
     const payload = latestAnthropicRequest().payload;
     const assistantMessage = findRecord(payload.messages, (record) => record.role === "assistant");
@@ -3395,15 +3504,9 @@ describe("anthropic transport stream", () => {
       makeAnthropicTransportModel(),
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_1", name: "quiet", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_1", name: "quiet", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_1",
@@ -3431,15 +3534,9 @@ describe("anthropic transport stream", () => {
       makeAnthropicTransportModel({ input: ["text", "image"] }),
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_husk", name: "screenshot", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_husk", name: "screenshot", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_husk",
@@ -3469,15 +3566,9 @@ describe("anthropic transport stream", () => {
       makeAnthropicTransportModel({ id: "claude-sonnet-4-6", input: ["text", "image"] }),
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_1",
@@ -3614,15 +3705,9 @@ describe("anthropic transport stream", () => {
       makeAnthropicTransportModel({ id: "claude-sonnet-4-6" }),
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_1", name: "fetch", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_1", name: "fetch", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_1",
@@ -3664,15 +3749,9 @@ describe("anthropic transport stream", () => {
       makeAnthropicTransportModel({ id: "claude-sonnet-4-6", input: ["text", "image"] }),
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_1",
@@ -3726,15 +3805,9 @@ describe("anthropic transport stream", () => {
       model,
       {
         messages: [
-          {
-            role: "assistant",
-            provider: "anthropic",
-            api: "anthropic-messages",
-            model: "claude-sonnet-4-6",
-            stopReason: "toolUse",
-            timestamp: 0,
-            content: [{ type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} }],
-          },
+          makeAnthropicToolUseMessage([
+            { type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} },
+          ]),
           {
             role: "toolResult",
             toolCallId: "tool_1",
@@ -4151,7 +4224,7 @@ describe("anthropic transport stream", () => {
 
     const payload = latestAnthropicRequest().payload;
     expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
-    expect(payload.output_config).toEqual({ effort: "high" });
+    expect(payload.output_config).toEqual({ effort: "medium" });
     expect(payload.tool_choice).toEqual({ type: "auto" });
     expect(payload).not.toHaveProperty("temperature");
     expect(result.responseModel).toBe("claude-fable-5");
@@ -4363,61 +4436,39 @@ describe("anthropic transport stream", () => {
     expect(payload.output_config).toEqual({ effort: "high" });
   });
 
-  it("maps xhigh thinking effort for Claude Opus 4.8 transport runs", async () => {
-    const model = makeAnthropicTransportModel({
-      id: "claude-opus-4-8",
-      name: "Claude Opus 4.8",
-      maxTokens: 8192,
-      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
-    });
+  it.each([
+    { reasoning: "xhigh", prompt: "Think extra hard." },
+    { reasoning: "max", prompt: "Think as much as needed." },
+  ] as const)(
+    "preserves $reasoning effort for Claude Opus 4.8 transport runs",
+    async ({ reasoning, prompt }) => {
+      const model = makeAnthropicTransportModel({
+        id: "claude-opus-4-8",
+        name: "Claude Opus 4.8",
+        maxTokens: 8192,
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      });
 
-    await runTransportStream(
-      model,
-      {
-        messages: [{ role: "user", content: "Think extra hard." }],
-      } as AnthropicStreamContext,
-      {
-        apiKey: "sk-ant-api",
-        reasoning: "xhigh",
-      } as AnthropicStreamOptions,
-    );
+      await runTransportStream(
+        model,
+        {
+          messages: [{ role: "user", content: prompt }],
+        } as AnthropicStreamContext,
+        {
+          apiKey: "sk-ant-api",
+          reasoning,
+        } as AnthropicStreamOptions,
+      );
 
-    const payload = latestAnthropicRequest().payload;
-    expect(payload.thinking).toEqual({
-      type: "adaptive",
-      display: "summarized",
-      block_binding: { prefix_mismatch_behavior: "drop_block" },
-    });
-    expect(payload.output_config).toEqual({ effort: "xhigh" });
-  });
-
-  it("preserves max thinking effort for Claude Opus 4.8 transport runs", async () => {
-    const model = makeAnthropicTransportModel({
-      id: "claude-opus-4-8",
-      name: "Claude Opus 4.8",
-      maxTokens: 8192,
-      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
-    });
-
-    await runTransportStream(
-      model,
-      {
-        messages: [{ role: "user", content: "Think as much as needed." }],
-      } as AnthropicStreamContext,
-      {
-        apiKey: "sk-ant-api",
-        reasoning: "max",
-      } as AnthropicStreamOptions,
-    );
-
-    const payload = latestAnthropicRequest().payload;
-    expect(payload.thinking).toEqual({
-      type: "adaptive",
-      display: "summarized",
-      block_binding: { prefix_mismatch_behavior: "drop_block" },
-    });
-    expect(payload.output_config).toEqual({ effort: "max" });
-  });
+      const payload = latestAnthropicRequest().payload;
+      expect(payload.thinking).toEqual({
+        type: "adaptive",
+        display: "summarized",
+        block_binding: { prefix_mismatch_behavior: "drop_block" },
+      });
+      expect(payload.output_config).toEqual({ effort: reasoning });
+    },
+  );
 
   it("honors provider routes that exclude native max effort", async () => {
     const model = makeAnthropicTransportModel({

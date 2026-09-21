@@ -7,6 +7,7 @@ import {
   asDateTimestampMs,
   resolveTimestampMsToIsoString,
 } from "@openclaw/normalization-core/number-coercion";
+import { startsWithSvgRootElement } from "../../packages/gateway-protocol/src/svg-image.js";
 import {
   type AgentAvatarResolution,
   resolvePublicAgentAvatarSource,
@@ -40,6 +41,7 @@ import { safeEqualSecret } from "../security/secret-equal.js";
 import { AVATAR_MAX_BYTES, resolveAvatarMime } from "../shared/avatar-policy.js";
 import { escapeHtml } from "../shared/html-escape.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
+import { escapeRegExp } from "../shared/regexp.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveRuntimeServiceBuildId, resolveRuntimeServiceVersion } from "../version.js";
 import { gatewayAvatarImageRevision } from "./assistant-avatar-cache.js";
@@ -108,7 +110,6 @@ import {
 import {
   applyHttpImageContentSecurityPolicy,
   sendHttpImageResponse,
-  startsWithSvgRootElement,
 } from "./http-image-response.js";
 import { authorizeControlUiReadRequestOrReply } from "./http-utils.js";
 import { isTerminalConfigEnabled } from "./terminal/enabled.js";
@@ -158,20 +159,23 @@ function rewriteControlUiIndexHtmlAssetHrefs(
   buildId?: string,
 ): string {
   const normalized = normalizeControlUiBasePath(basePath);
-  let next = html
-    .replaceAll('src="./assets/', `src="${normalized}/assets/`)
-    .replaceAll('href="./assets/', `href="${normalized}/assets/`);
+  const replacements = new Map<string, string>([
+    ['src="./assets/', `src="${normalized}/assets/`],
+    ['href="./assets/', `href="${normalized}/assets/`],
+  ]);
   for (const asset of CONTROL_UI_ROOT_PUBLIC_ASSETS) {
     const version =
       buildId && isControlUiVersionedPublicAsset(asset) ? `?v=${encodeURIComponent(buildId)}` : "";
     const assetHref = `href="${buildControlUiRootAssetPath(normalized, asset)}${version}"`;
     // Vite's portable ./ base emits relative hrefs, which the browser starts
     // resolving against a nested route before the UI can correct them.
-    next = next.replaceAll(`href="./${asset}"`, assetHref);
-    next = next.replaceAll(`href="/${asset}"`, assetHref);
-    next = next.replaceAll(`href="${buildControlUiRootAssetPath(normalized, asset)}"`, assetHref);
+    replacements.set(`href="./${asset}"`, assetHref);
+    replacements.set(`href="/${asset}"`, assetHref);
+    replacements.set(`href="${buildControlUiRootAssetPath(normalized, asset)}"`, assetHref);
   }
-  return next;
+  // Copy the document once instead of once per matching asset.
+  const pattern = new RegExp([...replacements.keys()].map(escapeRegExp).join("|"), "g");
+  return html.replace(pattern, (match) => replacements.get(match) ?? match);
 }
 
 type ControlUiAvatarMeta = {
@@ -312,7 +316,7 @@ function createAssistantMediaTicket(
 
 function verifyAssistantMediaTicket(
   ticket: string | null,
-  source: string,
+  source: string | undefined,
   agentId: string | undefined,
   nowMs = Date.now(),
 ): AssistantMediaTicketPayload | undefined {
@@ -338,7 +342,8 @@ function verifyAssistantMediaTicket(
     ) as Partial<AssistantMediaTicketPayload>;
     const valid =
       payload.scope === CONTROL_UI_ASSISTANT_MEDIA_TICKET_SCOPE &&
-      payload.source === source &&
+      typeof payload.source === "string" &&
+      (source === undefined || payload.source === source) &&
       payload.agentId === agentId &&
       typeof payload.reader?.authMethod === "string" &&
       Array.isArray(payload.reader.operatorScopes) &&
@@ -549,16 +554,22 @@ export async function handleControlUiAssistantMediaRequest(
     return false;
   }
   applyControlUiSecurityHeaders(res);
-  const source = normalizeAssistantMediaSource(url.searchParams.get("source") ?? "");
+  let source = normalizeAssistantMediaSource(url.searchParams.get("source") ?? "");
   if (!source) {
     respondControlUiNotFound(res);
     return true;
   }
   const sessionKey = url.searchParams.get("sessionKey")?.trim() || undefined;
   const agentId = sessionKey ? url.searchParams.get("agentId")?.trim() || undefined : opts?.agentId;
-  const ticket = verifyAssistantMediaTicket(url.searchParams.get("mediaTicket"), source, agentId);
+  const relativeSource = !path.isAbsolute(source) && !/^[a-z][a-z0-9+.-]*:/iu.test(source);
+  // Relative tickets bind the resolved path; authenticate their reader before resolving the cwd.
+  const ticketCandidate = verifyAssistantMediaTicket(
+    url.searchParams.get("mediaTicket"),
+    relativeSource ? undefined : source,
+    agentId,
+  );
   const requestAuth =
-    isMetaRequest || !ticket
+    isMetaRequest || !ticketCandidate
       ? await authorizeControlUiReadRequestOrReply({
           req,
           res,
@@ -569,19 +580,27 @@ export async function handleControlUiAssistantMediaRequest(
           allowQueryToken: !explicitAllow,
         })
       : undefined;
-  if ((isMetaRequest || !ticket) && !requestAuth) {
+  if ((isMetaRequest || !ticketCandidate) && !requestAuth) {
     return true;
   }
   const policyParams = { config: opts?.config ?? {}, sessionKey, agentId };
   const policy = resolveAssistantMediaPolicy({
     ...policyParams,
     requestAuth: requestAuth ?? undefined,
-    reader: isMetaRequest ? undefined : ticket?.reader,
+    reader: isMetaRequest ? undefined : ticketCandidate?.reader,
   });
   if (!policy) {
     respondControlUiNotFound(res);
     return true;
   }
+  if (relativeSource) {
+    if (policy.remote || !policy.executionCwd || !path.isAbsolute(policy.executionCwd)) {
+      respondControlUiNotFound(res);
+      return true;
+    }
+    source = path.resolve(policy.executionCwd, source);
+  }
+  const ticket = ticketCandidate?.source === source ? ticketCandidate : undefined;
   if (explicitAllow && !policy.canAllow) {
     sendJson(res, 403, { error: "Allowing an outside image requires operator.admin" });
     return true;
@@ -610,6 +629,7 @@ export async function handleControlUiAssistantMediaRequest(
       current.session?.agentId !== policy.session?.agentId ||
       current.session?.sessionId !== policy.session?.sessionId ||
       current.remote !== policy.remote ||
+      current.executionCwd !== policy.executionCwd ||
       current.workspaceOnly !== policy.workspaceOnly ||
       current.localRoots.length !== policy.localRoots.length ||
       current.localRoots.some((root, index) => root !== policy.localRoots[index]) ||

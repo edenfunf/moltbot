@@ -390,6 +390,7 @@ export async function runPluginUpdateAttempt(params: {
   effectiveSpec?: string;
   extensionsDir?: string;
   timeoutMs?: number;
+  workTimeoutMs?: number | null;
   onInstallPolicyWarning?: InstallSafetyOverrides["onInstallPolicyWarning"];
   onBeforePluginArtifactCommit?: PluginInstallArtifactConsentHandler;
   expectedIntegrity?: string;
@@ -416,6 +417,7 @@ export async function runPluginUpdateAttempt(params: {
               mode: "update",
               extensionsDir: params.extensionsDir,
               timeoutMs: params.timeoutMs,
+              workTimeoutMs: params.workTimeoutMs,
               ...dryRunOption,
               onInstallPolicyWarning: params.onInstallPolicyWarning,
               onBeforePluginArtifactCommit: params.onBeforePluginArtifactCommit,
@@ -441,6 +443,7 @@ export async function runPluginUpdateAttempt(params: {
                 mode: "update",
                 extensionsDir: params.extensionsDir,
                 timeoutMs: params.timeoutMs,
+                workTimeoutMs: params.workTimeoutMs,
                 ...dryRunOption,
                 onInstallPolicyWarning: params.onInstallPolicyWarning,
                 onBeforePluginArtifactCommit: params.onBeforePluginArtifactCommit,
@@ -456,6 +459,7 @@ export async function runPluginUpdateAttempt(params: {
                   mode: "update",
                   extensionsDir: params.extensionsDir,
                   timeoutMs: params.timeoutMs,
+                  workTimeoutMs: params.workTimeoutMs,
                   ...dryRunOption,
                   onInstallPolicyWarning: params.onInstallPolicyWarning,
                   onBeforePluginArtifactCommit: params.onBeforePluginArtifactCommit,
@@ -471,6 +475,7 @@ export async function runPluginUpdateAttempt(params: {
                   mode: "update",
                   extensionsDir: params.extensionsDir,
                   timeoutMs: params.timeoutMs,
+                  workTimeoutMs: params.workTimeoutMs,
                   ...dryRunOption,
                   onInstallPolicyWarning: params.onInstallPolicyWarning,
                   onBeforePluginArtifactCommit: params.onBeforePluginArtifactCommit,
@@ -501,7 +506,7 @@ export async function runPluginUpdateAttempt(params: {
       fallbackSpec: params.clawhubSpecs.fallbackSpec,
       verb: params.dryRun ? "would use" : "used",
     });
-    params.logger.warn?.(
+    params.logger.info?.(
       `Plugin "${params.pluginId}" has no beta ClawHub release for ${params.clawhubSpecs.fallbackLabel ?? params.effectiveSpec}; using ${params.clawhubSpecs.fallbackSpec} instead. Core update can still complete.`,
     );
     result = await installPluginFromClawHub(
@@ -512,6 +517,7 @@ export async function runPluginUpdateAttempt(params: {
         mode: "update",
         extensionsDir: params.extensionsDir,
         timeoutMs: params.timeoutMs,
+        workTimeoutMs: params.workTimeoutMs,
         ...dryRunOption,
         onInstallPolicyWarning: params.onInstallPolicyWarning,
         onBeforePluginArtifactCommit: params.onBeforePluginArtifactCommit,

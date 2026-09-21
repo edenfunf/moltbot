@@ -11,27 +11,35 @@ complete until `main` carries the actual shipped release state.
    Audit `release/YYYY.M.PATCH` against it and
    forward-port real fixes that are absent from `main`. Do not blindly merge
    release-only compatibility, test, or validation adapters into newer `main`.
-2. Set `main` to the shipped stable version, not a speculative next train. Run
-   `pnpm release:prep` after the root version change, then
+2. Normally set `main` to the shipped stable version, not a speculative next
+   train. For late closeout, do not downgrade an already-started later stable
+   train; retain the validator's exact shipped-note and version checks. Run
+   `pnpm release:prep` after any root version change, then
    `pnpm deps:npm-lock:check`.
-3. Make `CHANGELOG.md`'s `## YYYY.M.PATCH` section on `main` exactly match the
-   tagged release branch. Include the stable `appcast.xml` update when the mac
+3. Resolve the shipped section through `scripts/lib/release-changelog.mjs`
+   so historical tags and current split artifacts use the same reader. Make
+   `CHANGELOG/YYYY.M.PATCH.md` and its matching contribution record on `main`
+   match the tagged release, and refresh the root index. If `main` already has
+   an approved docs mirror, preserve that prose and verify its frozen record
+   matches the shipped accounting; do not replace it with initial notes.
+   Include the stable `appcast.xml` update when the mac
    release published one. `scripts/pr prepare-run` permits this closeout without
    an override when `v<version>` exists on origin and the changelog diff only adds
-   or replaces that version's section (or finalizes the existing unreleased
-   section); leave all other sections and the preamble unchanged.
+   or replaces that version's artifacts (or finalizes the existing unreleased
+   entry); leave other release entries and records unchanged and keep the
+   generated index consistent.
    `OPENCLAW_ALLOW_ROOT_CHANGELOG_PR=1` remains an explicit override
    for release automation outside this convention.
 4. Do not add `YYYY.M.PATCH+1`, a beta version, or an empty future changelog
    section to `main` until the operator explicitly starts that release train.
 5. Run `pnpm release:generated:check`, `pnpm deps:npm-lock:check`, and
    `OPENCLAW_TESTBOX=1 pnpm check:changed`. Push, then verify `origin/main`
-   contains the shipped version and changelog before calling the stable release
-   done.
+   contains the exact shipped notes and the validator-accepted shipped-or-later
+   stable version before calling the stable release done.
 6. Keep repository variables `RELEASE_ROLLBACK_DRILL_ID` and
    `RELEASE_ROLLBACK_DRILL_DATE` current after each private rollback drill.
    `openclaw-stable-main-closeout.yml` starts from the `main` push carrying the
-   shipped version and changelog after stable publication, then binds immutable
+   accepted stable version and shipped changelog after stable publication, then binds immutable
    evidence to the published tag. App assets may still be pending; record
    `appPlatforms` states for macOS, Windows, and Android, with aggregate
    `apps: attached` only when every canonical platform asset contract is

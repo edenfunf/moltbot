@@ -206,7 +206,7 @@ const mocks = vi.hoisted(() => ({
         : {}),
     }),
   ),
-  getProviderEnvVars: vi.fn((providerId: string) => [
+  getProviderEnvVarsCore: vi.fn((providerId: string) => [
     `${providerId.toUpperCase().replaceAll("-", "_")}_API_KEY`,
   ]),
   embedBatch: vi.fn(async (inputs: unknown[], options?: { inputType?: string }) =>
@@ -292,7 +292,7 @@ vi.mock("../runtime.js", async (importOriginal) => ({
 }));
 
 vi.mock("../secrets/provider-env-vars.js", () => ({
-  getProviderEnvVars: mocks.getProviderEnvVars,
+  getProviderEnvVarsCore: mocks.getProviderEnvVarsCore,
   resolveProviderAuthLookupMaps: () => ({
     aliasMap: {},
     envCandidateMap: {},
@@ -330,10 +330,11 @@ vi.mock("./command-secret-targets.js", () => ({
 }));
 
 // Account-secret snapshot preparation is covered by dedicated
-// model.account-secrets.* tests; keep this command-wiring suite on the
-// pre-existing mocked world instead of loading the real secrets runtime.
-vi.mock("./capability-cli/model-local-secrets.js", () => ({
-  prepareLocalModelRunAccountSecrets: vi.fn(async () => {}),
+// model.account-secrets.* and local-runners.account-secrets tests; keep this
+// command-wiring suite on the pre-existing mocked world instead of loading the
+// real secrets runtime.
+vi.mock("./capability-cli/local-account-secrets.js", () => ({
+  prepareLocalCapabilityAccountSecrets: vi.fn(async () => {}),
 }));
 
 vi.mock("../agents/agent-scope.js", () => ({
@@ -697,7 +698,7 @@ describe("capability cli", () => {
     mocks.getTtsProvider.mockReset().mockReturnValue("openai");
     mocks.listSpeechProviders.mockReset().mockReturnValue([]);
     mocks.resolveExplicitTtsOverrides.mockClear();
-    mocks.getProviderEnvVars
+    mocks.getProviderEnvVarsCore
       .mockReset()
       .mockImplementation((providerId: string) => [
         `${providerId.toUpperCase().replaceAll("-", "_")}_API_KEY`,
@@ -760,6 +761,8 @@ describe("capability cli", () => {
     options?: { reasoning?: unknown };
   };
   type ImageDescribeParams = {
+    agentId?: string;
+    agentDir?: string;
     filePath?: string;
     mediaUrl?: string;
     model?: unknown;
@@ -855,6 +858,7 @@ describe("capability cli", () => {
     const calls = mocks.transcribeAudioFile.mock.calls as unknown as Array<
       [
         {
+          agentId?: string;
           agentDir?: string;
           cfg?: unknown;
           filePath?: string;
@@ -1028,7 +1032,7 @@ describe("capability cli", () => {
     expect(providers).toContainEqual(
       expect.objectContaining({ provider: "openai", configured: true }),
     );
-    expect(mocks.getProviderEnvVars).toHaveBeenCalledWith("openai");
+    expect(mocks.getProviderEnvVarsCore).toHaveBeenCalledWith("openai");
   });
 
   it("scopes provider state and model selection to an explicit agent", async () => {
@@ -2260,22 +2264,45 @@ describe("capability cli", () => {
       name: "image describe",
       run: () =>
         runCapability("image", "describe", "--agent", "beta", "--file", "photo.png", "--json"),
-      selectedAgent: () => mocks.resolveAgentDir.mock.calls[0]?.[1],
-      expectedAgent: "beta",
+      selectedAgent: () => [imageDescribeCall()?.agentId, imageDescribeCall()?.agentDir],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "image describe-many",
       run: () =>
         runCapability("image", "describe-many", "--agent", "beta", "--file", "photo.png", "--json"),
-      selectedAgent: () => mocks.resolveAgentDir.mock.calls[0]?.[1],
-      expectedAgent: "beta",
+      selectedAgent: () => [imageDescribeCall()?.agentId, imageDescribeCall()?.agentDir],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
+    },
+    {
+      name: "image describe with explicit model",
+      run: () =>
+        runCapability(
+          "image",
+          "describe",
+          "--agent",
+          "beta",
+          "--model",
+          "ollama/qwen2.5vl:7b",
+          "--file",
+          "photo.png",
+          "--json",
+        ),
+      selectedAgent: () => [
+        firstImageDescribeWithModelCall()?.agentId,
+        firstImageDescribeWithModelCall()?.agentDir,
+      ],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "audio transcribe",
       run: () =>
         runCapability("audio", "transcribe", "--agent", "beta", "--file", "memo.m4a", "--json"),
-      selectedAgent: () => firstAudioTranscriptionCall()?.agentDir,
-      expectedAgent: "/tmp/agent-beta",
+      selectedAgent: () => [
+        firstAudioTranscriptionCall()?.agentId,
+        firstAudioTranscriptionCall()?.agentDir,
+      ],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "video generate",
@@ -2301,8 +2328,11 @@ describe("capability cli", () => {
       name: "video describe",
       run: () =>
         runCapability("video", "describe", "--agent", "beta", "--file", "clip.mp4", "--json"),
-      selectedAgent: () => firstVideoDescriptionCall()?.agentDir,
-      expectedAgent: "/tmp/agent-beta",
+      selectedAgent: () => [
+        firstVideoDescriptionCall()?.agentId,
+        firstVideoDescriptionCall()?.agentDir,
+      ],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "embedding create",
@@ -2320,7 +2350,7 @@ describe("capability cli", () => {
 
       await run();
 
-      expect(selectedAgent()).toBe(expectedAgent);
+      expect(selectedAgent()).toEqual(expectedAgent);
     },
   );
 
@@ -2373,8 +2403,8 @@ describe("capability cli", () => {
       name: "image describe",
       run: () =>
         runCapabilityWithParentAgent("image", "describe", "beta", "--file", "photo.png", "--json"),
-      selectedAgent: () => mocks.resolveAgentDir.mock.calls[0]?.[1],
-      expectedAgent: "beta",
+      selectedAgent: () => [imageDescribeCall()?.agentId, imageDescribeCall()?.agentDir],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "image describe-many",
@@ -2387,15 +2417,18 @@ describe("capability cli", () => {
           "photo.png",
           "--json",
         ),
-      selectedAgent: () => mocks.resolveAgentDir.mock.calls[0]?.[1],
-      expectedAgent: "beta",
+      selectedAgent: () => [imageDescribeCall()?.agentId, imageDescribeCall()?.agentDir],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "audio transcribe",
       run: () =>
         runCapabilityWithParentAgent("audio", "transcribe", "beta", "--file", "memo.m4a", "--json"),
-      selectedAgent: () => firstAudioTranscriptionCall()?.agentDir,
-      expectedAgent: "/tmp/agent-beta",
+      selectedAgent: () => [
+        firstAudioTranscriptionCall()?.agentId,
+        firstAudioTranscriptionCall()?.agentDir,
+      ],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "video generate",
@@ -2428,8 +2461,11 @@ describe("capability cli", () => {
       name: "video describe",
       run: () =>
         runCapabilityWithParentAgent("video", "describe", "beta", "--file", "clip.mp4", "--json"),
-      selectedAgent: () => firstVideoDescriptionCall()?.agentDir,
-      expectedAgent: "/tmp/agent-beta",
+      selectedAgent: () => [
+        firstVideoDescriptionCall()?.agentId,
+        firstVideoDescriptionCall()?.agentDir,
+      ],
+      expectedAgent: ["beta", "/tmp/agent-beta"],
     },
     {
       name: "embedding create",
@@ -2447,7 +2483,7 @@ describe("capability cli", () => {
 
       await run();
 
-      expect(selectedAgent()).toBe(expectedAgent);
+      expect(selectedAgent()).toEqual(expectedAgent);
     },
   );
 
@@ -3382,6 +3418,56 @@ describe("capability cli", () => {
     expect(outputs[0]?.kind).toBe("audio.transcription");
   });
 
+  it.each([
+    { root: "infer", json: true },
+    { root: "infer", json: false },
+    { root: "capability", json: true },
+    { root: "capability", json: false },
+  ])("reports actual audio attribution for $root with json=$json", async ({ root, json }) => {
+    const result = {
+      text: "meeting notes",
+      provider: "fixture-asr",
+      model: "fixture-actual-model",
+    };
+    mocks.transcribeAudioFile.mockResolvedValueOnce(result);
+
+    await runCap(
+      root,
+      "audio",
+      "transcribe",
+      "--file",
+      "memo.m4a",
+      "--model",
+      "openai/whisper-1",
+      ...(json ? ["--json"] : []),
+    );
+
+    if (json) {
+      expect(firstJsonOutput()).toEqual({
+        ok: true,
+        capability: "audio.transcribe",
+        transport: "local",
+        provider: result.provider,
+        model: result.model,
+        attempts: [],
+        outputs: [
+          { path: path.resolve("memo.m4a"), text: result.text, kind: "audio.transcription" },
+        ],
+      });
+    } else {
+      expect(mocks.runtime.log.mock.calls.at(-1)?.[0]).toBe(
+        [
+          "audio.transcribe via local",
+          "provider: fixture-asr",
+          "model: fixture-actual-model",
+          "outputs: 1",
+          path.resolve("memo.m4a"),
+          result.text,
+        ].join("\n"),
+      );
+    }
+  });
+
   it("resolves command SecretRefs before local audio transcription", async () => {
     const rawConfig = { models: { providers: { openai: { apiKey: "raw-ref" } } } };
     const resolvedConfig = { models: { providers: { openai: { apiKey: "resolved-key" } } } };
@@ -3798,6 +3884,7 @@ describe("capability cli", () => {
     ).rejects.toThrow("exit 1");
 
     expectRuntimeErrorContains("--output is not supported for remote gateway TTS yet");
+    expect(mocks.callGateway).not.toHaveBeenCalled();
   });
 
   it.each(["local", "gateway"] as const)(
@@ -4264,7 +4351,7 @@ describe("capability cli", () => {
 
   it("marks env-backed image providers as configured", async () => {
     vi.stubEnv("FAL_KEY", "fal-test-key");
-    mocks.getProviderEnvVars.mockReturnValueOnce(["FAL_KEY"]);
+    mocks.getProviderEnvVarsCore.mockReturnValueOnce(["FAL_KEY"]);
     mocks.listRuntimeImageGenerationProviders.mockReturnValueOnce([
       { id: "fal", label: "fal", defaultModel: "fal-ai/flux", models: [] },
     ] as never);
@@ -4279,7 +4366,7 @@ describe("capability cli", () => {
   it("marks env-backed video generation and description providers as configured", async () => {
     vi.stubEnv("RUNWAYML_API_SECRET", "runway-test-key");
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
-    mocks.getProviderEnvVars.mockImplementation((providerId: string) =>
+    mocks.getProviderEnvVarsCore.mockImplementation((providerId: string) =>
       providerId === "runway" ? ["RUNWAYML_API_SECRET"] : ["GEMINI_API_KEY"],
     );
     mocks.listRuntimeVideoGenerationProviders.mockReturnValueOnce([
@@ -4308,7 +4395,7 @@ describe("capability cli", () => {
 
   it("marks env-backed TTS providers as configured", async () => {
     vi.stubEnv("XAI_API_KEY", "xai-test-key");
-    mocks.getProviderEnvVars.mockReturnValueOnce(["XAI_API_KEY"]);
+    mocks.getProviderEnvVarsCore.mockReturnValueOnce(["XAI_API_KEY"]);
     mocks.listSpeechProviders.mockReturnValueOnce([
       { id: "xai", label: "xAI", models: [], voices: [] },
     ] as never);

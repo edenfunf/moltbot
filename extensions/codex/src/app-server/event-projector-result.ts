@@ -1,5 +1,6 @@
 import {
   classifyAgentHarnessTerminalOutcome,
+  type AgentMessage,
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
   type HeartbeatToolResponse,
   type MessagingToolSend,
@@ -7,6 +8,7 @@ import {
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { resolveCodexTtsProvenanceTransfer } from "openclaw/plugin-sdk/codex-mcp-projection";
 import { attemptTerminal, type EmbeddedRunAttemptResult } from "./attempt-terminal.js";
+import type { CodexConfirmedMediaDelivery } from "./dynamic-tools.js";
 import { CodexAssistantProjection } from "./event-projector-assistant.js";
 import { CodexAsyncDeliveryProjection } from "./event-projector-async-delivery.js";
 import { CodexProjectionDiagnostics } from "./event-projector-diagnostics.js";
@@ -32,6 +34,7 @@ export type CodexAppServerToolTelemetry = {
   messagingToolSentMediaUrls: string[];
   messagingToolSentTargets: MessagingToolSend[];
   messagingToolSourceReplyPayloads?: MessagingToolSourceReplyPayload[];
+  confirmedMediaDeliveries?: readonly CodexConfirmedMediaDelivery[];
   heartbeatToolResponse?: HeartbeatToolResponse;
   toolMediaUrls?: string[];
   toolAutoDeliveryMediaUrls?: string[];
@@ -145,7 +148,7 @@ export abstract class CodexTurnProjection {
 
   buildResult(
     toolTelemetry: CodexAppServerToolTelemetry,
-    options?: { yieldDetected?: boolean },
+    options?: { yieldDetected?: boolean; steeringMessages?: readonly AgentMessage[] },
   ): EmbeddedRunAttemptResult & { terminalTurnId: string } {
     this.eventProjection.flushPendingGuardianWarning();
     // Finalizing native tools may invoke callbacks; retain this result's terminal snapshot.
@@ -244,6 +247,7 @@ export abstract class CodexTurnProjection {
       asyncMessages,
       commentaryMessages,
       toolMessages: this.toolTranscriptProjection.transcriptMessages,
+      steeringMessages: options?.steeringMessages,
       lastAssistant,
       turnTainted,
     });
@@ -268,8 +272,9 @@ export abstract class CodexTurnProjection {
       Boolean(toolTelemetry.successfulCronAdds || toolTelemetry.acceptedSessionSpawns?.length) ||
       this.generatedMediaProjection.hasGeneratedMedia() ||
       this.toolProgressProjection.hasPotentialSideEffects;
+    const mediaDelivery = this.generatedMediaProjection.projectDelivery(toolTelemetry);
     const sentMediaUrls = new Set(
-      toolTelemetry.messagingToolSentMediaUrls.map((url) => url.trim()),
+      mediaDelivery.messagingToolSentMediaUrls.map((url) => url.trim()),
     );
     const toolAutoDeliveryMediaUrls = toolTelemetry.toolAutoDeliveryMediaUrls?.filter(
       (url) => !sentMediaUrls.has(url.trim()),
@@ -301,12 +306,9 @@ export abstract class CodexTurnProjection {
         toolTelemetry.didDeliverSourceReplyViaMessageTool === true,
       sourceReplyDelivered: toolTelemetry.sourceReplyDelivered,
       messagingToolSentTexts: toolTelemetry.messagingToolSentTexts,
-      messagingToolSentMediaUrls: toolTelemetry.messagingToolSentMediaUrls,
-      messagingToolSentTargets: toolTelemetry.messagingToolSentTargets,
+      ...mediaDelivery,
       messagingToolSourceReplyPayloads: toolTelemetry.messagingToolSourceReplyPayloads ?? [],
       heartbeatToolResponse: toolTelemetry.heartbeatToolResponse,
-      toolMediaUrls: this.generatedMediaProjection.buildToolMediaUrls(toolTelemetry),
-      hostOwnedToolMediaUrls: this.generatedMediaProjection.buildHostOwnedMediaUrls(toolTelemetry),
       toolAudioAsVoice: toolTelemetry.toolAudioAsVoice,
       successfulCronAdds: toolTelemetry.successfulCronAdds,
       acceptedSessionSpawns: toolTelemetry.acceptedSessionSpawns,

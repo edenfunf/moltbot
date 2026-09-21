@@ -353,7 +353,6 @@ export class TelegramPollingSession {
     const ingressMonitor = createTelegramTransportIngressMonitor({
       spoolDir,
       bot,
-      cfg: this.opts.config,
       accountId: this.opts.accountId,
       botInfo,
       adoptionStallTimeoutMs: this.#spooledUpdateHandlerTimeoutMs,
@@ -641,6 +640,8 @@ export class TelegramPollingSession {
       endCycle();
       await stopWorker();
       await waitForGracefulStop(() => ingressMonitor.stop());
+      // Accepted replay writes and introductions keep ownership after transport grace expires.
+      await ingressMonitor.waitForDeferredClaims();
       await waitForGracefulStop(stopBot);
       if (this.#activeCycleAbort === cycleAbortController) {
         this.#activeCycleAbort = undefined;

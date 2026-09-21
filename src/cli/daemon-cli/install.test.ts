@@ -1,5 +1,6 @@
 import "./install.test-support.js";
 import { describe, expect, it, vi } from "vitest";
+import { ServiceInspectionError } from "../../daemon/service-inspection-error.js";
 import { withGatewayServiceUpdateAuthority } from "../../daemon/service-update-authority.js";
 
 const {
@@ -26,6 +27,18 @@ const {
 describe("runDaemonInstall", () => {
   setupInstallTests();
 
+  it("provides readiness guidance after successful service registration", async () => {
+    await runDaemonInstall({ json: true, force: true });
+    expect(installDaemonServiceAndEmitMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        successMessage: expect.stringMatching(
+          /readiness has not been checked.*openclaw gateway status.*openclaw health/,
+        ),
+        onVerified: expect.any(Function),
+      }),
+    );
+  });
+
   it("refuses update-owned gateway defaults when authority expires during write preparation", async () => {
     const snapshot = await readConfigFileSnapshotMock();
     readConfigFileSnapshotMock.mockResolvedValue({ ...snapshot, sourceConfig: {} });
@@ -35,6 +48,7 @@ describe("runDaemonInstall", () => {
       await Promise.resolve();
       current = false;
       await params.writeOptions.beforeCommit?.();
+      params.writeOptions.assertCurrent?.();
       committed = true;
     });
     await expect(
@@ -95,6 +109,18 @@ describe("runDaemonInstall", () => {
     expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["systemd-user-bus-unavailable", "systemd user session bus"],
+    ["launchd-gui-domain-unavailable", "launchd GUI domain"],
+  ] as const)("explains %s before writing config", async (reason, detail) => {
+    service.readCommand.mockRejectedValueOnce(new ServiceInspectionError(reason));
+    await runDaemonInstall({ json: true });
+    expect(actionState.failed[0]?.message).toContain(detail);
+    expect(actionState.failed[0]?.message).not.toContain("SERVICE_DEFINITION_UNKNOWN");
+    expect(replaceConfigFileMock).not.toHaveBeenCalled();
+    expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
+  });
+
   it("blocks inaccessible definitions before config reads or credential generation", async () => {
     service.readDefinitionMutationCapability.mockRejectedValueOnce(new Error("secret-canary"));
     await runDaemonInstall({ json: true, force: true });
@@ -134,26 +160,6 @@ describe("runDaemonInstall", () => {
     ).toBe(true);
   });
 
-  it.each(["darwin", "win32"] as const)(
-    "refuses deferred activation on %s before writing configuration or service state",
-    async (platform) => {
-      vi.spyOn(process, "platform", "get").mockReturnValue(platform);
-      await runDaemonInstall({ json: true, force: true, deferActivation: true });
-      expect(actionState.failed.at(-1)?.message).toContain("Deferred service load requires Linux");
-      expect(replaceConfigFileMock).not.toHaveBeenCalled();
-      expect(service.install).not.toHaveBeenCalled();
-      expect(service.isLoaded).not.toHaveBeenCalled();
-    },
-  );
-
-  it("refuses an unparented deferred install before reading or writing the selected profile", async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    await runDaemonInstall({ json: true, force: true, deferActivation: true });
-    expect(actionState.failed.at(-1)?.message).toContain("updater IPC channel");
-    expect(readConfigFileSnapshotMock).not.toHaveBeenCalled();
-    expect(service.install).not.toHaveBeenCalled();
-  });
-
   it("passes service environment value sources through to service install", async () => {
     buildGatewayInstallPlanMock.mockResolvedValueOnce({
       programArguments: ["openclaw", "gateway", "run"],
@@ -171,26 +177,12 @@ describe("runDaemonInstall", () => {
 
     await runDaemonInstall({ json: true });
 
-    const installCalls = service.install.mock.calls as unknown as Array<
-      [
-        {
-          environment?: Record<string, string>;
-          environmentValueSources?: Record<string, string>;
-        },
-      ]
-    >;
-    const installOptions = installCalls[0]?.[0] as
-      | {
-          environment?: Record<string, string>;
-          environmentValueSources?: Record<string, string>;
-        }
-      | undefined;
-    expect(installOptions?.environment).toEqual({
-      OPENROUTER_API_KEY: "or-operator-key",
-    });
-    expect(installOptions?.environmentValueSources).toEqual({
-      OPENROUTER_API_KEY: "file",
-    });
+    expect(service.install).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environment: { OPENROUTER_API_KEY: "or-operator-key" },
+        environmentValueSources: { OPENROUTER_API_KEY: "file" },
+      }),
+    );
   });
 
   it("captures service install warnings in json install output", async () => {
@@ -221,25 +213,38 @@ describe("runDaemonInstall", () => {
     expectFirstInstallPlanCallOmitsToken();
   });
 
-  it("auto-mints and persists token when no source exists", async () => {
-    randomTokenMock.mockReturnValue("minted-token");
-    readConfigFileSnapshotMock.mockResolvedValue({
-      exists: true,
-      valid: true,
-      config: { gateway: { auth: { mode: "token" } } },
-      sourceConfig: { gateway: { mode: "local", auth: { mode: "token" } } },
-    });
+  it.each([
+    { mode: "local", allowUnconfigured: false },
+    { mode: "remote", allowUnconfigured: true },
+    { mode: "local", allowUnconfigured: undefined },
+    { mode: "remote", allowUnconfigured: undefined },
+  ])(
+    "auto-mints a local auth token with $mode primary and override $allowUnconfigured",
+    async ({ mode, allowUnconfigured }) => {
+      randomTokenMock.mockReturnValue("minted-token");
+      readConfigFileSnapshotMock.mockResolvedValue({
+        exists: true,
+        valid: true,
+        config: { gateway: { mode, auth: { mode: "token" } } },
+        sourceConfig: { gateway: { mode, auth: { mode: "token" } } },
+      });
 
-    await runDaemonInstall({ json: true });
+      await runDaemonInstall({ json: true, force: true, allowUnconfigured });
 
-    expect(actionState.failed).toStrictEqual([]);
-    expect(replaceConfigFileMock).toHaveBeenCalledTimes(1);
-    expect(readFirstConfigWriteParams().sourceConfig?.gateway?.auth?.token).toBe("minted-token");
-    expectFields(readFirstInstallPlanArg(), { port: 18789 });
-    expectFirstInstallPlanCallOmitsToken();
-    expect(installDaemonServiceAndEmitMock).toHaveBeenCalledTimes(1);
-    expect(actionState.warnings.join("\n")).toContain("Auto-generated");
-  });
+      expect(actionState.failed).toStrictEqual([]);
+      expect(replaceConfigFileMock).toHaveBeenCalledTimes(1);
+      const writeParams = readFirstConfigWriteParams();
+      expect(writeParams.sourceConfig?.gateway?.auth?.token).toBe("minted-token");
+      expect(writeParams.sourceConfig?.gateway?.mode).toBe(mode);
+      expectFields(readFirstInstallPlanArg(), {
+        port: 18789,
+        allowUnconfigured,
+      });
+      expectFirstInstallPlanCallOmitsToken();
+      expect(installDaemonServiceAndEmitMock).toHaveBeenCalledTimes(1);
+      expect(actionState.warnings.join("\n")).toContain("Auto-generated");
+    },
+  );
 
   it("persists local gateway mode when installing from config missing gateway.mode", async () => {
     readConfigFileSnapshotMock

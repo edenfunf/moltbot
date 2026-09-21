@@ -35,6 +35,9 @@ names and flags wrap without being truncated, and Unicode keys stay aligned.
 Long keys show their beginning and end; use `openclaw sessions --json` for complete
 session keys.
 
+Token counts below 1,000 appear as whole numbers; larger counts use compact `k`
+or `m` labels. JSON output retains exact numeric counts.
+
 Flags:
 
 | Flag                 | Description                                                         |
@@ -95,7 +98,7 @@ skipped.
   "hasMore": false,
   "activeMinutes": null,
   "sessions": [
-    { "agentId": "main", "key": "agent:main:main", "model": "openai/gpt-5.6-sol" },
+    { "agentId": "main", "key": "agent:main:main", "model": "openai/gpt-6-astra" },
     { "agentId": "work", "key": "agent:work:main", "model": "anthropic/claude-sonnet-4-6" }
   ]
 }
@@ -243,6 +246,7 @@ openclaw sessions export-trajectory --session-key "agent:main:telegram:direct:12
 This is the command path used by the `/export-trajectory` slash command after
 the owner approves the exec request. The output directory is always resolved
 inside `.openclaw/trajectory-exports/` under the selected workspace.
+The file list in text and JSON output reports only artifacts written to the bundle.
 
 ## Cleanup maintenance
 
@@ -289,6 +293,13 @@ openclaw sessions cleanup --json
   remains above it. `--enforce` does not remove that protection; unpin, wait
   for active work to finish, or explicitly delete sessions you no longer want
   to retain.
+
+Optional cold transcript extraction has its own background worker and
+**Run now** action in
+[Settings → Agent Defaults → Session](/gateway/config-agents/sessions#cold-storage).
+It uses `session.maintenance.coldStorage.afterDays` and preserves inactive
+transcripts in authoritative compressed files. The cleanup command's
+reset/deletion archive retention does not delete those cold files.
 
 Flags:
 

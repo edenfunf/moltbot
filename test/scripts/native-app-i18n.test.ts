@@ -7,6 +7,7 @@ import { buildMacosCatalog } from "../../scripts/apple-app-i18n.ts";
 import {
   assignNativeI18nIds,
   collectNativeI18nEntries,
+  collectNativeI18nEntriesFromSources,
   extractNativeI18nCandidates,
   isConditionalBranchIdentifier,
   NATIVE_I18N_LOCALES,
@@ -189,6 +190,30 @@ describe("native app i18n inventory", () => {
       ).toEqual([prose]);
     },
   );
+
+  it.each([
+    { surface: "apple", value: "Before \\(outer(inner(value))) after" },
+    { surface: "apple", value: 'Before \\(format(")", "escaped \\")")) after' },
+    { surface: "android", value: "Before ${outer({ inner(value) })} after" },
+    { surface: "android", value: 'Before ${format("}", "escaped \\"}")} after' },
+  ] as const)(
+    "preserves $surface nested and quoted interpolation delimiters: $value",
+    ({ surface, value }) => {
+      const repoPath = `apps/${surface}/Fixture.${surface === "apple" ? "swift" : "kt"}`;
+      const source = `// fixture\nText("${value}")`;
+      expect(extractNativeI18nCandidates(surface, repoPath, source)).toEqual([
+        { kind: "ui-call", line: 2, path: repoPath, source: value, sourceContext: source, surface },
+      ]);
+    },
+  );
+
+  it.each([
+    { surface: "apple", value: "Before \\(outer(value)" },
+    { surface: "android", value: "Before ${outer(value)" },
+  ] as const)("rejects $surface unclosed interpolation", ({ surface, value }) => {
+    const repoPath = `apps/${surface}/Fixture.${surface === "apple" ? "swift" : "kt"}`;
+    expect(extractNativeI18nCandidates(surface, repoPath, `Text("${value}")`)).toEqual([]);
+  });
 
   it.each(["apple", "android"] as const)(
     "preserves compact %s prose and the candidate length boundary",
@@ -392,6 +417,63 @@ describe("native app i18n inventory", () => {
     );
 
     expect(entries.map((entry) => entry.source)).toEqual(["off", "Visible choice"]);
+  });
+
+  it("shares discovered UI helpers across files only within the same platform", () => {
+    const entries = collectNativeI18nEntriesFromSources([
+      {
+        surface: "android",
+        repoPath: "apps/android/Screen.kt",
+        source: `
+          AndroidBadge("Android badge")
+          Text("Android built-in")
+          SharedCard("Not an Android view")
+          request.header("Cookie", cookie)
+            .header("Cf-Access-Metadata-Request", "true")
+            .header("Cf-Access-Token", token)
+            .header("User-Agent", agent)
+            .header("Accept", contentType)
+          response.header("Location")
+        `,
+      },
+      {
+        surface: "apple",
+        repoPath: "apps/ios/Screen.swift",
+        source: `
+          header("iOS heading")
+          SharedCard("Shared card")
+          Text("Apple built-in")
+          AndroidBadge("Not an Apple view")
+        `,
+      },
+      {
+        surface: "apple",
+        repoPath: "apps/macos/Sources/Screen.swift",
+        source: 'header("macOS heading")',
+      },
+      {
+        surface: "apple",
+        repoPath: "apps/shared/OpenClawKit/Sources/Views.swift",
+        source: `
+          func header(_ text: String) -> some View { Text(text) }
+          struct SharedCard: View { var body: some View { EmptyView() } }
+        `,
+      },
+      {
+        surface: "android",
+        repoPath: "apps/android/Components.kt",
+        source: "@Composable fun AndroidBadge(text: String) { Text(text) }",
+      },
+    ]);
+
+    expect(entries.map(({ surface, source }) => ({ surface, source }))).toEqual([
+      { surface: "android", source: "Android badge" },
+      { surface: "android", source: "Android built-in" },
+      { surface: "apple", source: "Apple built-in" },
+      { surface: "apple", source: "Shared card" },
+      { surface: "apple", source: "iOS heading" },
+      { surface: "apple", source: "macOS heading" },
+    ]);
   });
 
   it("collects stable Android and Apple UI entries", async () => {
@@ -666,7 +748,7 @@ describe("native app i18n inventory", () => {
       entries.some(
         (entry) =>
           entry.source ===
-          "The current gateway.remote.token value is not plain text. OpenClaw for macOS cannot use it directly; enter a plaintext token here to replace it.",
+          "Use the credential for this destination. Leave both fields empty only if this route already has device pairing or does not require a shared credential. Changing the destination clears this form's saved credentials.",
       ),
     ).toBe(true);
     expect(
@@ -687,16 +769,16 @@ describe("native app i18n inventory", () => {
       entries.some(
         (entry) =>
           entry.source ===
-          "Paste the token configured on the gateway host. On the gateway host, run `openclaw gateway auth-token --show` in an interactive terminal, then paste its output.",
+          "A setup code supplies the address and available certificate information automatically. For token or password authentication, enter the ordinary Gateway credential below.",
       ),
     ).toBe(true);
     expect(
       entries.some((entry) =>
         [
-          "The current gateway.remote.token value is not plain text. ",
+          "Use the credential for this destination. Leave both fields empty only if this route ",
           "Cron changes require operator.admin. Setup codes intentionally do not grant it. ",
           "Writes a rotating, local-only log under ~/Library/Logs/OpenClaw/. ",
-          "Paste the token configured on the gateway host. ",
+          "A setup code supplies the address and available certificate information automatically. ",
         ].includes(entry.source),
       ),
     ).toBe(false);

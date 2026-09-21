@@ -40,7 +40,9 @@ suite.define(() => {
       const followUpSelect = page.locator("[data-settings-follow-up-mode]");
       await followUpSelect.waitFor({ state: "visible", timeout: 10_000 });
       expect(await followUpSelect.inputValue()).toBe("server");
-      await page.getByText("Using server default (followup)").waitFor({ timeout: 10_000 });
+      await expect
+        .poll(() => followUpSelect.locator("option:checked").textContent())
+        .toContain("Server default (followup)");
       const configPatchCount = (await gateway.getRequests("config.patch")).length;
       const configGetCount = (await gateway.getRequests("config.get")).length;
       const overrideConfig = {
@@ -70,7 +72,9 @@ suite.define(() => {
       await page.getByRole("button", { name: "Reset to server default" }).click();
       await waitForRequests(gateway, "config.patch", configPatchCount + 2);
       await waitForRequests(gateway, "config.get", configGetCount + 2);
-      await page.getByText("Using server default (followup)").waitFor({ timeout: 10_000 });
+      await expect
+        .poll(() => followUpSelect.locator("option:checked").textContent())
+        .toContain("Server default (followup)");
       expect(await followUpSelect.inputValue()).toBe("server");
 
       await page.goto(`${suite.server.baseUrl}chat`);
@@ -710,6 +714,16 @@ suite.define(() => {
     const page = await context.newPage();
     const gateway = await installMockGateway(page, {
       sessionInfo: { hasActiveRun: false, status: "done" },
+      methodResponses: {
+        "sessions.list": {
+          cases: [
+            {
+              match: { spawnedBy: "agent:main:main" },
+              response: chatSessionListResponse([]),
+            },
+          ],
+        },
+      },
     });
 
     try {
@@ -758,23 +772,28 @@ suite.define(() => {
       await expect
         .poll(async () => (await gateway.getRequests("sessions.list")).length)
         .toBeGreaterThan(sessionListsBeforeTerminal);
-      await gateway.resolveDeferred(
-        "sessions.list",
-        chatSessionListResponse([
-          {
-            activeRunIds: [],
-            hasActiveRun: false,
-            key: activeSessionKey,
-            sessionId: `session:${activeSessionKey}`,
-            kind: "direct",
-            label: "Main",
-            lastRunId: activeRunId,
-            status: "done",
-            updatedAt: Date.now(),
-          },
-        ]),
-      );
-
+      const terminalSessions = chatSessionListResponse([
+        {
+          activeRunIds: [],
+          hasActiveRun: false,
+          key: activeSessionKey,
+          sessionId: `session:${activeSessionKey}`,
+          kind: "direct",
+          label: "Main",
+          lastRunId: activeRunId,
+          status: "done",
+          updatedAt: Date.now(),
+        },
+      ]);
+      // The list publication and later descriptor/history reads share one Gateway state.
+      await gateway.setSessionsListResponse(terminalSessions);
+      await gateway.setMethodResponse("sessions.list", {
+        cases: [
+          { match: { spawnedBy: activeSessionKey }, response: chatSessionListResponse([]) },
+          { response: terminalSessions },
+        ],
+      });
+      await gateway.resolveDeferred("sessions.list", terminalSessions);
       const sends = await waitForRequests(gateway, "chat.send", 2);
       expect(requireRecord(sends[1]?.params)).toMatchObject({ message: followUp });
       await queuedRow.waitFor({ state: "detached", timeout: 10_000 });

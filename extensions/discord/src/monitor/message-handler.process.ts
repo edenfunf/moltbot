@@ -1,8 +1,8 @@
-// Discord plugin module implements message handler.process behavior.
 import type { APIAllowedMentions } from "discord-api-types/v10";
 import { resolveAgentConfig, resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import {
   dispatchChannelInboundTurn,
+  getGroupThreadDeliverySession,
   hasFinalInboundReplyDispatch,
   readAgentRunTerminalOutcome,
 } from "openclaw/plugin-sdk/channel-inbound";
@@ -19,7 +19,7 @@ import {
   isReplyPayloadNonTerminalToolErrorWarning,
   resolveSendableOutboundReplyParts,
 } from "openclaw/plugin-sdk/reply-payload";
-import type { ReplyDispatchKind, ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
+import type { ReplyDispatchRuntimeInfo, ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import {
   danger,
   logVerbose,
@@ -38,6 +38,7 @@ import {
   createDiscordBeforePayloadDelivery,
   createDiscordMessageReplyRuntime,
   formatDiscordReasoningQuote,
+  formatDiscordGroupThreadReply,
 } from "./message-handler.process-reply-runtime.js";
 import { createDiscordMessageActiveThreadRoute } from "./message-handler.process-thread-route.js";
 import { completeDiscordSessionConflict } from "./message-handler.retry.js";
@@ -68,21 +69,12 @@ type DiscordMessageProcessObserver = {
   onReplyPlanResolved?: (params: { createdThreadId?: string; sessionKey?: string }) => void;
 };
 
-type DiscordProviderDeliveryInfo = {
-  kind: ReplyDispatchKind;
-  bindPendingFinalDelivery?: <T extends ReplyPayload>(payload: T) => T;
+type DiscordProviderDeliveryInfo = ReplyDispatchRuntimeInfo & {
   onPlatformSendDispatch: () => Promise<void>;
   assertPlatformSendAuthorized: () => void;
 };
 
 export async function processDiscordMessage(
-  ctx: DiscordMessagePreflightContext,
-  observer?: DiscordMessageProcessObserver,
-) {
-  await processDiscordMessageInner(ctx, observer);
-}
-
-async function processDiscordMessageInner(
   ctx: DiscordMessagePreflightContext,
   observer?: DiscordMessageProcessObserver,
 ) {
@@ -203,9 +195,11 @@ async function processDiscordMessageInner(
     resolvedBlockStreamingEnabled,
   } = replyRuntime;
   let deliverChannelId = initialDeliverChannelId;
+  let deliverThreadId = ctxPayload.MessageThreadId;
   activeThreadRoute.bindThreadAdoption(async (threadId) => {
     deliverTarget = `channel:${threadId}`;
     deliverChannelId = threadId;
+    deliverThreadId = threadId;
     await draftPreview.retarget(threadId);
   });
   let finalReplyStartNotified = false;
@@ -220,7 +214,11 @@ async function processDiscordMessageInner(
   let userFacingFinalDelivered = false;
   let userFacingFinalDeliveryFailed = false;
   let pendingToolWarningFinal:
-    | { payload: ReplyPayload; info: DiscordProviderDeliveryInfo }
+    | {
+        payload: ReplyPayload;
+        info: DiscordProviderDeliveryInfo;
+        deliverySession: ReturnType<typeof getGroupThreadDeliverySession>;
+      }
     | undefined;
   const markFinalReplyDelivered = (isError = false) => {
     draftPreview.markFinalReplyDelivered(isError);
@@ -267,11 +265,12 @@ async function processDiscordMessageInner(
   });
 
   const deliverDiscordPayload = async (
-    payload: ReplyPayload,
+    incomingPayload: ReplyPayload,
     info: DiscordProviderDeliveryInfo,
     options?: {
       allowFallbackOnlyToolWarning?: boolean;
       allowProgressBlock?: boolean;
+      deliverySession?: ReturnType<typeof getGroupThreadDeliverySession>;
     },
   ) => {
     if (abortSignal?.aborted) {
@@ -286,6 +285,34 @@ async function processDiscordMessageInner(
         }),
       );
       return { visibleReplySent: false };
+    }
+    const deliverySession = options?.deliverySession ?? getGroupThreadDeliverySession();
+    const deliveryOptions = {
+      cfg,
+      token,
+      accountId,
+      rest: reactions.deliveryRest,
+      runtime,
+      replyToMode,
+      textLimit,
+      maxLinesPerMessage,
+      tableMode,
+      chunkMode,
+      sessionKey: deliverySession?.sessionKey ?? ctxPayload.SessionKey,
+      threadBindings,
+      mediaLocalRoots: deliverySession
+        ? getAgentScopedMediaLocalRoots(cfg, deliverySession.agentId)
+        : mediaLocalRoots,
+      bindPendingFinalDelivery: info.bindPendingFinalDelivery,
+      onPlatformSendDispatch: info.onPlatformSendDispatch,
+      assertPlatformSendAuthorized: info.assertPlatformSendAuthorized,
+    };
+    let payload = incomingPayload;
+    if (info.participant && (payload.text || payload.mediaUrl || payload.mediaUrls?.length)) {
+      payload = {
+        ...payload,
+        text: formatDiscordGroupThreadReply(payload.text ?? "", info.participant),
+      };
     }
     const isFinal = info.kind === "final";
     if (payload.isReasoning) {
@@ -308,26 +335,11 @@ async function processDiscordMessageInner(
         return { visibleReplySent: false };
       }
       const result = await deliverDiscordReply({
-        cfg,
+        ...deliveryOptions,
         replies,
         target: deliverTarget,
-        token,
-        accountId,
-        rest: reactions.deliveryRest,
-        runtime,
         replyToId: replyReference.use(),
-        replyToMode,
-        textLimit,
-        maxLinesPerMessage,
-        tableMode,
-        chunkMode,
-        sessionKey: ctxPayload.SessionKey,
-        threadBindings,
-        mediaLocalRoots,
         kind: "block",
-        bindPendingFinalDelivery: info.bindPendingFinalDelivery,
-        onPlatformSendDispatch: info.onPlatformSendDispatch,
-        assertPlatformSendAuthorized: info.assertPlatformSendAuthorized,
       });
       if (result.visibleReplySent) {
         replyReference.markSent();
@@ -343,7 +355,8 @@ async function processDiscordMessageInner(
         !userFacingFinalDelivered &&
         (!finalReplyStartNotified || userFacingFinalDeliveryFailed)
       ) {
-        pendingToolWarningFinal = { payload, info };
+        // Root settlement can outlive this participant's dispatch scope.
+        pendingToolWarningFinal = { payload, info, deliverySession };
       }
       return { visibleReplySent: false };
     }
@@ -351,8 +364,9 @@ async function processDiscordMessageInner(
       draftPreview.markFinalReplyStarted();
     }
     const finalText =
-      isFinal && typeof payload.text === "string"
+      isFinal && !ctxPayload.GroupThread && typeof payload.text === "string"
         ? await resolveTranscriptBackedChannelFinalText({
+            payload,
             finalText: payload.text,
             resolveCandidateText: resolveCurrentTurnTranscriptFinalText,
           })
@@ -371,6 +385,19 @@ async function processDiscordMessageInner(
         }),
       );
       return { visibleReplySent: false };
+    }
+    if (
+      await draftPreview.adoptProgressContinuation(deliverablePayload, info, {
+        to: isDirectMessage
+          ? (ctxPayload.OriginatingTo ?? ctxPayload.To ?? deliverTarget)
+          : deliverTarget,
+        threadId: deliverThreadId,
+      })
+    ) {
+      notifyFinalReplyStart();
+      markFinalReplyDelivered();
+      replyReference.markSent();
+      return { visibleReplySent: true };
     }
     if (isFinal && !replyLifecycleStarted && !isRoomEvent && configuredTypingMode !== "never") {
       // Fast replies can bypass the normal resolver lifecycle. Start feedback
@@ -465,27 +492,12 @@ async function processDiscordMessageInner(
           const replyToId = replyReference.use();
           notifyFinalReplyStart();
           const deliveryResult = await deliverDiscordReply({
-            cfg,
+            ...deliveryOptions,
             replies: [fallbackPayload],
             target: deliverTarget,
-            token,
-            accountId,
-            rest: reactions.deliveryRest,
-            runtime,
             replyToId,
-            replyToMode,
-            textLimit,
-            maxLinesPerMessage,
-            tableMode,
-            chunkMode,
-            sessionKey: ctxPayload.SessionKey,
-            threadBindings,
-            mediaLocalRoots,
             allowedMentions,
             kind: info.kind,
-            bindPendingFinalDelivery: info.bindPendingFinalDelivery,
-            onPlatformSendDispatch: info.onPlatformSendDispatch,
-            assertPlatformSendAuthorized: info.assertPlatformSendAuthorized,
           });
           return deliveryResult.visibleReplySent;
         },
@@ -517,26 +529,11 @@ async function processDiscordMessageInner(
       notifyFinalReplyStart();
     }
     const result = await deliverDiscordReply({
-      cfg,
+      ...deliveryOptions,
       replies: [deliverablePayload],
       target: deliverTarget,
-      token,
-      accountId,
-      rest: reactions.deliveryRest,
-      runtime,
       replyToId,
-      replyToMode,
-      textLimit,
-      maxLinesPerMessage,
-      tableMode,
-      chunkMode,
-      sessionKey: ctxPayload.SessionKey,
-      threadBindings,
-      mediaLocalRoots,
       kind: info.kind,
-      bindPendingFinalDelivery: info.bindPendingFinalDelivery,
-      onPlatformSendDispatch: info.onPlatformSendDispatch,
-      assertPlatformSendAuthorized: info.assertPlatformSendAuthorized,
     });
     if (!result.visibleReplySent) {
       return result;
@@ -588,6 +585,7 @@ async function processDiscordMessageInner(
     try {
       return await deliverDiscordPayload(pending.payload, pending.info, {
         allowFallbackOnlyToolWarning: true,
+        deliverySession: pending.deliverySession,
       });
     } catch (err) {
       dispatchError = true;
@@ -634,6 +632,7 @@ async function processDiscordMessageInner(
             limit: ctx.historyLimit,
           },
       replyOptions: {
+        groupThreadReplyFormatter: formatDiscordGroupThreadReply,
         ...(turnAdoptionLifecycle ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle) : {}),
         abortSignal,
         skillFilter: ctx.channelConfig?.skills,

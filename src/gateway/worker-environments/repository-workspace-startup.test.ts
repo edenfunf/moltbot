@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { NodeWorkerWorkspaceRuntime } from "../../node-host/node-worker-workspace.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db.js";
+import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import {
@@ -16,8 +16,8 @@ import { createNodeWorkspaceTransferService } from "./node-workspace-transfer-se
 import { startNodeWorkspaceTransferTestServer } from "./node-workspace-transfer.test-support.js";
 import { syncSessionRepositoryWorkspace } from "./repository-workspace-startup.js";
 import {
-  readSessionRepositoryCheckpoint,
   stageSessionRepositoryCheckpoint,
+  withSessionRepositoryCheckpoint,
 } from "./session-repository-checkpoints.js";
 import type {
   WorkerTunnelHandle,
@@ -69,7 +69,8 @@ async function fixture(runSetupScript = false, preparedNode = false) {
         "workspace",
       )
     : state.path("worker-checkout");
-  await fs.mkdir(remote, { recursive: true });
+  await fs.mkdir(remote, { recursive: true, mode: 0o700 });
+  await fs.chmod(remote, 0o700);
   await fs.writeFile(path.join(remote, "tracked.txt"), "pinned source\n");
   if (preparedNode) {
     await fs.mkdir(path.join(remote, ".openclaw"));
@@ -263,10 +264,14 @@ it("accepts the initial SQLite and bare Git checkpoint before sync can finish or
   const accepted = f.store.get(f.repository.workspaceId);
   expect(accepted).toMatchObject({ manifestHash: result.manifestRef });
   expect(accepted?.checkpointRef).toMatch(/^refs\/openclaw\/worker-results\//u);
-  const snapshot = await readSessionRepositoryCheckpoint({ workspaceId: f.repository.workspaceId });
-  expect(snapshot.changedEntries.map((entry) => entry.path)).toEqual(["setup.txt"]);
-  expect((await snapshot.readEntry(snapshot.changedEntries[0]!)).toString()).toBe(
-    "setup complete\n",
+  await withSessionRepositoryCheckpoint(
+    { workspaceId: f.repository.workspaceId },
+    async (snapshot) => {
+      expect(snapshot.changedEntries.map((entry) => entry.path)).toEqual(["setup.txt"]);
+      expect(await fs.readFile(path.join(snapshot.stagingRoot, "setup.txt"), "utf8")).toBe(
+        "setup complete\n",
+      );
+    },
   );
   expect(
     await requireWorkspaceResultGit(f.store.artifactPath(f.repository.workspaceId), [
@@ -311,7 +316,8 @@ it("adopts completed setup, restores accepted repository edits, and retains the 
   const completed = await readActualWorkspaceManifest({ root: f.remote, baseCommit: f.baseCommit });
   const homeDir = path.join(path.dirname(f.remote), "home");
   const manifests = path.join(homeDir, ".openclaw-worker", "manifests");
-  await fs.mkdir(manifests, { recursive: true });
+  await fs.mkdir(manifests, { recursive: true, mode: 0o700 });
+  await fs.chmod(manifests, 0o700);
   await fs.writeFile(
     path.join(manifests, `${f.base.manifestRef.slice(7)}.json`),
     serializeWorkerWorkspaceManifest(f.base.manifest),
@@ -401,6 +407,12 @@ it("adopts completed setup, restores accepted repository edits, and retains the 
   try {
     const initial = await f.start({ recovery: true, preparedRepository });
     expect(initial.manifestRef).toBe(completed.manifestRef);
+    expect(await requireWorkspaceResultGit(f.remote, ["config", "--local", "user.name"])).toBe(
+      gitAuthor.name,
+    );
+    expect(await requireWorkspaceResultGit(f.remote, ["config", "--local", "user.email"])).toBe(
+      gitAuthor.email,
+    );
     const initialCheckpoint = f.store.get(f.repository.workspaceId)!;
     await fs.writeFile(path.join(f.remote, "tracked.txt"), "accepted session edit\n");
     const edited = await readActualWorkspaceManifest({ root: f.remote, baseCommit: f.baseCommit });

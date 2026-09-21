@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as tar from "tar";
 import { afterEach, describe, expect, it } from "vitest";
+import { pnpmLockfileDocuments } from "../scripts/lib/pnpm-lockfile-documents.mjs";
 import { restorePrepackArtifacts } from "../scripts/openclaw-postpack.mjs";
 import {
   collectPreparedPrepackErrors,
@@ -28,14 +29,22 @@ import {
   runPrepackCommand,
 } from "../scripts/openclaw-prepack.ts";
 import { preparePackageDocsMap } from "../scripts/package-docs-map.mjs";
+import { resolveTestNodeExecPath } from "../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const testNodeExecPath = resolveTestNodeExecPath();
 const rootPackageManager = (
   JSON.parse(readFileSync("package.json", "utf8")) as {
     packageManager: string;
   }
 ).packageManager;
+const rootPnpmEnvironment = pnpmLockfileDocuments(
+  readFileSync("pnpm-lock.yaml", "utf8"),
+).environment;
+if (!rootPnpmEnvironment) {
+  throw new Error("pnpm-lock.yaml is missing its environment document");
+}
 
 const standaloneBundledChannelSmokeFiles = [
   "scripts/test-built-bundled-channel-entry-smoke.mts",
@@ -46,6 +55,7 @@ const standaloneBundledChannelSmokeFiles = [
   "scripts/lib/record-shared.mjs",
   "scripts/lib/root-package-bundled-plugin-excludes.mjs",
   "scripts/process-warning-filter.mts",
+  "src/shared/non-packaged-plugin-dirs.ts",
 ];
 
 function linkFixtureParent(packageRoot: string) {
@@ -171,6 +181,11 @@ function createPrepackLifecycleFixture() {
   sourceFiles["package.json"] = `${JSON.stringify(packageJson, null, 2)}\n`;
   sourceFiles["CHANGELOG.md"] += "\n## 2026.7.1\n- Previous release notes with enough detail.\n";
   writeFileSync(path.join(rootDir, "package.json"), sourceFiles["package.json"]);
+  // Without the toolchain lock, pnpm 12 resolves registry metadata before running prepack.
+  writeFileSync(
+    path.join(rootDir, "pnpm-lock.yaml"),
+    `---\n${rootPnpmEnvironment}\n---\nlockfileVersion: '9.0'\nimporters: {}\n`,
+  );
   writeFileSync(path.join(rootDir, "CHANGELOG.md"), sourceFiles["CHANGELOG.md"]);
   writeFileSync(path.join(rootDir, "docs/docs_map.md"), "Source docs-map stub.\n");
   writeFileSync(
@@ -284,7 +299,7 @@ function runStandaloneBundledChannelSmoke(
   }
 
   const result = spawnSync(
-    process.execPath,
+    testNodeExecPath,
     [
       path.join(rootDir, "scripts", "test-built-bundled-channel-entry-smoke.mts"),
       "--package-root",
@@ -403,7 +418,7 @@ describe("prepared prepack ownership", () => {
       const receipt = incumbent ? readFileSync(receiptPath, "utf8") : undefined;
       const ownerUrl = pathToFileURL(path.resolve("scripts/openclaw-prepack.ts")).href;
       const result = spawnSync(
-        process.execPath,
+        testNodeExecPath,
         [
           "--import",
           import.meta.resolve("tsx"),
@@ -812,7 +827,7 @@ describe("runPrepackCommand", () => {
   });
 
   it("returns captured output for successful commands", () => {
-    const result = runPrepackCommand(process.execPath, ["--eval", "process.stdout.write('ok')"], {
+    const result = runPrepackCommand(testNodeExecPath, ["--eval", "process.stdout.write('ok')"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 1000,
@@ -825,7 +840,7 @@ describe("runPrepackCommand", () => {
   it("bounds commands that ignore termination", () => {
     const startedAt = Date.now();
     const result = runPrepackCommand(
-      process.execPath,
+      testNodeExecPath,
       ["--eval", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
       {
         stdio: ["ignore", "pipe", "pipe"],

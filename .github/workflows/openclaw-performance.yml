@@ -122,9 +122,16 @@ jobs:
           sparse-checkout: |
             package.json
             src/config/zod-schema.agent-defaults.ts
+            src/config/zod-schema.agent-defaults-base.ts
           sparse-checkout-cone-mode: false
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Setup supported Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
 
       - name: Resolve OpenClaw target ref
         id: resolve
@@ -157,7 +164,7 @@ jobs:
               if (typeof version !== "string") process.exit(1);
               process.stdout.write(version);
             ' "$TARGET_CHECKOUT_DIR/package.json")"
-            if [[ "$target_version" == "2026.7.33" ]]; then
+            if [[ "$target_version" == "2026.7.33" || "$target_version" == "2026.7.34" ]]; then
               # This compatibility ref keeps Kova #116's historical 250% status CLI calibration
               # while backporting #118-#120's complete CPU-accounting fixes for this release only.
               kova_ref="18c9eb8c3950a35794d196f4e40ad471e9308e27"
@@ -174,6 +181,14 @@ jobs:
 
           if [[ -z "$kova_ref" || -z "$kova_config_contract" ]]; then
             schema_path="${TARGET_CHECKOUT_DIR}/src/config/zod-schema.agent-defaults.ts"
+            # Follow the shipped composition only when the wrapper has no inline contract.
+            if [[ -f "$schema_path" ]] &&
+              ! grep -Fqx '    mediaModels: z' "$schema_path" &&
+              ! grep -Fqx '    imageGenerationModel: AgentToolModelSchema.optional(),' "$schema_path" &&
+              grep -Fqx 'import { AgentDefaultsBaseSchema } from "./zod-schema.agent-defaults-base.js";' "$schema_path" &&
+              grep -Fqx 'export const AgentDefaultsSchema = AgentDefaultsBaseSchema.safeExtend({' "$schema_path"; then
+              schema_path="${TARGET_CHECKOUT_DIR}/src/config/zod-schema.agent-defaults-base.ts"
+            fi
             if [[ -f "$schema_path" ]]; then
               schema_content="$(cat "$schema_path")"
             elif [[ -z "$kova_ref" ]]; then
@@ -1241,6 +1256,13 @@ jobs:
           artifact-ids: ${{ steps.artifact.outputs.ids }}
           path: ${{ steps.paths.outputs.input_root }}
 
+      - name: Setup supported Node runtime
+        if: steps.download.outcome == 'success'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+
       - name: Prepare clawgrit report commit
         id: prepare
         if: steps.download.outcome == 'success'
@@ -1654,9 +1676,9 @@ jobs:
           set -euo pipefail
           pnpm_prefix="$RUNNER_TEMP/vitest-pair-pnpm"
           npm_config_cache="$RUNNER_TEMP/vitest-pair-npm-cache" \
-            npm install --global --prefix "$pnpm_prefix" pnpm@12.3.4
+            npm install --global --prefix "$pnpm_prefix" pnpm@12.4.0
           pnpm_bin="$pnpm_prefix/bin/pnpm"
-          [[ "$("$pnpm_bin" --version)" == "12.3.4" ]]
+          [[ "$("$pnpm_bin" --version)" == "12.4.0" ]]
           echo "VITEST_PAIR_PNPM_BIN=$pnpm_bin" >> "$GITHUB_ENV"
 
       - name: Run Vitest pair benchmark

@@ -1,3 +1,4 @@
+import type { ChatWorkContext } from "../../../../packages/gateway-protocol/src/chat-work-context.js";
 import type {
   ChatSendIntent,
   QueueMode,
@@ -10,6 +11,7 @@ import {
   resolveUiSelectedSessionAgentId,
 } from "../../lib/sessions/session-key.ts";
 import { buildChatApiAttachments } from "./attachment-api.ts";
+import { isInitialChatHistoryUnavailable } from "./chat-history-state.ts";
 import { normalizeChatSendAck, type ChatSendAck } from "./chat-send-ack.ts";
 import type { ChatState } from "./chat-state-contract.ts";
 
@@ -17,6 +19,7 @@ export async function requestChatSend(
   state: ChatState,
   params: {
     message: string;
+    workContext?: ChatWorkContext;
     mentions?: readonly HumanMention[];
     attachments?: ChatAttachment[];
     runId: string;
@@ -42,6 +45,7 @@ export async function requestChatSend(
     ...(sessionId ? { sessionId } : {}),
     ...(controlUiReconnectResume ? { __controlUiReconnectResume: true } : {}),
     message: params.message,
+    ...(params.workContext ? { workContext: params.workContext } : {}),
     ...(params.mentions?.length ? { mentions: params.mentions } : {}),
     ...(params.intent ? { intent: params.intent } : {}),
     deliver: false,
@@ -59,9 +63,10 @@ export async function requestChatSend(
   return normalizeChatSendAck(payload, params.runId);
 }
 
-export function resolveDisplayedLeafEntryId(
-  state: Pick<ChatState, "chatDisplayedLeafEntryId">,
-): string | null | undefined {
+export function resolveDisplayedLeafEntryId(state: ChatState): string | null | undefined {
+  if (state.chatLoading || isInitialChatHistoryUnavailable(state)) {
+    return undefined;
+  }
   if (state.chatDisplayedLeafEntryId === null) {
     return null;
   }

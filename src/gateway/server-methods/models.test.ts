@@ -39,8 +39,12 @@ const OPENCLAW_DEVICE_PLACEMENT: NonNullable<GatewayAgentRuntime["devicePlacemen
 };
 
 const modelPluginMetadataSnapshot = await vi.hoisted(async () => {
+  const { buildPluginMetadataProviderFacts } =
+    await import("../../plugins/plugin-metadata-provider-facts.js");
+  const { makeEmptyPluginMetadataOwners } =
+    await import("../../plugins/current-plugin-metadata.test-support.js");
   const { buildDeclaredProviderOwnerIndex } = await import("../../plugins/provider-owner-index.js");
-  const plugins = [
+  const plugins: PluginMetadataSnapshot["manifestRegistry"]["plugins"] = [
     {
       id: "anthropic",
       channels: [],
@@ -130,20 +134,16 @@ const modelPluginMetadataSnapshot = await vi.hoisted(async () => {
     normalizePluginId: (pluginId: string) => pluginId,
     declaredProviderOwners: buildDeclaredProviderOwnerIndex(plugins),
     owners: {
-      channels: new Map(),
-      channelConfigs: new Map(),
+      ...makeEmptyPluginMetadataOwners(),
+      providerAuthContributions:
+        buildPluginMetadataProviderFacts(plugins).providerAuthContributions,
       providers: new Map([
         ["anthropic", ["anthropic"]],
         ["byteplus", ["byteplus"]],
         ["byteplus-plan", ["byteplus"]],
         ["github-copilot", ["github-copilot"]],
       ]),
-      modelCatalogProviders: new Map(),
       cliBackends: new Map([["claude-cli", ["anthropic"]]]),
-      setupProviders: new Map(),
-      commandAliases: new Map(),
-      contracts: new Map(),
-      modelIdNormalizationPolicies: new Map(),
     },
     metrics: {
       registrySnapshotMs: 0,
@@ -276,6 +276,7 @@ function requestModelsList(params: {
     workspaceDir?: string;
   }) => Promise<Array<Record<string, unknown>>>;
   reqId?: string;
+  includeDefaultModels?: boolean;
   includeProviderCapabilities?: boolean;
   deferredAuth?: Promise<PreparedModelRuntimeAuth>;
   refresh?: boolean;
@@ -352,6 +353,9 @@ function requestModelsList(params: {
   });
   const requestParams = {
     view: params.view,
+    ...(params.includeDefaultModels === undefined
+      ? {}
+      : { includeDefaultModels: params.includeDefaultModels }),
     ...(params.refresh ? { refresh: true } : {}),
     ...(params.agentId ? { agentId: params.agentId } : {}),
     ...(params.includeProviderCapabilities ? { includeProviderCapabilities: true } : {}),
@@ -384,6 +388,40 @@ function requestModelsList(params: {
 }
 
 describe("models.list", () => {
+  it.each(["claude-fable-5-1", "Claude Gateway/claude-fable-5-1"])(
+    "publishes the native Fable effort ladder for %s on a custom Messages provider",
+    async (id) => {
+      const { request, respond } = requestModelsList({
+        view: "all",
+        loadGatewayModelCatalog: vi.fn(async () => [
+          {
+            id,
+            name: "Pooled Fable",
+            provider: "proxy",
+            api: "anthropic-messages",
+            reasoning: true,
+          },
+        ]),
+      });
+
+      await request;
+
+      expect(respond.mock.calls[0]?.[1]).toMatchObject({
+        models: [
+          {
+            id,
+            provider: "proxy",
+            thinkingLevels: ["low", "medium", "high", "xhigh", "max"].map((level) => ({
+              id: level,
+              label: level,
+            })),
+            thinkingDefault: "medium",
+          },
+        ],
+      });
+    },
+  );
+
   it("loads the requested agent catalog", async () => {
     const loadGatewayModelCatalog = vi.fn(async () => [
       { id: "writer-model", name: "Writer Model", provider: "test" },
@@ -433,6 +471,7 @@ describe("models.list", () => {
 
     const selected = requestModelsList({
       view: "configured",
+      includeDefaultModels: false,
       agentId: "research",
       runtimeConfig,
       loadGatewayModelCatalog: vi.fn(async () => []),
@@ -944,6 +983,7 @@ describe("models.list", () => {
       const { request, respond } = requestModelsList({
         publishedCatalog: [],
         view: "configured",
+        includeDefaultModels: false,
         runtimeConfig,
         loadGatewayModelCatalog,
         reqId: "req-models-list-slow-catalog",
@@ -994,6 +1034,7 @@ describe("models.list", () => {
       const { request, respond } = requestModelsList({
         publishedCatalog: [],
         view: "configured",
+        includeDefaultModels: false,
         runtimeConfig,
         deferredAuth: auth.promise,
         loadGatewayModelCatalog: vi.fn(() =>
@@ -1045,6 +1086,7 @@ describe("models.list", () => {
       const { request, respond } = requestModelsList({
         refresh: true,
         view: "configured",
+        includeDefaultModels: false,
         runtimeConfig,
         deferredAuth: Promise.reject(new Error("auth refresh failed")),
         loadGatewayModelCatalog: vi.fn(() =>
@@ -1099,6 +1141,7 @@ describe("models.list", () => {
       const { request, respond } = requestModelsList({
         refresh: true,
         view: "configured",
+        includeDefaultModels: false,
         runtimeConfig,
         preparedAuthModes: { openai: "oauth" },
         deferredAuth: Promise.resolve({
@@ -1207,6 +1250,7 @@ describe("models.list", () => {
     const { request, respond } = requestModelsList({
       publishedCatalog: [],
       view: "configured",
+      includeDefaultModels: false,
       runtimeConfig,
       loadGatewayModelCatalog,
       reqId: "req-models-list-secretref-timeout",
@@ -1346,6 +1390,7 @@ describe("models.list", () => {
       const loadConfiguredCatalog = vi.fn(() => Promise.resolve(catalog));
       const { request: configuredRequest, respond: configuredRespond } = requestModelsList({
         view: "configured",
+        includeDefaultModels: false,
         runtimeConfig: cfg,
         loadGatewayModelCatalog: loadConfiguredCatalog,
         reqId: "req-models-list-provider-allowlist",
@@ -1501,6 +1546,7 @@ describe("models.list", () => {
           for (const view of ["default", "configured"] as const) {
             const { request, respond } = requestModelsList({
               view,
+              includeDefaultModels: false,
               runtimeConfig: cfg,
               loadGatewayModelCatalog: vi.fn(() => Promise.resolve(catalog)),
               reqId: `req-models-list-local-wildcard-${view}`,

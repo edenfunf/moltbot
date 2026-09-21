@@ -1,6 +1,9 @@
 import type { ChatRunStartupPhase } from "../../../../packages/gateway-protocol/src/index.js";
 import type { ApplicationPlacementStartupStatus } from "../../app/session-placement-startup.ts";
 import { t } from "../../i18n/index.ts";
+import { registerNewSessionSetupEnglish } from "../../i18n/locales/en-new-session-setup.ts";
+
+registerNewSessionSetupEnglish();
 
 export type { ChatRunStartupPhase } from "../../../../packages/gateway-protocol/src/index.js";
 
@@ -45,6 +48,7 @@ const STARTUP_LABEL_KEYS = {
   running_setup: "chat.startupStatus.runningSetup",
   provisioning_environment: "chat.startupStatus.provisioningEnvironment",
   preparing_context: "chat.startupStatus.preparingContext",
+  memory_flushing: "chat.startupStatus.memoryFlushing",
   starting_model: "chat.startupStatus.startingModel",
 } as const satisfies Record<ChatRunStartupPhase, Parameters<typeof t>[0]>;
 
@@ -56,6 +60,8 @@ export function chatStartupStatusLabel(
     return run.phase === "retrying" ? run.message : t(STARTUP_LABEL_KEYS[run.phase]);
   }
   switch (placement?.phase) {
+    case "reconnecting":
+      return t("connection.reconnecting");
     case "pending":
     case "requested":
     case "provisioning":

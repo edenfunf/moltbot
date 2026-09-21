@@ -5,10 +5,8 @@ import { createDeferred, withTestTimeout } from "../../../test/helpers/promise.j
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { runNodeWorkerWorkspaceTransfer } from "../../node-host/node-worker-transfer-client.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
-import {
-  closeOpenClawStateDatabaseByPath,
-  openOpenClawStateDatabase,
-} from "../../state/openclaw-state-db.js";
+import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
+import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { createSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { createNodeWorkerWorkspaceActions } from "./node-worker-workspace-actions.js";
 import { createNodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
@@ -37,8 +35,9 @@ it.each([
     const home = path.join(root, "home");
     const temporaryRoot = path.join(root, "transfers");
     await fs.mkdir(workspaceDir);
-    const exec = async (argv: string[]) => {
+    const exec = async (argv: string[], input?: string | Uint8Array) => {
       const result = await runCommandWithTimeout(argv, {
+        input,
         cwd: workspaceDir,
         timeoutMs: 10_000,
         baseEnv: {
@@ -173,7 +172,7 @@ it.each([
       workspaceTransfer: service,
       runWorkspaceCommand: async (command) => {
         if (!command.transfer) {
-          return await exec([...command.argv]);
+          return await exec([...command.argv], command.input);
         }
         const publication =
           command.transfer.direction === "upload" &&

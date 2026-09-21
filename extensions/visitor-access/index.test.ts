@@ -4,16 +4,19 @@ import path from "node:path";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type {
   AnyAgentTool,
+  OpenClawConfig,
   OpenClawPluginApi,
   OpenClawPluginService,
   OpenClawPluginServiceContext,
+  OpenClawPluginToolContext,
 } from "openclaw/plugin-sdk/plugin-entry";
-import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { OpenAsyncKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 import type { VisitorGrant } from "./src/visitors.js";
@@ -24,6 +27,21 @@ const HOUR_MS = 3_600_000;
 const START_MS = Date.parse("2026-08-01T00:00:00.000Z");
 const policiesUrl =
   "https://api.cloudflare.com/client/v4/accounts/test-account/access/apps/test-app/policies";
+const gatewayConfig: OpenClawConfig = {
+  gateway: {
+    roles: {
+      default: "guest",
+      definitions: {
+        guest: {
+          sessions: { others: "view" },
+          agents: ["main"],
+          scopes: ["operator.sessions.write"],
+          sandbox: "required",
+        },
+      },
+    },
+  },
+};
 
 function requestUrl(input: Parameters<typeof fetch>[0]): URL {
   return new URL(input instanceof Request ? input.url : input);
@@ -79,17 +97,24 @@ describe("visitor-access plugin lifecycle", () => {
     for (const cleanup of cleanups.splice(0)) {
       await cleanup();
     }
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  function registerPlugin() {
+  function registerPlugin(contextOverrides: Partial<OpenClawPluginToolContext<2>> = {}) {
     const tools = new Map<string, AnyAgentTool>();
     const services: OpenClawPluginService[] = [];
     const on = vi.fn<OpenClawPluginApi["on"]>();
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const toolContext: OpenClawPluginToolContext<2> = {
+      sessionKey: "agent:main:maintainer",
+      senderIsOwner: true,
+      assertInvocationCurrent() {},
+      ...contextOverrides,
+    };
     const api = createTestPluginApi({
       id: "visitor-access",
       pluginConfig: { accountId: "test-account", appId: "test-app", apiToken: TOKEN },
@@ -99,8 +124,10 @@ describe("visitor-access plugin lifecycle", () => {
       registerTool: (registration) => {
         const resolved =
           typeof registration === "function"
-            ? registration({ sessionKey: "agent:main:maintainer" })
-            : registration;
+            ? registration(toolContext)
+            : "contextVersion" in registration
+              ? registration.create(toolContext)
+              : registration;
         for (const tool of Array.isArray(resolved) ? resolved : resolved ? [resolved] : []) {
           tools.set(tool.name, tool);
         }
@@ -108,8 +135,26 @@ describe("visitor-access plugin lifecycle", () => {
     });
     api.runtime.state = {
       ...api.runtime.state,
-      openKeyedStore: <T>(options: OpenKeyedStoreOptions) =>
+      openKeyedStore: <T>(options: OpenAsyncKeyedStoreOptions) =>
         createPluginStateKeyedStoreForTests<T>("visitor-access", { ...options, env }),
+    };
+    api.runtime.gateway = {
+      isAvailable: async () => true,
+      async request() {
+        throw new Error("Expected a mocked Gateway request");
+      },
+    };
+    const gatewayRequest = vi
+      .spyOn(api.runtime.gateway, "request")
+      .mockResolvedValue({ profiles: [] });
+    api.runtime.config = {
+      current: () => gatewayConfig,
+      async mutateConfigFile() {
+        throw new Error("Visitor operations must not change Gateway configuration");
+      },
+      async replaceConfigFile() {
+        throw new Error("Visitor operations must not replace Gateway configuration");
+      },
     };
     plugin.register(api);
     const service = services[0];
@@ -125,8 +170,10 @@ describe("visitor-access plugin lifecycle", () => {
       env,
     });
     return {
+      gatewayRequest,
       logger,
       store,
+      toolContext,
       start: () => service.start(context),
       stop: () => service.stop?.(context),
       gatewayStart: () => {
@@ -161,6 +208,87 @@ describe("visitor-access plugin lifecycle", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([false, undefined])(
+    "denies available visitor tools when trusted owner authority is %s",
+    async (senderIsOwner) => {
+      const policy = createPolicyFetch();
+      vi.stubGlobal("fetch", policy.fetcher);
+      const registered = registerPlugin({ senderIsOwner });
+      await registered.start();
+      policy.fetcher.mockClear();
+
+      for (const name of ["visitor_invite", "visitor_revoke", "visitor_list"]) {
+        await expect(
+          registered.execute(
+            name,
+            name === "visitor_list" ? {} : { email: "visitor@example.test" },
+          ),
+        ).resolves.toMatchObject({
+          isError: true,
+          content: [{ type: "text", text: expect.stringContaining("Only administrators") }],
+        });
+      }
+
+      expect(policy.fetcher).not.toHaveBeenCalled();
+      expect(registered.gatewayRequest).not.toHaveBeenCalled();
+      expect(await registered.store.entries()).toEqual([]);
+    },
+  );
+
+  it.each(["invocation", "manager"] as const)(
+    "does not renew a grant after %s authority closes during access lookup",
+    async (revoked) => {
+      const policy = createPolicyFetch();
+      vi.stubGlobal("fetch", policy.fetcher);
+      let current = true;
+      const assertInvocationCurrent = vi.fn(() => {
+        if (!current) {
+          throw new Error("Invocation is closed");
+        }
+      });
+      const registered = registerPlugin({ assertInvocationCurrent });
+      await registered.start();
+      const email = "visitor@example.test";
+      await expect(
+        registered.execute("visitor_invite", { email, days: 1 }),
+      ).resolves.toHaveProperty("details", {});
+      policy.fetcher.mockClear();
+
+      await expect(registered.execute("visitor_invite", { email, days: 2 })).resolves.toMatchObject(
+        {
+          details: {},
+          content: [{ type: "text", text: expect.stringContaining("Renewed") }],
+        },
+      );
+      const renewed = await registered.store.lookup(email);
+      expect(renewed).toMatchObject({ createdAt: START_MS, expiresAt: START_MS + 2 * DAY_MS });
+      const entered = createDeferred<void>();
+      const release = createDeferred<void>();
+      registered.gatewayRequest.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return { profiles: [] };
+      });
+      const invitation = registered.execute("visitor_invite", { email, days: 30 });
+      await entered.promise;
+      if (revoked === "invocation") {
+        current = false;
+      } else {
+        registered.toolContext.senderIsOwner = false;
+      }
+      release.resolve();
+
+      await expect(invitation).resolves.toHaveProperty("isError", true);
+
+      expect(policy.fetcher.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+      expect(policy.emails()).toEqual([email]);
+      expect(await registered.store.lookup(email)).toEqual(renewed);
+      if (revoked === "manager") {
+        expect(assertInvocationCurrent).not.toThrow();
+      }
+    },
+  );
+
   it("revokes persisted expiries after restart, coalesces startup, and continues hourly", async () => {
     const policy = createPolicyFetch();
     vi.stubGlobal("fetch", policy.fetcher);
@@ -168,7 +296,10 @@ describe("visitor-access plugin lifecycle", () => {
     await first.start();
     await expect(
       first.execute("visitor_invite", { email: "expired@example.test", days: 1 }),
-    ).resolves.toHaveProperty("details", {});
+    ).resolves.toMatchObject({
+      details: {},
+      content: [{ type: "text", text: expect.stringContaining("restricted guest") }],
+    });
     await expect(
       first.execute("visitor_invite", { email: "active@example.test", days: 2 }),
     ).resolves.toHaveProperty("details", {});
@@ -192,6 +323,7 @@ describe("visitor-access plugin lifecycle", () => {
 
     vi.setSystemTime(START_MS + 2 * DAY_MS);
     await vi.advanceTimersByTimeAsync(HOUR_MS);
+    await restarted.execute("visitor_list");
     expect(policy.emails()).toEqual([]);
     expect(await restarted.store.entries()).toEqual([]);
     await restarted.stop();
@@ -259,7 +391,16 @@ describe("visitor-access plugin lifecycle", () => {
     const discovery = createTestPluginApi({
       registrationMode: "tool-discovery",
       registerTool(registration) {
-        const tools = typeof registration === "function" ? registration({}) : registration;
+        const context: OpenClawPluginToolContext<2> = {
+          senderIsOwner: true,
+          assertInvocationCurrent() {},
+        };
+        const tools =
+          typeof registration === "function"
+            ? registration(context)
+            : "contextVersion" in registration
+              ? registration.create(context)
+              : registration;
         invite =
           (Array.isArray(tools) ? tools : tools ? [tools] : []).find(
             (tool) => tool.name === "visitor_invite",

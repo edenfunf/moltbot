@@ -9,6 +9,7 @@ import type {
 import { t } from "../../i18n/index.ts";
 import type {
   PluginCatalogItem,
+  PluginDiscoveryDetailResult,
   PluginListResult,
   PluginMutationResult,
   PluginsInspectResult,
@@ -32,13 +33,18 @@ const PLUGINS_GATEWAY_HELLO = gatewayHelloForMethods([
   "plugins.inspect",
   "plugins.install",
   "plugins.list",
+  "plugins.reload",
   "plugins.setEnabled",
   "plugins.uninstall",
 ]);
 
 type GatewayHarness = {
   gateway: ApplicationGateway;
-  emit: (client: GatewayBrowserClient | null, connected: boolean) => ApplicationGatewaySnapshot;
+  emit: (
+    client: GatewayBrowserClient | null,
+    connected: boolean,
+    overrides?: Partial<ApplicationGatewaySnapshot>,
+  ) => ApplicationGatewaySnapshot;
 };
 
 type TestPluginsPage = HTMLElement & {
@@ -56,7 +62,7 @@ type TestPluginsPage = HTMLElement & {
   } | null;
   pluginConfigEditPending: boolean;
   applyMutationResult: (result: PluginMutationResult) => void;
-  consentController: Pick<PluginsConsentController, "install" | "updateEnabled">;
+  consentController: Pick<PluginsConsentController, "install" | "mutateInstalledPlugin">;
   installWizard: PluginInstallWizardState | null;
   installWizardController: InstallWizardController;
   refreshCatalog: () => Promise<void>;
@@ -92,6 +98,37 @@ export function createResult(
     plugins: Array.isArray(pluginOrPlugins) ? pluginOrPlugins : [pluginOrPlugins],
     diagnostics: [],
     mutationAllowed: true,
+  };
+}
+
+export function createDiscoveryDetail(plugin = createPlugin()): PluginDiscoveryDetailResult {
+  return {
+    plugin: {
+      id: `catalog:${plugin.id}`,
+      catalog: {
+        name: plugin.name,
+        family: "code-plugin",
+        official: plugin.origin === "official",
+        categories: [],
+      },
+      local: {
+        present: plugin.installed,
+        installed: plugin.installed,
+        enabled: plugin.enabled,
+        state: plugin.state,
+        action: "install",
+        install: plugin.install,
+      },
+    },
+    detail: {
+      origin: "clawhub",
+      packageName: plugin.packageName ?? plugin.id,
+      topics: [],
+      configuration: [],
+      mcpServers: [],
+      skills: [],
+      versions: [],
+    },
   };
 }
 
@@ -206,8 +243,8 @@ export function createGateway(client: GatewayBrowserClient, connected = true): G
   } satisfies ApplicationGateway;
   return {
     gateway,
-    emit(nextClient, nextConnected) {
-      snapshot = createSnapshot(nextClient, nextConnected);
+    emit(nextClient, nextConnected, overrides = {}) {
+      snapshot = { ...createSnapshot(nextClient, nextConnected), ...overrides };
       for (const listener of listeners) {
         listener(snapshot);
       }
@@ -233,6 +270,9 @@ type RuntimeConfigTestHarness = {
       typeof vi.fn<ApplicationContext["runtimeConfig"]["removeFormValue"]>
     >;
     save: ReturnType<typeof vi.fn<ApplicationContext["runtimeConfig"]["save"]>>;
+    flushFormChanges: ReturnType<
+      typeof vi.fn<ApplicationContext["runtimeConfig"]["flushFormChanges"]>
+    >;
     patchFromSnapshot: ApplicationContext["runtimeConfig"]["patchFromSnapshot"];
     runExternalMutation: ApplicationContext["runtimeConfig"]["runExternalMutation"];
     subscribe: (listener: (state: RuntimeConfigTestState) => void) => () => void;
@@ -264,6 +304,7 @@ export function createRuntimeConfigHarness(
     patchForm,
     removeFormValue,
     save,
+    flushFormChanges: vi.fn(async () => true),
     patchFromSnapshot: vi.fn(async (build) => {
       const config = runtimeConfigState.configSnapshot?.sourceConfig ?? {};
       const built = build(config);
@@ -360,16 +401,6 @@ export async function mountPage(
   return { page, provider };
 }
 
-export function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, reject, resolve };
-}
-
 export async function activatePluginControl(
   page: TestPluginsPage,
   pluginSelector: string,
@@ -388,7 +419,10 @@ export async function activatePluginControl(
     if (!plugin) {
       throw new Error(`No plugin control matching ${label} under ${pluginSelector}`);
     }
-    void page.consentController.updateEnabled(plugin.id, !plugin.enabled);
+    void page.consentController.mutateInstalledPlugin(
+      plugin.id,
+      plugin.enabled ? "disable" : "enable",
+    );
     await page.updateComplete;
     return;
   }

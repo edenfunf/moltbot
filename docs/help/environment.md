@@ -10,6 +10,12 @@ title: "Environment variables"
 OpenClaw pulls environment variables from multiple sources. The normal rule is **never override existing values**. For an OpenClaw-installed systemd service, the global `.env` may replace only service values that OpenClaw recorded as managed. Operator-owned service values still take precedence.
 Workspace `.env` files are a lower-trust source: OpenClaw ignores provider credentials and protected runtime controls from workspace `.env` before applying precedence.
 
+Systemd startup preserves managed process values referenced by config, including
+`${VAR}` and `$VAR` SecretRef shorthand in `$include` files. This also covers
+values supplied by an operator `EnvironmentFile=`. Managed values absent from
+both trusted dotenv files and current config references are removed from the
+Gateway process environment.
+
 ## Precedence (highest to lowest)
 
 1. **Process environment** (what the Gateway process already has from the parent shell/daemon).
@@ -46,6 +52,8 @@ When set, `OPENCLAW_HOME` replaces the system home directory (`$HOME` / `os.home
 `OPENCLAW_HOME` does not grant ownership of the OS account's native Gateway service. Gateway service-management commands treat a relocated home as isolated state. Use the OS account home and a named profile when a separate native service identity is required.
 
 **Precedence:** `OPENCLAW_HOME` > `$HOME` > `USERPROFILE` > Termux `PREFIX` home fallback on Android > `os.homedir()`
+
+Blank values and the literal strings `undefined` and `null` (after trimming) are treated as unset. CLI home-path display uses `~` in that case; valid overrides use `$OPENCLAW_HOME`.
 
 **Example** (macOS LaunchDaemon):
 

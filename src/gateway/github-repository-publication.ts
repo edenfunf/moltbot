@@ -20,6 +20,7 @@ import {
 } from "./github-publication-availability.js";
 import {
   exactClaimForPlacement,
+  createSharedGitHubPublicationReadMethods,
   type GitHubPublicationClaimRequest,
 } from "./github-publication-coordinator-methods.js";
 import {
@@ -44,6 +45,8 @@ import {
   readRepositoryGitHubPublicationBranch,
   markRepositoryGitHubPublicationReported,
   readRepositoryGitHubPublication,
+  readPendingRepositoryGitHubPublication,
+  readSharedRepositoryGitHubPublication,
   requireRepositoryGitHubPublication,
   repositoryGitHubPublicationDigest,
   terminalRepositoryGitHubPublication,
@@ -57,6 +60,7 @@ import {
   type PreparedRepositoryPublicationSnapshot,
   type RepositoryPublicationSessionIdentity as SessionIdentity,
 } from "./github-repository-publication-workspace.js";
+import type { RepositoryGitHubPublicationStatusRow } from "./github-repository-publication.kernel.js";
 import { loadGatewaySessionEntryReadOnly } from "./session-utils.js";
 import { resolvePlacementTurnEnvironment } from "./worker-environments/placement-record.js";
 import type {
@@ -78,7 +82,7 @@ export function createRepositoryGitHubPublicationCoordinator(
   const requestByKey = (sessionId: string, key: string, owner: string | null) =>
     listRepositoryGitHubPublications({ sessionId, idempotencyKey: key, ownerProfileId: owner })[0];
   const personalStatus = (
-    row: RepositoryGitHubPublicationRow,
+    row: RepositoryGitHubPublicationStatusRow,
     action: PersonalGitHubAction,
     session: SessionIdentity,
   ): SessionGitHubStatusResult => {
@@ -613,19 +617,23 @@ export function createRepositoryGitHubPublicationCoordinator(
       isExecuting: (requestId) => active.has(requestId),
       execute: (row, assertCurrent, prepared) => execute(row, assertCurrent, undefined, prepared),
     }),
+    ...createSharedGitHubPublicationReadMethods(readSharedRepositoryGitHubPublication),
     personalStatus(action: PersonalGitHubAction, session: SessionIdentity, requestId: string) {
       const row = readRepositoryGitHubPublication(requestId);
       return row ? personalStatus(row, action, session) : undefined;
     },
-    personalPending(action: PersonalGitHubAction, session: SessionIdentity) {
+    async personalPending(action: PersonalGitHubAction, session: SessionIdentity) {
       action.assertCurrent();
-      const row = listRepositoryGitHubPublications({
+      const row = await readPendingRepositoryGitHubPublication({
         ownerProfileId: action.owner,
         sessionKey: session.sessionKey,
         agentId: session.agentId,
-        pending: true,
-      }).at(-1);
-      return row ? personalStatus(row, action, session) : null;
+      });
+      if (!row) {
+        action.assertCurrent();
+        return null;
+      }
+      return personalStatus(row, action, session);
     },
     async confirmPersonal(input: SessionGitHubConfirmParams, action: PersonalGitHubSessionAction) {
       action.assertCurrent();

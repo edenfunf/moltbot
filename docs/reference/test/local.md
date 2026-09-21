@@ -48,6 +48,21 @@ Node harnesses:
   `node scripts/run-vitest.mjs <path-or-filter>`.
 - Changed typecheck/lint/guard proof: `node scripts/check-changed.mjs`.
 
+Fresh source installs clone package files from the pnpm store, falling back to
+copies when the filesystem cannot clone. Separate checkouts therefore keep
+independent file metadata: installing dependencies elsewhere cannot change an
+active compiler input's modification history through a shared hardlink. Existing
+hardlinked installs are not converted by an up-to-date `pnpm install`; use a fresh
+task-owned checkout and install for isolated proof. Do not reinstall borrowed
+dependencies or replace an installation while another task uses it.
+
+For Control UI route tests, run `node scripts/run-tsgo-core-test-shards.mjs ui`
+to check fixture types; `node scripts/run-tsgo.mjs -p tsconfig.ui.json` checks
+production UI code and excludes tests. Type route fixtures against the loader's
+required capabilities instead of asserting a partial fixture as the full
+application context. Keep real selection capabilities in lifecycle tests so
+agent scope changes and subscription cleanup follow the application behavior.
+
 For remote-environment proof, invoke `node scripts/crabbox-wrapper.mjs`
 directly. Avoid local `pnpm crabbox:run` in linked worktrees because pnpm may
 reconcile dependencies before the remote wrapper starts.
@@ -56,6 +71,28 @@ reconcile dependencies before the remote wrapper starts.
 
 Run the test toolchain on Node 24.16+ or Node 26.1+, matching the packaged
 runtime floor. Older Node bindings can truncate SQLite TEXT values at embedded NUL characters.
+
+To compare the same Vitest selection on Node and Bun, use the existing wrapper:
+
+```sh
+OPENCLAW_VITEST_RUNTIME=node pnpm test <path-or-filter>
+OPENCLAW_VITEST_RUNTIME=bun pnpm test <path-or-filter>
+```
+
+Install the exact Bun fork build pinned by `.github/actions/setup-test-bun/action.yml`
+for comparable results. This selects the
+actual Vitest process and workers while retaining Node for orchestration and
+compiler preparation. It does not use Bun's native test runner. `bun run` alone
+does not select Bun for tests. Node remains the local default.
+
+Test processes and their CLI fixtures keep Sparkplug baseline compilation enabled
+but run it synchronously. This avoids a Node 24 shutdown deadlock where a
+background compiler waits for main-thread garbage collection while `process.exit`
+joins that compiler. The shared Node argument policy owns this test-only
+mitigation; production CLI exit behavior, assertions, and deadlines are unchanged.
+
+The script erasability gate uses Node's strip-only parser, including when package
+checks run under Bun. It selects an installed Node runtime and skips Bun's `node` shim.
 
 The test toolchain pins stable Vitest `5.0.0`, including its browser and coverage
 packages. Use `describe(name, { concurrent: false }, callback)` for ordered
@@ -70,6 +107,13 @@ Filesystem transform caching uses `test.fsModuleCache` and
 `test.fsModuleCachePath`; the existing `OPENCLAW_VITEST_FS_MODULE_CACHE` and
 `OPENCLAW_VITEST_FS_MODULE_CACHE_PATH` controls retain their ownership and
 disable behavior. Cache-key plugins use `defineCacheKeyGenerator`.
+The jsdom lanes optimize Lit and its exported subpaths together through
+`deps.optimizer.client`. CodeMirror and Lezer stay in Vite's module graph so
+editor classes and parser properties retain one dependency identity.
+When `NODE_COMPILE_CACHE` is configured, test launchers preserve it for Vitest
+and its workers. Vitest disables bytecode caching in workers and their child
+processes for V8 and custom coverage providers; explicit
+`NODE_DISABLE_COMPILE_CACHE=1` still disables caching for the entire invocation.
 Inline projects inherit root configuration in Vitest 5, including concatenated
 setup and include arrays. The four UI E2E resource projects declare
 `extends: false` because each supplies its complete inventory and setup.
@@ -130,16 +174,28 @@ Isolated Doctor config scripts also share the prepared config-flow, health-write
 and install-index modules. Each case still starts a fresh process with separate
 state; standalone and watch runs resolve the original TypeScript entrypoints.
 
-The prepared model-catalog worker also uses this compiled generation. Separate
-prepared model generations still own separate worker threads, and their choice
-of source or built plugin artifacts stays independent of worker compilation.
+The model-catalog, Codex catalog-page, and session model-context workers also use this compiled generation.
+Model-catalog workers still belong to their prepared model generations; context reads
+retain their serial worker pool. Plugin source/built selection remains independent
+of worker compilation.
 Other worker-thread entries and arbitrary source CLI fixtures remain outside
 this declared set.
+
+The agent database module-identity test shares the compiled host and SQLite SDK
+entries while forcing a separate plugin transform of the SDK. Its standalone and
+watch runs retain a disposable build from current source because this regression
+specifically checks a packaged graph. Both modes use the same assertions and
+subprocess deadline.
 
 The session-title and child-link retention tests declare their title-reader,
 session-utils, and listing roots in this same generation. Each fresh
 heap-measurement child runs their JavaScript without spending its execution
 deadline on TypeScript imports.
+
+Native Bash output-lifecycle fixtures also prepare the real tool and executor
+roots in this generation. Each scenario still uses a fresh process and real
+shell, pipe, and spill file; its unchanged child deadline covers prepared
+JavaScript startup and output handling instead of repeated TypeScript compilation.
 
 Automatic-triage process fixtures share this generation for admission, failure handling, execution, process identity, and respawn checks. Compilation finishes before readiness deadlines begin, so children load prepared JavaScript. The detached helper uses the same sealed lease runtime as the installed package.
 
@@ -176,9 +232,12 @@ they impose resource limits. Third-party dependencies remain external except for
 the always-bundled OpenClaw packages. fs-safe remains external so its native loader
 resolves the optional platform package from fs-safe's own dependency scope, including
 nested pnpm installs. Compiled workers use that same installed package; they do not
-copy native binaries. The default stays off, and the existing `off`/`auto`/`require`
-opt-ins retain their behavior. Sealed portable worker bundles use guarded JavaScript
-only and explicitly disable native loading.
+copy native binaries. Native mode defaults to `auto` on macOS, Linux, and Windows.
+No-clobber Root moves require native support; Windows secure credential reads
+require the matching helper for descriptor-bound ACL checks. Explicit
+`off`/`auto`/`require` settings and programmatic configuration retain their
+precedence. Sealed portable worker bundles use guarded JavaScript only and
+explicitly disable native loading.
 
 Watch mode deliberately keeps the existing live-source path, including tsx for
 Node subprocesses and native TypeScript handling for Bun. It creates no prepared generation, so a new child launch

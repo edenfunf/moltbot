@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildCodexUserMcpServersThreadConfigPatch } from "../agents/cli-runner/bundle-mcp-codex.js";
+import { buildCodexUserMcpServersThreadConfigPatchForRuntime } from "../agents/cli-runner/bundle-mcp-codex.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -32,6 +32,7 @@ const cfg: OpenClawConfig = {
 function gateway() {
   const aux = createGatewayAuxHandlers({
     log: {},
+    getNativeApprovalRouteCoordinator: () => undefined,
     activateRuntimeSecrets: async () => {
       throw new Error("unexpected secrets reload");
     },
@@ -168,10 +169,14 @@ describe("gateway MCP tool grants", () => {
       aux.pluginApprovalManager.runtimeEpoch,
     );
     expect(loadExecApprovalsReadOnly().agents).toEqual({ main: { mcpTools: [expected] } });
-    expect(buildCodexUserMcpServersThreadConfigPatch(cfg, { agentId: "main" })).toMatchObject({
+    expect(
+      await buildCodexUserMcpServersThreadConfigPatchForRuntime(cfg, { agentId: "main" }),
+    ).toMatchObject({
       mcp_servers: { "project.docs": { tools: { write_note: { approval_mode: "approve" } } } },
     });
-    expect(buildCodexUserMcpServersThreadConfigPatch(cfg, { agentId: "other" })).not.toMatchObject({
+    expect(
+      await buildCodexUserMcpServersThreadConfigPatchForRuntime(cfg, { agentId: "other" }),
+    ).not.toMatchObject({
       mcp_servers: { "project.docs": { tools: { write_note: { approval_mode: "approve" } } } },
     });
   });

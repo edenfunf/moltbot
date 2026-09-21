@@ -1,11 +1,14 @@
 // Shared harness for dispatch-from-config tests and mocked runtimes.
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
 import type { WorkerSessionPlacementRecord } from "../../gateway/worker-environments/placement-record.js";
 import type { SessionWorkerPlacementContext } from "../../gateway/worker-environments/session-placement-lifecycle.js";
 import type { SessionBindingRecord } from "../../infra/outbound/session-binding-service.js";
-import { isPluginOwnedBindingMetadata } from "../../plugins/conversation-binding-metadata.js";
+import {
+  isPluginOwnedBindingMetadata,
+  type PluginBindingMetadata,
+} from "../../plugins/conversation-binding-metadata.js";
 import type {
   PluginHookBeforeDispatchResult,
   PluginHookReplyDispatchEvent,
@@ -17,14 +20,9 @@ import {
   createChannelTestPluginBase,
   createTestRegistry,
 } from "../../test-utils/channel-plugins.js";
-import { copyReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
-import type { ReplyDispatchBeforeDeliver } from "./reply-dispatcher.js";
-import type {
-  ReplyDispatchKind,
-  ReplyDispatchSettledCounts,
-  ReplyDispatcher,
-} from "./reply-dispatcher.types.js";
+import { createReplyDispatcher } from "./reply-dispatcher.js";
+import type { ReplyDispatcher } from "./reply-dispatcher.types.js";
 import type { StageSandboxMediaResult } from "./stage-sandbox-media.js";
 import { buildTestCtx } from "./test-ctx.js";
 
@@ -144,12 +142,57 @@ const sessionBindingMocks = vi.hoisted(() => ({
   >(() => null),
   touch: vi.fn(),
 }));
+
+export function createPluginBindingRecord({
+  bindingId,
+  targetSessionKey,
+  conversation,
+  boundAt = 1710000000000,
+  pluginId = "openclaw-codex-app-server",
+  ...metadata
+}: Pick<SessionBindingRecord, "bindingId" | "targetSessionKey" | "conversation"> &
+  Partial<Pick<SessionBindingRecord, "boundAt">> &
+  Omit<PluginBindingMetadata, "pluginBindingOwner" | "pluginId"> & {
+    pluginId?: string;
+  }): SessionBindingRecord {
+  return {
+    bindingId,
+    targetSessionKey,
+    targetKind: "session",
+    conversation,
+    status: "active",
+    boundAt,
+    metadata: { pluginBindingOwner: "plugin", pluginId, ...metadata },
+  };
+}
+
+export function mockPluginBindingClaim(
+  outcome: PluginTargetedInboundClaimOutcome = { status: "handled", result: { handled: true } },
+  options: { pluginId?: string; pluginLoaded?: boolean; receiveMessages?: boolean } = {},
+) {
+  hookMocks.runner.hasHooks.mockImplementation(
+    (hookName) =>
+      hookName === "inbound_claim" ||
+      (options.receiveMessages !== false && hookName === "message_received"),
+  );
+  if (options.pluginLoaded !== false) {
+    hookMocks.registry.plugins = [
+      { id: options.pluginId ?? "openclaw-codex-app-server", status: "loaded" },
+    ];
+  }
+  hookMocks.runner.runInboundClaimForPluginOutcome.mockResolvedValue(outcome);
+}
+
+export function mockPluginBinding(params: Parameters<typeof createPluginBindingRecord>[0]) {
+  sessionBindingMocks.resolveByConversation.mockReturnValue(createPluginBindingRecord(params));
+}
+
 const pluginConversationBindingMocks = vi.hoisted(() => ({
   shownFallbackNoticeBindingIds: new Set<string>(),
 }));
 const sessionStoreMocks = vi.hoisted(() => ({
   databaseEntryLoader: undefined as
-    | typeof import("../../config/sessions/session-accessor.sqlite-entry.js").loadSessionEntryWithDatabase
+    | typeof import("../../config/sessions/session-accessor.sqlite-entry.js").loadSessionEntryForAdmission
     | undefined,
   currentEntry: undefined as Record<string, unknown> | undefined,
   entriesBySessionKey: new Map<string, Record<string, unknown>>(),
@@ -288,7 +331,7 @@ const transcriptMocks = vi.hoisted(() => ({
     target: {
       agentId: "main",
       sessionId: "test-session",
-      sessionKey: "agent:main",
+      sessionKey: "agent:main:main",
       storePath: "/tmp/sessions.json",
     },
     messageId: "message-1",
@@ -549,7 +592,7 @@ vi.mock("../../config/sessions/session-accessor.sqlite-entry.js", async (importO
   ...(await importOriginal<
     typeof import("../../config/sessions/session-accessor.sqlite-entry.js")
   >()),
-  loadSessionEntryWithDatabase: (
+  loadSessionEntryForAdmission: (
     ...args: Parameters<NonNullable<typeof sessionStoreMocks.databaseEntryLoader>>
   ) =>
     sessionStoreMocks.databaseEntryLoader
@@ -728,82 +771,31 @@ vi.mock("../../tts/tts-config.js", () => ({
 export const noAbortResult = { handled: false, aborted: false } as const;
 export const emptyConfig = {} as OpenClawConfig;
 
+const fixtureDispatchers = new Set<ReplyDispatcher>();
+afterEach(() => {
+  for (const dispatcher of fixtureDispatchers) {
+    dispatcher.markComplete();
+  }
+  fixtureDispatchers.clear();
+});
+
 export function createDispatcher(): ReplyDispatcher {
-  let beforeDeliver: ReplyDispatchBeforeDeliver | undefined;
-  const beforeDeliverTasks: Promise<unknown>[] = [];
-  const settled = {
-    tool: { cancelled: 0, failedBeforeSend: 0 },
-    block: { cancelled: 0, failedBeforeSend: 0 },
-    final: { cancelled: 0, failedBeforeSend: 0 },
-  };
-  const runBeforeDeliver = (kind: ReplyDispatchKind, payload: ReplyPayload): void => {
-    if (!beforeDeliver) {
-      return;
-    }
-    beforeDeliverTasks.push(
-      Promise.resolve(beforeDeliver(payload, { kind })).then(
-        (result) => {
-          if (!result) {
-            settled[kind].cancelled += 1;
-          }
-        },
-        () => {
-          settled[kind].failedBeforeSend += 1;
-        },
-      ),
-    );
-  };
-  const sendToolResult = vi.fn((payload: ReplyPayload) => {
-    runBeforeDeliver("tool", payload);
-    return true;
-  });
-  const sendBlockReply = vi.fn((payload: ReplyPayload) => {
-    runBeforeDeliver("block", payload);
-    return true;
-  });
-  const sendFinalReply = vi.fn((payload: ReplyPayload) => {
-    runBeforeDeliver("final", payload);
-    return true;
-  });
-  const counts = (kind: ReplyDispatchKind, delivered: number): ReplyDispatchSettledCounts => ({
-    delivered: Math.max(0, delivered - settled[kind].cancelled - settled[kind].failedBeforeSend),
-    deliveredNotVisible: 0,
-    cancelled: settled[kind].cancelled,
-    failedBeforeSend: settled[kind].failedBeforeSend,
-    failedAfterSend: 0,
-  });
-  return {
-    sendToolResult,
-    sendBlockReply,
-    sendFinalReply,
-    appendBeforeDeliver: vi.fn((hook) => {
-      const previousBeforeDeliver = beforeDeliver;
-      beforeDeliver = previousBeforeDeliver
-        ? async (payload, info) => {
-            const previousPayload = await previousBeforeDeliver(payload, info);
-            return previousPayload
-              ? hook(copyReplyPayloadMetadata(payload, previousPayload), info)
-              : null;
-          }
-        : hook;
-    }),
-    supportsSettledReceipt: true,
-    waitForIdle: vi.fn(async () => {
-      await Promise.all(beforeDeliverTasks);
-      const receipt = {
-        tool: counts("tool", sendToolResult.mock.calls.length),
-        block: counts("block", sendBlockReply.mock.calls.length),
-        final: counts("final", sendFinalReply.mock.calls.length),
-      };
-      return {
-        counts: receipt,
-        anyVisibleDelivered: Object.values(receipt).some((entry) => entry.delivered > 0),
-      };
-    }),
-    getQueuedCounts: vi.fn(() => ({ tool: 0, block: 0, final: 0 })),
-    getFailedCounts: vi.fn(() => ({ tool: 0, block: 0, final: 0 })),
-    markComplete: vi.fn(),
-  };
+  const dispatcher = createReplyDispatcher({ deliver: async () => undefined });
+  fixtureDispatchers.add(dispatcher);
+  vi.spyOn(dispatcher, "sendToolResult");
+  vi.spyOn(dispatcher, "sendBlockReply");
+  vi.spyOn(dispatcher, "sendFinalReply");
+  vi.spyOn(dispatcher, "appendBeforeDeliver");
+  vi.spyOn(dispatcher, "waitForIdle");
+  // Admission counts are explicit inputs in these fixtures; delivery receipts stay core-owned.
+  vi.spyOn(dispatcher, "getQueuedCounts").mockImplementation(() => ({
+    tool: 0,
+    block: 0,
+    final: 0,
+  }));
+  vi.spyOn(dispatcher, "getFailedCounts");
+  vi.spyOn(dispatcher, "markComplete");
+  return dispatcher;
 }
 
 export function resetPluginTtsAndThreadMocks() {

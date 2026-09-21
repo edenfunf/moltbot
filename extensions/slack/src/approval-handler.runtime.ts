@@ -1,4 +1,3 @@
-// Slack plugin module implements approval handler behavior.
 import type { App } from "@slack/bolt";
 import type { Block, KnownBlock, WebClient } from "@slack/web-api";
 import {
@@ -19,6 +18,7 @@ import { logError } from "openclaw/plugin-sdk/logging-core";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { SLACK_APPROVAL_HEADER_BLOCK_ID } from "./approval-actions.js";
+import { runSlackApprovalMessageUpdate } from "./approval-message-updates.js";
 import {
   isSlackAnyNativeApprovalClientEnabled,
   shouldHandleSlackNativeApprovalRequest,
@@ -257,18 +257,21 @@ function buildSlackApprovalPayload(input: SlackApprovalRenderInput): SlackPendin
 
 async function updateMessage(params: {
   client: WebClient;
+  accountId: string;
   channelId: string;
   messageTs: string;
   text: string;
   blocks: SlackBlock[];
 }): Promise<void> {
   try {
-    await params.client.chat.update({
-      channel: params.channelId,
-      ts: params.messageTs,
-      text: truncateSlackTextByUtf8Bytes(params.text, SLACK_EDIT_TEXT_MAX_BYTES),
-      blocks: params.blocks,
-    });
+    await runSlackApprovalMessageUpdate(params, () =>
+      params.client.chat.update({
+        channel: params.channelId,
+        ts: params.messageTs,
+        text: truncateSlackTextByUtf8Bytes(params.text, SLACK_EDIT_TEXT_MAX_BYTES),
+        blocks: params.blocks,
+      }),
+    );
   } catch (err) {
     logError(`slack approvals: failed to update message: ${String(err)}`);
   }
@@ -383,6 +386,7 @@ export const slackApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdap
       const client = resolveApprovalClient(resolved.context, entry.teamId);
       await updateMessage({
         client,
+        accountId: resolved.accountId,
         channelId: entry.channelId,
         messageTs: entry.messageTs,
         text: payload.text,

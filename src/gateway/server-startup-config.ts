@@ -11,6 +11,11 @@ import { measureDiagnosticsTimelineSpan } from "../infra/diagnostics-timeline.js
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import {
+  describeSecretResolutionOperatorDiagnostic,
+  describeSecretResolutionOperatorRecovery,
+  isSecretResolutionError,
+} from "../secrets/resolve-errors.js";
+import {
   classifySecretResolutionErrorDegradations,
   isRetryableSecretDegradationReason,
   listSecretResolutionErrorOwners,
@@ -53,6 +58,7 @@ import {
 import { resolveGatewayStartupSourceConfig } from "./server-startup-secret-surfaces.js";
 import { ensureGatewayStartupAuth } from "./startup-auth.js";
 export {
+  applyGatewayAuthOverridesForStartupPreflight,
   loadGatewayStartupConfigSnapshot,
   type GatewayStartupConfigSnapshotLoadResult,
 } from "./server-startup-config-helpers.js";
@@ -103,6 +109,7 @@ export type ActivateRuntimeSecrets = ((
     params: RuntimeSecretsActivationParams,
     onActivated?: () => void | Promise<void>,
     canActivate?: () => boolean,
+    checkpoint?: () => Promise<void>,
   ) => Promise<PreparedRuntimeSecretsSnapshot | null>;
 };
 
@@ -338,6 +345,12 @@ export function createRuntimeSecretsActivator(params: {
       }
     }
     if (activationParams.reason === "startup") {
+      if (isSecretResolutionError(err) && err.code === "SECRET_REF_REDACTED_VALUE") {
+        throw new Error(
+          `Startup failed: ${describeSecretResolutionOperatorDiagnostic(err)}. ${describeSecretResolutionOperatorRecovery(err)}.`,
+          { cause: err },
+        );
+      }
       if (degradations.length > 0) {
         throw new Error("Startup failed: required secrets are unavailable.");
       }
@@ -460,6 +473,7 @@ export function createRuntimeSecretsActivator(params: {
     activationParams,
     onActivated,
     canActivate,
+    checkpoint,
   ) => {
     // Resolve the lazy activator before entering the compare-and-activate
     // section so no await separates revision ownership from state publication.
@@ -476,6 +490,9 @@ export function createRuntimeSecretsActivator(params: {
         : await loadActivateRuntimeSecretsSnapshot()
       : undefined;
     return await runWithSecretsActivationLock(async () => {
+      // Resolve source observations inside the lock, then recheck every revision.
+      // No await may separate these final guards from activation/publication.
+      await checkpoint?.();
       if (
         getActiveSecretsRuntimeSnapshotRevisionState() !== expectedRevision ||
         !hasCurrentAuthStoreCredentialsRevision(snapshot) ||
@@ -603,7 +620,6 @@ export async function prepareGatewayStartupConfig(params: {
   authOverride?: GatewayAuthConfig;
   tailscaleOverride?: GatewayTailscaleConfig;
   activateRuntimeSecrets: ActivateRuntimeSecrets;
-  persistStartupAuth?: boolean;
   log?: GatewayStartupLog;
   measure?: GatewayStartupConfigMeasure;
 }): Promise<Awaited<ReturnType<typeof ensureGatewayStartupAuth>>> {
@@ -687,8 +703,6 @@ export async function prepareGatewayStartupConfig(params: {
       authOverride: preflightAuthOverride,
       tailscaleOverride: params.tailscaleOverride,
       warn: params.log?.warn,
-      persist: params.persistStartupAuth ?? false,
-      baseHash: params.configSnapshot.hash,
     }),
   );
   const runtimeStartupConfig = await measure("config.auth.runtime-startup-overrides", () =>

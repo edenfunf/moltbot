@@ -63,7 +63,32 @@ suite.define(() => {
       await expect.poll(() => child.textContent()).toContain("Research in progress");
       await expect.poll(() => sibling.textContent()).toContain("Supporting research");
       expect(await child.getAttribute("class")).toContain("sidebar-recent-session--active");
+      await captureUiProof(suite, page, "selected-child-before-refresh.png");
       const childMatch = { spawnedBy: parentKey };
+      const refreshedChildren = [
+        {
+          ...childRow,
+          label: "Research completed",
+          displayName: "Research completed",
+          updatedAt: baseTime + 3,
+        },
+        {
+          ...siblingRow,
+          label: "Supporting research refreshed",
+          displayName: "Supporting research refreshed",
+          updatedAt: baseTime + 3,
+        },
+      ];
+      // Commit the change before its invalidation event so every later read sees it.
+      await gateway.setSessionsListResponse(
+        sessionsListResponse([parentRow, ...refreshedChildren]),
+      );
+      await gateway.setMethodResponse("sessions.list", {
+        cases: [
+          { match: childMatch, response: sessionsListResponse(refreshedChildren) },
+          { response: sessionsListResponse([parentRow]) },
+        ],
+      });
       const childRequests = (await gateway.getRequests("sessions.list", childMatch)).length;
       expect(childRequests).toBeGreaterThan(0);
       await gateway.deferNext("sessions.list", childMatch);
@@ -74,23 +99,7 @@ suite.define(() => {
         updatedAt: baseTime + 2,
       });
       await gateway.waitForRequest("sessions.list", { after: childRequests, match: childMatch });
-      await gateway.resolveDeferred(
-        "sessions.list",
-        sessionsListResponse([
-          {
-            ...childRow,
-            label: "Research completed",
-            displayName: "Research completed",
-            updatedAt: baseTime + 3,
-          },
-          {
-            ...siblingRow,
-            label: "Supporting research refreshed",
-            displayName: "Supporting research refreshed",
-            updatedAt: baseTime + 3,
-          },
-        ]),
-      );
+      await gateway.resolveDeferred("sessions.list", sessionsListResponse(refreshedChildren));
       // The sibling proves the new child snapshot rendered before checking the selected row.
       await expect.poll(() => sibling.textContent()).toContain("Supporting research refreshed");
       if (captureUiProofEnabled) {
@@ -144,6 +153,7 @@ suite.define(() => {
       const activeKey = "agent:main:loading-active";
       const parentKey = "agent:main:loading-parent";
       const childKey = "agent:main:loading-child";
+      const activeRow = sessionRow(activeKey, "Active session", baseTime + 1);
       const parentRow = sessionRow(parentKey, "Research handoff", baseTime, {
         childSessions: [childKey],
       });
@@ -172,6 +182,7 @@ suite.define(() => {
         );
       }
       const gateway = await installMockGateway(page, {
+        sessions: [activeRow, parentRow, childRow],
         methodResponses: {
           "sessions.list": {
             cases: [
@@ -180,10 +191,7 @@ suite.define(() => {
                 response: sessionsListResponse([childRow]),
               },
               {
-                response: sessionsListResponse([
-                  sessionRow(activeKey, "Active session", baseTime + 1),
-                  parentRow,
-                ]),
+                response: sessionsListResponse([activeRow, parentRow]),
               },
             ],
           },
@@ -259,8 +267,8 @@ suite.define(() => {
         const childRequests = (await gateway.getRequests("sessions.list", childMatch)).length;
         await gateway.deferNext("sessions.list", childMatch);
         await gateway.emitGatewayEvent("sessions.changed", {
-          key: activeKey,
-          sessionKey: activeKey,
+          key: parentKey,
+          sessionKey: parentKey,
           reason: "run",
           updatedAt: baseTime + 2,
         });

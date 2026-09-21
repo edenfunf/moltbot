@@ -57,6 +57,7 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
     const config = options.getConfig();
     const url = await resolvePairingGatewayUrl(config, {
       env: process.env,
+      useLocalGateway: config.gateway?.mode === "remote",
       publicUrl: resolveConfiguredPairingPublicUrl(config) ?? resolveGatewayPublicOrigin(config),
       networkInterfaces: os.networkInterfaces,
       runCommandWithTimeout: commandRunner,
@@ -241,6 +242,7 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
           const config = options.getConfig();
           const resolved = await resolvePairingSetupFromConfig(config, {
             env: process.env,
+            useLocalGateway: config.gateway?.mode === "remote",
             publicUrl:
               resolveConfiguredPairingPublicUrl(config) ?? resolveGatewayPublicOrigin(config),
             bootstrapProfile: CLOUD_WORKER_PAIRING_SETUP_BOOTSTRAP_PROFILE,
@@ -292,8 +294,9 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
           const deadline = now() + NODE_ENROLLMENT_TIMEOUT_MS;
           while (now() < deadline) {
             enrollmentSignal.throwIfAborted();
-            const live = options.store.ensureNodeEnrollment(owner.environmentId);
+            const live = options.store.get(owner.environmentId);
             if (
+              !live ||
               live.destroyRequestedAtMs !== null ||
               live.state !== "provisioning" ||
               live.provisionOperationId !== owner.provisionOperationId ||

@@ -54,6 +54,9 @@ const rawSqliteAllowPathGroups = {
     "src/state/openclaw-agent-db-registry.ts",
     "src/state/openclaw-agent-db-registry-listing.ts",
     "src/state/openclaw-agent-db-schema-helpers.ts",
+    // Existing schema ownership/version preflight, split from schema-helpers for readers.
+    "src/state/openclaw-agent-db-schema-read.ts",
+    "src/state/openclaw-agent-db-metadata.ts",
     "src/state/openclaw-agent-db-schema.ts",
     "src/state/openclaw-agent-db-session-nodes-migration.ts",
     "src/state/openclaw-agent-db-session-migrations.ts",
@@ -78,20 +81,22 @@ const rawSqliteAllowPathGroups = {
     "src/state/sqlite-schema-shape.test-support.ts",
   ],
   "cross-process SQLite coordination locks": ["src/infra/sqlite-coordinator.ts"],
+  "schema-less ownership token: lock only, no data queries; Kysely has no lock primitive": [
+    "src/infra/sqlite-snapshot-staging.ts",
+  ],
   "backup snapshot maintenance": [
     "src/commands/backup-verify.ts",
     "src/infra/backup-create.ts",
     "src/snapshot/git-backup-codec.ts",
     "src/snapshot/local-repository.ts",
   ],
-  "agent auth profile read-only bootstrap": ["src/agents/auth-profiles/sqlite.ts"],
   "read-only shared state database access": [
     "src/claws/package-resume.ts",
     "src/state/openclaw-agent-db-readonly.ts",
     "src/state/openclaw-state-db-readonly.ts",
   ],
   "cold-process read-only relay lookup avoids the shared state writer lifecycle": [
-    "src/agents/harness/native-hook-relay-client-store.ts",
+    "src/agents/harness/native-hook-relay-client.worker.ts",
   ],
   "read-only schema preflight and integrity verification access": [
     "src/state/openclaw-database-preflight.ts",
@@ -102,8 +107,8 @@ const rawSqliteAllowPathGroups = {
     "src/state/openclaw-quarantine-store.ts",
   ],
   "read-only SQLite status probes": [
-    "src/commands/doctor-db-bloat.ts",
-    "src/commands/status.scan.shared.ts",
+    "src/commands/doctor-db-bloat.read.ts",
+    "extensions/memory-core/src/memory/manager-status-presence.ts",
   ],
   "doctor SQLite maintenance and legacy state migration": [
     "src/commands/doctor-agent-memory-schema.ts",
@@ -127,6 +132,8 @@ const rawSqliteAllowPathGroups = {
     "src/infra/state-migrations.media-persistence.ts",
     "src/infra/state-migrations.transcript-directives-archives.ts",
     "src/infra/state-migrations.transcript-directives.ts",
+    // Doctor integrity PRAGMAs and lossless native 64-bit orphan-row preservation.
+    "src/state/openclaw-state-db-task-delivery-recovery.ts",
   ],
   "session entry cache connection-local validity counters": [
     "src/config/sessions/session-accessor.sqlite-entry-cache.ts",
@@ -144,7 +151,7 @@ const rawSqliteAllowPathGroups = {
     "src/plugin-state/plugin-state-store.sqlite.ts",
     "src/proxy-capture/store.sqlite.ts",
     "src/tasks/task-flow-registry.store.sqlite.ts",
-    "src/tasks/task-registry.store.sqlite.ts",
+    "src/tasks/task-registry.store.kernel.ts",
   ],
 };
 

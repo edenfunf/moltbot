@@ -1,27 +1,18 @@
 /** Runs image generation, persistence, and detached completion. */
-import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { Type } from "typebox";
-import { findCapabilityProviderById } from "../../../packages/media-generation-core/src/capability-model-ref.js";
 import { getRuntimeConfig } from "../../config/config.js";
-import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { resolveImageGenerationMaxInputImages } from "../../image-generation/capabilities.js";
 import type {
   ImageGenerationOpenAIOptions,
   ImageGenerationProvider,
   ImageGenerationProviderOptions,
-  ImageGenerationResolution,
 } from "../../image-generation/types.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { parseImageGenerationModelRef } from "../../media-generation/model-ref.js";
 import { withImageGenerationProviders } from "../../media-generation/registry.js";
-import { resolveCapabilityModelCandidates } from "../../media-generation/runtime-shared.js";
 import { resolveGeneratedMediaMaxBytes } from "../../media/configured-max-bytes.js";
 import { readSnakeCaseParamRaw } from "../../param-key.js";
 import { createEnumOptionParser } from "../../shared/enum-option.js";
-import type { DeliveryContext } from "../../utils/delivery-context.types.js";
-import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { buildMediaGenerationRequestKey } from "../media-generation-task-status-shared.js";
-import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.js";
 import { optionalStringEnum } from "../schema/string-enum.js";
 import {
   ToolInputError,
@@ -41,37 +32,29 @@ import {
   normalizeImageGenerationAspectRatio,
   normalizeImageGenerationResolution,
 } from "./image-generate-tool.execution.js";
-import {
-  createDefaultMediaGenerateBackgroundScheduler,
-  type MediaGenerateAsyncStartCallback,
-  type MediaGenerateBackgroundScheduler,
-} from "./media-generate-background-shared.js";
+import { createDefaultMediaGenerateBackgroundScheduler } from "./media-generate-background-shared.js";
 import {
   imageGenerationTaskLifecycle,
-  runMediaGenerationTask,
+  prepareMediaGenerationTask,
+  type MediaGenerateToolOptions,
   type ImageGenerationTaskHandle,
 } from "./media-generate-background.js";
 import { acquireImageGenerationToolProviders } from "./media-generation-tool-providers.js";
 import {
-  applyAgentDefaultModelConfig,
   buildMediaReferenceDetails,
-  hasExplicitMediaModel,
   hasGenerationToolAvailability,
   normalizeMediaReferenceInputs,
   readGenerationTimeoutMs,
   resolveMediaToolSandboxConfig,
   resolveRemoteMediaSsrfPolicy,
-  resolveCapabilityModelConfigForTool,
   resolveGenerateAction,
   resolveSelectedCapabilityProvider,
-  type MediaToolSandbox,
 } from "./media-tool-shared.js";
 import type { ToolModelConfig } from "./model-config.helpers.js";
-import type { AnyAgentTool, ToolFsPolicy } from "./tool-runtime.helpers.js";
+import type { AnyAgentTool } from "./tool-runtime.helpers.js";
 
 const DEFAULT_COUNT = 1;
 const MAX_COUNT = 4;
-const DEFAULT_MAX_INPUT_IMAGES = 10;
 const MAX_REFERENCE_IMAGE_INPUTS = 16;
 const SUPPORTED_QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
 const SUPPORTED_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
@@ -294,29 +277,6 @@ function resolveSelectedImageGenerationModelId(params: {
   return params.imageGenerationModelConfig.primary ?? params.selectedProvider?.defaultModel;
 }
 
-function resolveReachableImageGenerationMaxInputImages(params: {
-  providers: ImageGenerationProvider[];
-  candidates: readonly { provider: string; model: string }[];
-}): number | undefined {
-  const limits = params.candidates.flatMap((candidate) => {
-    const provider = findCapabilityProviderById({
-      providers: params.providers,
-      providerId: candidate.provider,
-      normalizeProviderId,
-    });
-    if (!provider?.capabilities.edit.enabled) {
-      return [];
-    }
-    return [
-      resolveImageGenerationMaxInputImages({
-        provider,
-        model: candidate.model,
-      }) ?? DEFAULT_MAX_INPUT_IMAGES,
-    ];
-  });
-  return limits.length > 0 ? Math.max(...limits) : undefined;
-}
-
 function modelDisablesImageResolution(
   provider: ImageGenerationProvider | undefined,
   modelId?: string,
@@ -327,15 +287,10 @@ function modelDisablesImageResolution(
   return provider.capabilities.geometry?.resolutionsByModel?.[modelId]?.length === 0;
 }
 
-function validateImageGenerationCapabilities(params: {
+function validateImageGenerationCount(params: {
   provider: ImageGenerationProvider | undefined;
   count: number;
   inputImageCount: number;
-  maxInputImages?: number;
-  size?: string;
-  aspectRatio?: string;
-  resolution?: ImageGenerationResolution;
-  explicitResolution?: boolean;
 }) {
   const provider = params.provider;
   if (!provider) {
@@ -349,44 +304,14 @@ function validateImageGenerationCapabilities(params: {
       `${provider.id} ${isEdit ? "edit" : "generate"} supports at most ${maxCount} output image${maxCount === 1 ? "" : "s"}.`,
     );
   }
-
-  if (isEdit) {
-    if (!provider.capabilities.edit.enabled) {
-      throw new ToolInputError(`${provider.id} does not support reference-image edits.`);
-    }
-    const maxInputImages =
-      params.maxInputImages ??
-      provider.capabilities.edit.maxInputImages ??
-      DEFAULT_MAX_INPUT_IMAGES;
-    if (params.inputImageCount > maxInputImages) {
-      throw new ToolInputError(
-        `${provider.id} edit supports at most ${maxInputImages} reference image${maxInputImages === 1 ? "" : "s"}.`,
-      );
-    }
-  }
 }
-
-type ImageGenerateSandboxConfig = MediaToolSandbox;
 
 const defaultScheduleImageGenerateBackgroundWork = createDefaultMediaGenerateBackgroundScheduler({
   toolName: "image_generate",
   onCrash: (message, meta) => log.error(message, meta),
 });
 
-export function createImageGenerateTool(options?: {
-  config?: OpenClawConfig;
-  agentDir?: string;
-  authProfileStore?: AuthProfileStore;
-  agentSessionKey?: string;
-  requesterAgentId?: string;
-  requesterOrigin?: DeliveryContext;
-  workspaceDir?: string;
-  preparedModelRuntime?: PreparedModelRuntimeSnapshot;
-  sandbox?: ImageGenerateSandboxConfig;
-  fsPolicy?: ToolFsPolicy;
-  scheduleBackgroundWork?: MediaGenerateBackgroundScheduler;
-  onAsyncTaskStarted?: MediaGenerateAsyncStartCallback;
-}): AnyAgentTool | null {
+export function createImageGenerateTool(options?: MediaGenerateToolOptions): AnyAgentTool | null {
   const cfg = options?.config ?? getRuntimeConfig();
   const preparedProviders = options?.preparedModelRuntime?.mediaCapabilityProviders
     ?.imageGenerationProviders
@@ -440,284 +365,195 @@ export function createImageGenerateTool(options?: {
       }
 
       const model = readToolStringParam(params, "model");
-      const explicitModelConfig = hasExplicitMediaModel(cfg.agents?.defaults?.mediaModels?.image);
-      const configuredModel =
-        model || explicitModelConfig
-          ? resolveCapabilityModelConfigForTool({
-              cfg,
-              modelConfig: cfg.agents?.defaults?.mediaModels?.image,
-              modelOverride: model,
-              providers: [],
-            })
-          : null;
-      const readRequest = async () => {
-        const prompt = readToolStringParam(params, "prompt", { required: true });
-        return {
-          prompt,
-          duplicate: await createImageGenerateDuplicateGuardResult(options?.agentSessionKey, {
-            prompt,
-            agentId: options?.requesterAgentId,
+      return prepareMediaGenerationTask({
+        generationLabel: "image",
+        cfg,
+        args: params,
+        model,
+        options,
+        signal,
+        findDuplicate: createImageGenerateDuplicateGuardResult,
+        acquire: (config) =>
+          acquireImageGenerationToolProviders({
+            cfg: config,
+            prepared: options?.preparedModelRuntime,
           }),
-        };
-      };
-      const configuredRequest = configuredModel ? await readRequest() : undefined;
-      if (configuredRequest?.duplicate) {
-        return configuredRequest.duplicate;
-      }
-      signal?.throwIfAborted();
-      const acquired = await acquireImageGenerationToolProviders({
-        cfg: configuredModel
-          ? (applyAgentDefaultModelConfig(cfg, "image", configuredModel) ?? cfg)
-          : cfg,
-        prepared: options?.preparedModelRuntime,
-      });
-      const imageGenerationProviders = acquired.providers;
-      const prepare = async () => {
-        const imageGenerationModelConfig =
-          configuredModel ??
-          resolveCapabilityModelConfigForTool({
-            cfg,
-            workspaceDir: options?.workspaceDir,
-            agentDir: options?.agentDir,
-            authStore: options?.authProfileStore,
-            modelConfig: cfg.agents?.defaults?.mediaModels?.image,
-            modelOverride: model,
-            providers: imageGenerationProviders,
-          });
-        if (!imageGenerationModelConfig) {
-          throw new ToolInputError("No image-generation model configured.");
-        }
-        const effectiveCfg =
-          applyAgentDefaultModelConfig(cfg, "image", imageGenerationModelConfig) ?? cfg;
-        const remoteMediaSsrfPolicy = resolveRemoteMediaSsrfPolicy(effectiveCfg);
-        const { prompt, duplicate } = configuredRequest ?? (await readRequest());
-        if (duplicate) {
-          return { kind: "result" as const, result: duplicate };
-        }
-        signal?.throwIfAborted();
-        acquired.assertOpen();
-
-        const imageInputs = normalizeReferenceImages(params);
-        const filename = readToolStringParam(params, "filename");
-        const size = readToolStringParam(params, "size");
-        const aspectRatio = normalizeImageGenerationAspectRatio(
-          readToolStringParam(params, "aspectRatio"),
-        );
-        const explicitResolution = normalizeImageGenerationResolution(
-          readToolStringParam(params, "resolution"),
-        );
-        const timeoutMs = readGenerationTimeoutMs(params) ?? imageGenerationModelConfig.timeoutMs;
-        const quality = parseImageOption(
-          readToolStringParam(params, "quality"),
-          SUPPORTED_QUALITIES,
-          "quality",
-        );
-        const outputFormat = parseImageOption(
-          readToolStringParam(params, "outputFormat"),
-          SUPPORTED_OUTPUT_FORMATS,
-          "outputFormat",
-        );
-        const background = parseImageOption(
-          readToolStringParam(params, "background"),
-          SUPPORTED_BACKGROUNDS,
-          "background",
-        );
-        const providerOptions = normalizeProviderOptions(params);
-        const selectedProvider = resolveSelectedImageGenerationProvider({
-          providers: imageGenerationProviders,
-          imageGenerationModelConfig,
-          modelOverride: model,
-        });
-        const explicitModelRef = parseImageGenerationModelRef(model);
-        const primaryModelRef = parseImageGenerationModelRef(imageGenerationModelConfig.primary);
-        const selectedModelId = resolveSelectedImageGenerationModelId({
-          selectedProvider,
-          imageGenerationModelConfig,
-          modelOverride: model,
-          explicitModelRef,
-          primaryModelRef,
-        });
-        const imageGenerationCandidates = resolveCapabilityModelCandidates({
-          cfg: effectiveCfg,
-          modelConfig: effectiveCfg.agents?.defaults?.mediaModels?.image,
-          modelOverride: model,
-          parseModelRef: parseImageGenerationModelRef,
-          agentDir: options?.agentDir,
-          listProviders: () => imageGenerationProviders,
-          autoProviderFallback: explicitModelConfig ? false : undefined,
-        });
-        const maxInputImages = resolveReachableImageGenerationMaxInputImages({
-          providers: imageGenerationProviders,
-          candidates: imageGenerationCandidates,
-        });
-        const count = resolveRequestedCount(params);
-        const requestKey = buildMediaGenerationRequestKey({
-          tool: "image_generate",
+        resolveProviders: (acquired) => acquired.providers,
+        prepare: async ({
+          resources: acquired,
+          modelConfig: imageGenerationModelConfig,
+          effectiveCfg,
           prompt,
-          provider: selectedProvider?.id ?? explicitModelRef?.provider ?? primaryModelRef?.provider,
-          model:
-            model !== undefined
-              ? (explicitModelRef?.model ?? model)
-              : (primaryModelRef?.model ??
-                imageGenerationModelConfig.primary ??
-                selectedProvider?.defaultModel),
-          count,
-          imageInputs,
-          size,
-          aspectRatio,
-          resolution: explicitResolution,
-          quality,
-          outputFormat,
-          background,
-          filename,
-          providerOptions,
-        });
-        const duplicateGuardResult = await createImageGenerateDuplicateGuardResult(
-          options?.agentSessionKey,
-          { prompt, requestKey, agentId: options?.requesterAgentId },
-        );
-        if (duplicateGuardResult) {
-          return { kind: "result" as const, result: duplicateGuardResult };
-        }
-        signal?.throwIfAborted();
-        acquired.assertOpen();
-        validateImageGenerationCapabilities({
-          provider: selectedProvider,
-          count,
-          inputImageCount: imageInputs.length,
-          maxInputImages,
-          size,
-          aspectRatio,
-          resolution: explicitResolution,
-          explicitResolution: Boolean(explicitResolution),
-        });
-        const referenceMaxBytes = resolveGeneratedMediaMaxBytes(effectiveCfg, "image");
-        const loadedReferenceImages = await loadImageGenerationReferences({
-          imageInputs,
-          maxBytes: referenceMaxBytes,
-          workspaceDir: options?.workspaceDir,
-          sandboxConfig,
-          ssrfPolicy: remoteMediaSsrfPolicy,
-          signal,
-        });
-        const inputImages = loadedReferenceImages.map((entry) => entry.sourceImage);
-        const modeCaps =
-          inputImages.length > 0
-            ? selectedProvider?.capabilities.edit
-            : selectedProvider?.capabilities.generate;
-        const inferredResolution =
-          size || explicitResolution
-            ? undefined
-            : inputImages.length > 0
-              ? await inferImageGenerationResolution(inputImages, signal)
-              : undefined;
-        const resolution =
-          explicitResolution ??
-          (modeCaps?.supportsResolution === false ||
-          modelDisablesImageResolution(selectedProvider, selectedModelId)
-            ? undefined
-            : inferredResolution);
-        validateImageGenerationCapabilities({
-          provider: selectedProvider,
-          count,
-          inputImageCount: inputImages.length,
-          maxInputImages,
-          size,
-          aspectRatio,
-          resolution,
-          explicitResolution: Boolean(explicitResolution),
-        });
-        return {
-          kind: "task" as const,
-          params: {
-            lifecycle: imageGenerationTaskLifecycle,
-            generationLabel: "image" as const,
-            sessionKey: options?.agentSessionKey,
-            requesterAgentId: options?.requesterAgentId,
-            requesterOrigin: options?.requesterOrigin,
+          explicitModelConfig,
+        }) => {
+          const imageGenerationProviders = acquired.providers;
+          const remoteMediaSsrfPolicy = resolveRemoteMediaSsrfPolicy(effectiveCfg);
+
+          const imageInputs = normalizeReferenceImages(params);
+          const filename = readToolStringParam(params, "filename");
+          const size = readToolStringParam(params, "size");
+          const aspectRatio = normalizeImageGenerationAspectRatio(
+            readToolStringParam(params, "aspectRatio"),
+          );
+          const explicitResolution = normalizeImageGenerationResolution(
+            readToolStringParam(params, "resolution"),
+          );
+          const timeoutMs = readGenerationTimeoutMs(params) ?? imageGenerationModelConfig.timeoutMs;
+          const quality = parseImageOption(
+            readToolStringParam(params, "quality"),
+            SUPPORTED_QUALITIES,
+            "quality",
+          );
+          const outputFormat = parseImageOption(
+            readToolStringParam(params, "outputFormat"),
+            SUPPORTED_OUTPUT_FORMATS,
+            "outputFormat",
+          );
+          const background = parseImageOption(
+            readToolStringParam(params, "background"),
+            SUPPORTED_BACKGROUNDS,
+            "background",
+          );
+          const providerOptions = normalizeProviderOptions(params);
+          const selectedProvider = resolveSelectedImageGenerationProvider({
+            providers: imageGenerationProviders,
+            imageGenerationModelConfig,
+            modelOverride: model,
+          });
+          const explicitModelRef = parseImageGenerationModelRef(model);
+          const primaryModelRef = parseImageGenerationModelRef(imageGenerationModelConfig.primary);
+          const selectedModelId = resolveSelectedImageGenerationModelId({
+            selectedProvider,
+            imageGenerationModelConfig,
+            modelOverride: model,
+            explicitModelRef,
+            primaryModelRef,
+          });
+          const count = resolveRequestedCount(params);
+          const requestKey = buildMediaGenerationRequestKey({
+            tool: "image_generate",
             prompt,
-            requestKey,
-            providerId: selectedProvider?.id,
-            config: effectiveCfg,
-            scheduleBackgroundWork,
-            onAsyncTaskStarted: options?.onAsyncTaskStarted,
-            onFailure: (message: string, meta?: Record<string, unknown>) => log.warn(message, meta),
-            detailExtras: {
-              ...buildMediaReferenceDetails({
-                entries: loadedReferenceImages,
-                singleKey: "image",
-                pluralKey: "images",
-                getResolvedInput: (entry) => entry.resolvedImage,
-              }),
-              ...(model ? { model } : {}),
-              ...(resolution ? { resolution } : {}),
-              ...(size ? { size } : {}),
-              ...(aspectRatio ? { aspectRatio } : {}),
-              ...(quality ? { quality } : {}),
-              ...(outputFormat ? { outputFormat } : {}),
-              ...(background ? { background } : {}),
-              ...(filename ? { filename } : {}),
-              ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-            },
-            run: (taskHandle: ImageGenerationTaskHandle | null) =>
-              executeImageGenerationJob({
-                effectiveCfg,
-                prompt,
-                agentDir: options?.agentDir,
-                model,
-                size,
-                aspectRatio,
-                resolution: explicitResolution,
-                inferredResolution,
-                quality,
-                outputFormat,
-                background,
-                count,
-                inputImages,
-                timeoutMs,
-                providerOptions,
-                ssrfPolicy: remoteMediaSsrfPolicy,
-                filename,
-                loadedReferenceImages,
-                taskHandle,
-                autoProviderFallback: explicitModelConfig ? false : undefined,
-                providers: imageGenerationProviders,
-              }),
-          },
-        };
-      };
-      let prepared: Awaited<ReturnType<typeof prepare>>;
-      try {
-        acquired.assertOpen();
-        prepared = await acquired.run(prepare);
-        if (prepared.kind === "task") {
-          // Admission is fenced after preflight; accepted work retains resources independently.
+            provider:
+              selectedProvider?.id ?? explicitModelRef?.provider ?? primaryModelRef?.provider,
+            model:
+              model !== undefined
+                ? (explicitModelRef?.model ?? model)
+                : (primaryModelRef?.model ??
+                  imageGenerationModelConfig.primary ??
+                  selectedProvider?.defaultModel),
+            count,
+            imageInputs,
+            size,
+            aspectRatio,
+            resolution: explicitResolution,
+            quality,
+            outputFormat,
+            background,
+            filename,
+            providerOptions,
+          });
+          const duplicateGuardResult = await createImageGenerateDuplicateGuardResult(
+            options?.agentSessionKey,
+            { prompt, requestKey, agentId: options?.requesterAgentId },
+          );
+          if (duplicateGuardResult) {
+            return { kind: "result" as const, result: duplicateGuardResult };
+          }
           signal?.throwIfAborted();
           acquired.assertOpen();
-        }
-      } catch (error) {
-        let cleanupFailure: { error: unknown } | undefined;
-        try {
-          await acquired.release();
-        } catch (cleanupError) {
-          cleanupFailure = { error: cleanupError };
-        }
-        if (cleanupFailure) {
-          throw new AggregateError(
-            [error, cleanupFailure.error],
-            "Image preflight and cleanup failed",
-            {
-              cause: error,
+          validateImageGenerationCount({
+            provider: selectedProvider,
+            count,
+            inputImageCount: imageInputs.length,
+          });
+          const referenceMaxBytes = resolveGeneratedMediaMaxBytes(effectiveCfg, "image");
+          const loadedReferenceImages = await loadImageGenerationReferences({
+            imageInputs,
+            maxBytes: referenceMaxBytes,
+            workspaceDir: options?.workspaceDir,
+            cwd: options?.cwd,
+            fsPolicy: options?.fsPolicy,
+            sandboxConfig,
+            ssrfPolicy: remoteMediaSsrfPolicy,
+            signal,
+          });
+          const inputImages = loadedReferenceImages.map((entry) => entry.sourceImage);
+          const modeCaps =
+            inputImages.length > 0
+              ? selectedProvider?.capabilities.edit
+              : selectedProvider?.capabilities.generate;
+          const inferredResolution =
+            size || explicitResolution
+              ? undefined
+              : inputImages.length > 0
+                ? await inferImageGenerationResolution(inputImages, signal)
+                : undefined;
+          const resolution =
+            explicitResolution ??
+            (modeCaps?.supportsResolution === false ||
+            modelDisablesImageResolution(selectedProvider, selectedModelId)
+              ? undefined
+              : inferredResolution);
+          return {
+            kind: "task" as const,
+            params: {
+              lifecycle: imageGenerationTaskLifecycle,
+              sessionKey: options?.agentSessionKey,
+              requesterAgentId: options?.requesterAgentId,
+              requesterOrigin: options?.requesterOrigin,
+              prompt,
+              requestKey,
+              providerId: selectedProvider?.id,
+              config: effectiveCfg,
+              scheduleBackgroundWork,
+              onAsyncTaskStarted: options?.onAsyncTaskStarted,
+              onFailure: (message: string, meta?: Record<string, unknown>) =>
+                log.warn(message, meta),
+              detailExtras: {
+                ...buildMediaReferenceDetails({
+                  entries: loadedReferenceImages,
+                  singleKey: "image",
+                  pluralKey: "images",
+                  getResolvedInput: (entry) => entry.resolvedImage,
+                }),
+                ...(model ? { model } : {}),
+                ...(resolution ? { resolution } : {}),
+                ...(size ? { size } : {}),
+                ...(aspectRatio ? { aspectRatio } : {}),
+                ...(quality ? { quality } : {}),
+                ...(outputFormat ? { outputFormat } : {}),
+                ...(background ? { background } : {}),
+                ...(filename ? { filename } : {}),
+                ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+              },
+              run: (taskHandle: ImageGenerationTaskHandle | null) =>
+                executeImageGenerationJob({
+                  effectiveCfg,
+                  prompt,
+                  agentDir: options?.agentDir,
+                  model,
+                  size,
+                  aspectRatio,
+                  resolution: explicitResolution,
+                  inferredResolution,
+                  quality,
+                  outputFormat,
+                  background,
+                  count,
+                  inputImages,
+                  timeoutMs,
+                  providerOptions,
+                  ssrfPolicy: remoteMediaSsrfPolicy,
+                  filename,
+                  loadedReferenceImages,
+                  taskHandle,
+                  autoProviderFallback: explicitModelConfig ? false : undefined,
+                  providers: imageGenerationProviders,
+                }),
             },
-          );
-        }
-        throw error;
-      }
-      if (prepared.kind === "result") {
-        await acquired.release();
-        return prepared.result;
-      }
-      return runMediaGenerationTask({ ...prepared.params, resources: acquired });
+          };
+        },
+      });
     },
   };
 }

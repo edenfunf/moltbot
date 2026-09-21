@@ -6,6 +6,7 @@ import {
   resolveAgentHarnessSessionStoreTransitionError,
 } from "../../sessions/agent-harness-session-key.js";
 import {
+  deferOpenClawAgentPostCommitPublication,
   openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
@@ -17,10 +18,8 @@ import {
   prunePublishedSessionArchivesByRetention,
   publishSessionStateArchives,
 } from "./session-accessor.sqlite-archive-store.js";
-import {
-  materializeSessionStateDeletePlans,
-  type MaterializedSessionStateDeletePlan,
-} from "./session-accessor.sqlite-archive.js";
+import type { MaterializedSessionStateDeletePlan } from "./session-accessor.sqlite-archive-types.js";
+import { materializeSessionStateDeletePlans } from "./session-accessor.sqlite-archive.js";
 import { readExactSessionEntryRowForCanonicalRepair } from "./session-accessor.sqlite-canonical-repair.js";
 import type {
   SessionLifecycleArchivedTranscript,
@@ -81,6 +80,7 @@ import {
   toDatabaseOptions,
   withSqliteSessionDatabase,
 } from "./session-accessor.sqlite-scope.js";
+import type { SessionEntryCreateWithTranscriptOptions } from "./session-accessor.types.js";
 import { resolveMaintenanceConfig } from "./store-maintenance-runtime.js";
 import type { ResolvedSessionMaintenanceConfig } from "./store-maintenance.js";
 import type { SessionEntry } from "./types.js";
@@ -271,7 +271,9 @@ export async function applySessionEntryLifecycleMutation(params: {
   afterUpsertsInTransaction?: (database: OpenClawAgentDatabase) => void;
   /** Synchronous caller-authority guard checked immediately before lifecycle writes. */
   beforeCommitInTransaction?: () => void;
-  /** Runs after the SQLite commit and before fallible artifact publication. */
+  /** Retain source authority around the final writer, after projection and native preparation. */
+  withCommit?: SessionEntryCreateWithTranscriptOptions["withCommit"];
+  /** Non-throwing notification after outer COMMIT, before lifecycle publication and owner cleanup. */
   onLifecycleCommitted?: () => void;
 }): Promise<SessionEntryLifecycleMutationResult> {
   const resolved = resolveSqliteScope({
@@ -308,11 +310,26 @@ export async function applySessionEntryLifecycleMutation(params: {
           ? [{ entry, sessionKey }]
           : [];
       });
+      const resetSources = projected.upsertedEntries.flatMap(({ resetBoundary, expectedEntry }) =>
+        resetBoundary && expectedEntry?.sessionId ? [expectedEntry.sessionId] : [],
+      );
       return {
         deletedEntries: deletedOwners,
-        ...(projected.deletePlans.length > 0
+        ...(projected.deletePlans.length > 0 || resetSources.length > 0
           ? {
               beforeCommit: async () => {
+                if (resetSources.length > 0) {
+                  const { restoreSessionColdTranscript } =
+                    await import("./session-cold-storage.js");
+                  for (const sessionId of new Set(resetSources)) {
+                    await restoreSessionColdTranscript({
+                      agentId: resolved.agentId,
+                      env: resolved.env,
+                      storePath: params.storePath,
+                      sessionId,
+                    });
+                  }
+                }
                 try {
                   materializedRemovalPlans = await materializeSessionStateDeletePlans(
                     projected.deletePlans,
@@ -324,23 +341,25 @@ export async function applySessionEntryLifecycleMutation(params: {
               },
             }
           : {}),
-        commit: () =>
+        commit: (assertSourceCurrent?: () => void) =>
           withSqliteSessionDatabase(toDatabaseOptions(resolved), () =>
             commitProjectedLifecycleMutation(
               materializedRemovalPlans,
               removalArchiveMaterializationFailed,
+              assertSourceCurrent,
             ),
           ),
       };
     },
     "session.lifecycle.mutate",
+    params.withCommit,
   );
   const committed = preparedWrite.result;
-  params.onLifecycleCommitted?.();
 
   function commitProjectedLifecycleMutation(
     removalPlans: MaterializedSessionStateDeletePlan[],
     materializationFailed: boolean,
+    assertSourceCurrent?: () => void,
   ) {
     let beforeCount = 0;
     const removedSessionKeys: string[] = [];
@@ -348,6 +367,10 @@ export async function applySessionEntryLifecycleMutation(params: {
     const maintenancePlans: SessionEntryMaintenancePlan[] = [];
     const publish = runOpenClawAgentWriteTransaction((transactionDb) => {
       params.beforeCommitInTransaction?.();
+      assertSourceCurrent?.();
+      if (params.onLifecycleCommitted) {
+        deferOpenClawAgentPostCommitPublication(transactionDb, params.onLifecycleCommitted);
+      }
       beforeCount = readSessionEntryCount(transactionDb);
       const validatedRemovals = projected.removals.filter((removal) => {
         if (materializationFailed && removal.removal.archiveRemovedTranscript === true) {
@@ -504,7 +527,21 @@ export async function applySessionEntryLifecycleMutation(params: {
       });
     }, toDatabaseOptions(resolved));
     publish();
-    return { archivedTranscripts, beforeCount, maintenancePlans, removedSessionKeys };
+    return {
+      archivedTranscripts,
+      beforeCount,
+      maintenancePlans,
+      removedSessionKeys,
+      // Fresh upserts do not own unrelated archive recovery. Removal retries and
+      // Doctor transfers still publish when this commit produced no new archive.
+      publishArchives:
+        params.skipMaintenance !== true ||
+        params.allowCanonicalRepair === true ||
+        params.afterUpsertsInTransaction !== undefined ||
+        removals.length > 0 ||
+        projected.upsertedEntries.length === 0 ||
+        projected.upsertedEntries.some(({ expectedEntry }) => expectedEntry !== undefined),
+    };
   }
 
   const { archivedTranscripts: maintenanceArchivedTranscripts, ...maintenance } =
@@ -515,10 +552,12 @@ export async function applySessionEntryLifecycleMutation(params: {
     );
   let publishedRemovalTranscripts: SessionLifecycleArchivedTranscript[] = [];
   try {
-    publishedRemovalTranscripts = await publishSessionStateArchives(
-      resolved,
-      committed.archivedTranscripts,
-    );
+    if (committed.publishArchives) {
+      publishedRemovalTranscripts = await publishSessionStateArchives(
+        resolved,
+        committed.archivedTranscripts,
+      );
+    }
   } catch (error) {
     captureArtifactCleanupError(error);
   }

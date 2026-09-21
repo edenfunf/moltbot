@@ -11,10 +11,16 @@ import {
   getPreparedModelRuntimeAuthStore,
   setPreparedModelRuntimeAuthStore,
 } from "../../agents/prepared-model-runtime-auth.js";
-import { PreparedModelRuntimePublicationSupersededError } from "../../agents/prepared-model-runtime.errors.js";
+import {
+  PreparedModelRuntimeOwnerNotPublishedError,
+  PreparedModelRuntimePublicationSupersededError,
+} from "../../agents/prepared-model-runtime.errors.js";
 import type { PreparedModelRuntimeSnapshot } from "../../agents/prepared-model-runtime.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
+import { buildPreparedModelsProviderData } from "./commands-models-catalog.js";
+import { handleModelsCommand, resolveModelsCommandReply } from "./commands-models.js";
+import { buildCommandTestParams } from "./commands.test-harness.js";
 
 const catalogMocks = vi.hoisted(() => ({
   readSnapshot: vi.fn<(params: unknown) => ModelCatalogSnapshot | undefined>(),
@@ -23,9 +29,6 @@ const catalogMocks = vi.hoisted(() => ({
   authModes: {} as PreparedAgentCredentialModes,
   isCurrent: (): boolean => true,
 }));
-
-const { buildPreparedModelsProviderData, resolveModelsCommandReply } =
-  await import("./commands-models.js");
 
 const staleCfg = {
   agents: { defaults: { model: { primary: "anthropic/claude-opus-4-5" } } },
@@ -36,15 +39,17 @@ const replacementCfg = {
 } as OpenClawConfig;
 
 beforeEach(() => {
-  vi.spyOn(preparedCatalog, "getPublishedPreparedModelCatalogOwnerSnapshot").mockImplementation(
-    (params) => {
+  vi.spyOn(preparedCatalog, "loadPublishedPreparedModelCatalogOwnerSnapshot").mockImplementation(
+    async (params) => {
       if (!params?.config) {
         throw new Error("A catalog read must retain its config");
       }
       const preset = catalogMocks.getPreparedOwner(params);
       const modelCatalog = preset?.modelCatalog ?? catalogMocks.readSnapshot(params);
       if (!modelCatalog) {
-        return undefined;
+        throw new PreparedModelRuntimeOwnerNotPublishedError(
+          "Model catalog is not ready. Retry after Gateway startup or refresh finishes.",
+        );
       }
       const owner: PreparedModelRuntimeSnapshot = {
         catalogOwner: {
@@ -65,6 +70,7 @@ beforeEach(() => {
         allowGatewaySubagentBinding: false,
         modelCatalog,
         configuredRuntimeModels: [],
+        findConfiguredRuntimeModel: () => undefined,
         inlineProviderModels: [],
         createStores() {
           throw new Error("Browsing must not start model execution");
@@ -73,7 +79,7 @@ beforeEach(() => {
       };
       const retainedAuth = preset ? getPreparedModelRuntimeAuthStore(preset) : undefined;
       setPreparedModelRuntimeAuthStore(owner, retainedAuth ?? catalogMocks.authStore);
-      return owner;
+      return preparedCatalog.materializePreparedModelCatalogOwner(owner);
     },
   );
 });
@@ -90,6 +96,33 @@ afterEach(() => {
 });
 
 describe("/models browse catalog recovery", () => {
+  it.each([
+    { commandBodyNormalized: "/models", choice: "- anthropic (1)" },
+    { commandBodyNormalized: "/models anthropic", choice: "- anthropic/claude-opus-4-5" },
+  ])(
+    "keeps usable choices and clears the refresh warning after recovery for $commandBodyNormalized",
+    async ({ commandBodyNormalized, choice }) => {
+      const snapshot: ModelCatalogSnapshot = {
+        entries: [{ provider: "anthropic", id: "claude-opus-4-5", name: "Available model" }],
+        routeVariants: [],
+        refreshFailed: true,
+      };
+      catalogMocks.readSnapshot.mockReturnValue(snapshot);
+      const params = buildCommandTestParams(commandBodyNormalized, staleCfg);
+
+      const failedRefresh = await handleModelsCommand(params, true);
+
+      expect(failedRefresh?.shouldContinue).toBe(false);
+      expect(failedRefresh?.reply?.text).toContain("Some models could not be refreshed.");
+      expect(failedRefresh?.reply?.text).toContain(choice);
+      snapshot.refreshFailed = false;
+      const recovered = await handleModelsCommand(params, true);
+      expect(recovered?.shouldContinue).toBe(false);
+      expect(recovered?.reply?.text).not.toContain("Some models could not be refreshed.");
+      expect(recovered?.reply?.text).toContain(choice);
+    },
+  );
+
   it.each(["default", "all"] as const)(
     "rejects a generation retired during %s projection and allows a current retry",
     async (view) => {
@@ -335,8 +368,10 @@ describe("/models browse catalog recovery", () => {
   );
 
   it("returns visible not-ready guidance from the public models command", async () => {
-    vi.mocked(preparedCatalog.getPublishedPreparedModelCatalogOwnerSnapshot).mockReturnValueOnce(
-      undefined,
+    vi.mocked(preparedCatalog.loadPublishedPreparedModelCatalogOwnerSnapshot).mockRejectedValueOnce(
+      new PreparedModelRuntimeOwnerNotPublishedError(
+        "Model catalog is not ready. Retry after Gateway startup or refresh finishes.",
+      ),
     );
     await expect(
       resolveModelsCommandReply({ cfg: staleCfg, commandBodyNormalized: "/models" }),

@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import Observation
 import OpenClawChatUI
 import SwiftUI
@@ -11,6 +10,10 @@ import XCTest
 final class QuickChatCatalogPresentationTests: XCTestCase {
     func testRenderedPickerUsesCatalogAvailabilityReasoningAndSpeed() async throws {
         let application = AppKitTestSupport.application
+        XCTAssertTrue(AppKitTestSupport.didSetActivationPolicy)
+        if ProcessInfo.processInfo.environment["OPENCLAW_TEST_QUICKCHAT_APPEARANCE"] == "dark" {
+            application.appearance = NSAppearance(named: .darkAqua)
+        }
         let fixture = QuickChatCatalogFixture()
         let gateway = Self.makeGateway(fixture: fixture)
         let transport = MacGatewayChatTransport(connection: gateway, defaultGlobalAgentID: "main")
@@ -27,6 +30,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
                 return try await QuickChatModelControlLogic.snapshot(
                     target: target, models: catalog.choices, sessions: sessions, agents: agents)
             },
+            modelCatalogEventsProvider: { await gateway.subscribe() },
             settingsPatchProvider: { target, settings in
                 let routeLease = await transport.acquireSessionSettingsRouteLease()
                 let lease = try XCTUnwrap(routeLease)
@@ -42,6 +46,9 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             application.deactivate()
             controller.present()
             try await self.waitForModel { model.canUseModelControls }
+            XCTAssertTrue(model.speed.supportsFastMode)
+            model.selectModel("fixture/current")
+            XCTAssertNil(model.selectedModelSelectionID, "Retained metadata does not permit manual selection")
             let panel = try XCTUnwrap(application.windows.first {
                 ($0.contentView as? NSHostingView<QuickChatView>)?.rootView.model === model
             })
@@ -51,23 +58,19 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             let elements = try await AppKitTestSupport.accessibilityElements(in: content)
             let button = try XCTUnwrap(elements.first {
                 $0.accessibilityRole?() == .button &&
-                    $0.accessibilityLabel?() == "Model and reasoning"
+                    $0.accessibilityLabel?() == "Model"
             })
 
-            try self.press(button) { menu in
-                try Self.record(menu: menu, content: content, name: "catalog")
+            try await AppKitTestSupport.openMenu(button, in: panel) { menu in
+                try AppKitTestSupport.record(menu: menu, content: content, name: "catalog")
                 let provider = try XCTUnwrap(menu.items.first { $0.submenu != nil })
                 let choices = try XCTUnwrap(provider.submenu)
+                XCTAssertFalse(choices.items.contains { $0.title.hasPrefix("Current fixture") })
                 let unavailable = try XCTUnwrap(choices.items.first { $0.title.hasPrefix("Locked fixture") })
                 XCTAssertFalse(unavailable.isEnabled, "The catalog requires sign-in before this model can be selected")
                 XCTAssertTrue(unavailable.title.contains("Sign-in needed"))
                 let unknown = try XCTUnwrap(choices.items.first { $0.title.hasPrefix("Unknown fixture") })
                 XCTAssertTrue(unknown.isEnabled, "Missing availability must not refuse a model")
-                let reasoningHeader = try XCTUnwrap(menu.items.firstIndex { $0.title == "Reasoning" })
-                XCTAssertEqual(
-                    menu.items.dropFirst(reasoningHeader + 1).prefix { $0.submenu == nil }.map(\.title),
-                    ["Auto", "Brief", "Thorough"],
-                    "The picker must use catalog choices, without inferring levels from the model name")
                 let allowed = try XCTUnwrap(choices.items.firstIndex { $0.title.hasPrefix("Allowed fixture") })
                 XCTAssertTrue(choices.items[allowed].isEnabled)
                 choices.performActionForItem(at: allowed)
@@ -76,44 +79,53 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             XCTAssertEqual(model.selectedModelSelectionID, "fixture/allowed")
             XCTAssertEqual(model.displayedModelSelectionID, "fixture/allowed")
 
-            try self.press(button) { menu in
-                try Self.record(menu: menu, content: content, name: "selected")
+            try await AppKitTestSupport.openMenu(button, in: panel) { menu in
+                try AppKitTestSupport.record(menu: menu, content: content, name: "selected")
                 let provider = try XCTUnwrap(menu.items.first { $0.submenu != nil })
                 let selected = try XCTUnwrap(provider.submenu?.items.first {
                     $0.title.hasPrefix("Allowed fixture")
                 })
                 XCTAssertEqual(selected.state, .on)
-                let thorough = try XCTUnwrap(menu.items.firstIndex { $0.title == "Thorough" })
-                menu.performActionForItem(at: thorough)
             }
-            XCTAssertEqual(model.selectedThinkingLevel, "high")
-            XCTAssertTrue(model.modelControlLabel.contains("Thorough"))
-            try self.press(button) { menu in
-                try Self.record(menu: menu, content: content, name: "effort")
-                let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
-                XCTAssertEqual(speed.items.map(\.title), ["Session default", "Fast", "Normal"])
-                XCTAssertTrue(speed.items.allSatisfy(\.isEnabled))
-                XCTAssertEqual(speed.items[0].state, .on)
-                speed.performActionForItem(at: 1)
+
+            var effort = try await self.waitForEffort(in: panel, value: "Inherited Brief")
+            XCTAssertEqual(model.thinkingOptions.map(\.label), ["Brief", "Thorough"])
+            XCTAssertTrue(effort.accessibilityPerformPress?() == true)
+            let popover = try await self.waitForEffortPopover(application: application)
+            let slider = try XCTUnwrap(popover.elements.first {
+                $0.accessibilityRole?() == .slider && $0.accessibilityLabel?() == "Thinking effort"
+            })
+            XCTAssertTrue(slider.accessibilityPerformIncrement?() == true)
+            try await self.waitForModel { model.selectedThinkingLevel == "high" }
+            effort = try await self.waitForEffort(in: panel, value: "Thorough")
+            let effortValue: Any? = effort.accessibilityValue?()
+            XCTAssertEqual(effortValue as? String, "Thorough")
+            try await self.captureEffortPopover(popover.window, name: "effort")
+            let fast = try await AppKitTestSupport.waitForAccessibilityElement(
+                in: popover.window, description: "the enabled Fast mode control")
+            { elements in
+                elements.first { $0.accessibilityLabel?() == "Fast mode" && $0.isAccessibilityEnabled?() == true }
             }
-            try await self.waitForModel { !model.isUpdatingModel }
+            XCTAssertTrue(fast.isAccessibilityEnabled?() == true)
+            _ = fast.accessibilityPerformPress?()
+            try await self.waitForModel { model.speed.isEnabled && !model.isUpdatingModel }
             XCTAssertTrue(model.speed.isEnabled)
             XCTAssertEqual(model.speed.override, .on)
-            XCTAssertTrue(model.modelControlLabel.contains("Fast"))
-            try self.press(button) { menu in
-                try Self.record(menu: menu, content: content, name: "fast")
-                let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
-                XCTAssertEqual(speed.items[1].state, .on)
-                speed.performActionForItem(at: 0)
-            }
+            effort = try await self.waitForEffort(in: panel, value: "Thorough, Fast")
+            let fastEffortValue: Any? = effort.accessibilityValue?()
+            XCTAssertEqual(fastEffortValue as? String, "Thorough, Fast")
+            let defaults = try await AppKitTestSupport.accessibilityElements(in: popover.window)
+                .filter { $0.accessibilityRole?() == .button && $0.accessibilityLabel?() == "Use session default" }
+            XCTAssertEqual(defaults.count, 2, "Thinking and speed each have their own inheritance control")
+            XCTAssertTrue(try XCTUnwrap(defaults.last).accessibilityPerformPress?() == true)
             try await self.waitForModel { !model.isUpdatingModel }
             XCTAssertNil(model.speed.override)
             XCTAssertFalse(model.speed.isEnabled)
             XCTAssertEqual(model.selectedThinkingLevel, "high")
-            try self.press(button) { menu in
-                try Self.record(menu: menu, content: content, name: "inherited")
-                let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
-                XCTAssertEqual(speed.items.map(\.state), [.on, .off, .off])
+            effort = try await self.waitForEffort(in: panel, value: "Thorough")
+            XCTAssertTrue(effort.accessibilityPerformPress?() == true)
+            try await AppKitTestSupport.openMenu(button, in: panel) { menu in
+                try AppKitTestSupport.record(menu: menu, content: content, name: "inherited")
                 let choices = try XCTUnwrap(menu.items.first { $0.title == "Fixture" }?.submenu)
                 let unknown = try XCTUnwrap(choices.items.firstIndex { $0.title == "Unknown fixture" })
                 choices.performActionForItem(at: unknown)
@@ -131,6 +143,45 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
         }
     }
 
+    private func waitForEffort(in window: NSWindow, value expectedValue: String) async throws -> AnyObject {
+        // Model observation can complete before SwiftUI publishes its current accessibility tree.
+        try await AppKitTestSupport.waitForAccessibilityElement(
+            in: window, description: "the enabled effort control with value \(expectedValue)")
+        { elements in
+            elements.first { element in
+                let value: Any? = element.accessibilityValue?()
+                return element.accessibilityLabel?() == "Effort" && element.accessibilityRole?() == .button &&
+                    element.isAccessibilityEnabled?() == true && value as? String == expectedValue
+            }
+        }
+    }
+
+    private func waitForEffortPopover(application: NSApplication) async throws
+        -> (window: NSWindow, elements: [AnyObject])
+    {
+        let deadline = ContinuousClock.now + .seconds(5)
+        repeat {
+            for window in application.windows where window.isVisible {
+                let elements = try await AppKitTestSupport.accessibilityElements(in: window)
+                if elements.contains(where: { $0.accessibilityRole?() == .slider }) {
+                    return (window, elements)
+                }
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        } while ContinuousClock.now < deadline
+        throw NSError(
+            domain: "QuickChatCatalogPresentation", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "The rendered effort popover did not expose its slider"])
+    }
+
+    private func captureEffortPopover(_ window: NSWindow, name: String) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["OPENCLAW_TEST_QUICKCHAT_EXTERNAL_CAPTURE"] == "1",
+              let directory = environment["OPENCLAW_TEST_MENU_CAPTURE_DIR"] else { return }
+        try await AppKitTestSupport.recordCompositedWindow(
+            window, name: name, directory: URL(fileURLWithPath: directory, isDirectory: true))
+    }
+
     private func waitForModel(_ condition: @escaping @MainActor () -> Bool) async throws {
         let ready = XCTestExpectation(description: "Quick Chat model state settled")
         let observation = QuickChatCatalogObservation(condition: condition, ready: ready)
@@ -139,60 +190,6 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
         observation.stop()
         XCTAssertEqual(result, .completed)
         XCTAssertTrue(condition())
-    }
-
-    private func press(_ button: AnyObject, inspect: @escaping (NSMenu) throws -> Void) throws {
-        let tracking = QuickChatCatalogMenuTracking(inspect: inspect)
-        tracking.start()
-        defer { tracking.stop() }
-        XCTAssertTrue(button.accessibilityPerformPress?() == true)
-        XCTAssertTrue(tracking.observed, "Pressing the rendered control must open its native menu")
-        XCTAssertFalse(tracking.timedOut, "The menu must finish before its tracking deadline")
-        if let error = tracking.error { throw error }
-    }
-
-    private static func record(menu: NSMenu, content: NSView, name: String) throws {
-        func items(_ menu: NSMenu) -> [[String: Any]] {
-            menu.items.map { item in
-                var row: [String: Any] = [
-                    "title": item.title, "enabled": item.isEnabled, "selected": item.state == .on,
-                ]
-                if let submenu = item.submenu { row["children"] = items(submenu) }
-                return row
-            }
-        }
-        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("quick-chat-proof", isDirectory: true)
-        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        try JSONSerialization.data(withJSONObject: items(menu), options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("\(name)-menu.json"))
-        let image = try XCTUnwrap(content.bitmapImageRepForCachingDisplay(in: content.bounds))
-        content.cacheDisplay(in: content.bounds, to: image)
-        try XCTUnwrap(image.representation(using: .png, properties: [:]))
-            .write(to: output.appendingPathComponent("\(name)-window.png"))
-        if CGPreflightScreenCaptureAccess(),
-           let windows = CGWindowListCopyWindowInfo(
-               [.optionOnScreenOnly, .excludeDesktopElements],
-               0) as? [[String: Any]]
-        {
-            for window in windows
-                where window[kCGWindowOwnerPID as String] as? Int32 == ProcessInfo.processInfo.processIdentifier
-            {
-                guard window[kCGWindowLayer as String] as? Int == NSWindow.Level.popUpMenu.rawValue,
-                      let number = window[kCGWindowNumber as String] as? UInt32 else { continue }
-                let capture = Process()
-                capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-                capture.arguments = [
-                    "-x",
-                    "-l",
-                    String(number),
-                    output.appendingPathComponent("\(name)-menu-\(number).png").path,
-                ]
-                try capture.run()
-                capture.waitUntilExit()
-                XCTAssertEqual(capture.terminationStatus, 0)
-            }
-        }
     }
 
     private static func makeGateway(fixture: QuickChatCatalogFixture) -> GatewayConnection {
@@ -233,16 +230,16 @@ private actor QuickChatCatalogFixture {
         switch method {
         case "health": payload = "{}"
         case "agents.list":
-            payload = #"{"defaultId":"main","mainKey":"main","scope":"per-agent","agents":[{"id":"main","kind":"agent","name":"Fixture"}]}"#
+            payload = #"{"defaultId":"main","mainKey":"main","scope":"per-sender","agents":[{"id":"main","kind":"agent","name":"Fixture"}]}"#
         case "models.list":
             let params = try XCTUnwrap(request["params"] as? [String: Any])
             XCTAssertEqual(params["sessionKey"] as? String, "agent:main:main")
             payload = """
             {"models":[
-              {"id":"current","name":"Current fixture","provider":"fixture","available":true,
+              {"id":"current","name":"Current fixture","provider":"fixture","available":true,"manualSelectionAllowed":false,
                "thinkingLevels":[{"id":"low","label":"Brief"},{"id":"high","label":"Thorough"}],
                "thinkingDefault":"low","supportsFastMode":true,"effectiveFastMode":false},
-              {"id":"allowed","name":"Allowed fixture","provider":"fixture","available":true,
+              {"id":"allowed","name":"Allowed fixture","provider":"fixture","available":true,"manualSelectionAllowed":true,
                "thinkingLevels":[{"id":"low","label":"Brief"},{"id":"high","label":"Thorough"}],
                "thinkingDefault":"low","supportsFastMode":true,"effectiveFastMode":false},
               {"id":"locked","name":"Locked fixture","provider":"fixture","available":false,
@@ -302,69 +299,5 @@ private final class QuickChatCatalogObservation {
 
     func stop() {
         self.stopped = true
-    }
-}
-
-@MainActor
-private final class QuickChatCatalogMenuTracking: NSObject {
-    let inspect: (NSMenu) throws -> Void
-    private(set) var observed = false
-    private(set) var timedOut = false
-    private(set) var error: Error?
-    private var menu: NSMenu?
-    private var inspection: Timer?
-    private var deadline: Timer?
-
-    init(inspect: @escaping (NSMenu) throws -> Void) {
-        self.inspect = inspect
-    }
-
-    func start() {
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(self.beganTracking(_:)),
-            name: NSMenu.didBeginTrackingNotification, object: nil)
-    }
-
-    @objc private func beganTracking(_ notification: Notification) {
-        guard !self.observed, let menu = notification.object as? NSMenu else { return }
-        self.observed = true
-        self.menu = menu
-        // AppKit tracks menus in a nested run loop. Schedule both inspection and cancellation there.
-        let inspection = Timer(
-            timeInterval: 0,
-            target: self,
-            selector: #selector(self.inspectMenu),
-            userInfo: nil,
-            repeats: false)
-        let deadline = Timer(
-            timeInterval: 3,
-            target: self,
-            selector: #selector(self.expire),
-            userInfo: nil,
-            repeats: false)
-        self.inspection = inspection
-        self.deadline = deadline
-        for timer in [inspection, deadline] {
-            RunLoop.main.add(timer, forMode: .eventTracking)
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
-
-    @objc private func inspectMenu() {
-        guard let menu = self.menu else { return }
-        defer { menu.cancelTrackingWithoutAnimation() }
-        do { try self.inspect(menu) } catch { self.error = error }
-    }
-
-    @objc private func expire() {
-        self.timedOut = true
-        self.menu?.cancelTrackingWithoutAnimation()
-    }
-
-    func stop() {
-        self.inspection?.invalidate()
-        self.deadline?.invalidate()
-        self.menu?.cancelTrackingWithoutAnimation()
-        NotificationCenter.default.removeObserver(self)
     }
 }

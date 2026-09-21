@@ -39,10 +39,7 @@ import { classifyMediaReferenceSource } from "../media/media-reference.js";
 import { createLazyRuntimeModule, createLazyRuntimeNamedExport } from "../shared/lazy-runtime.js";
 import { MediaAttachmentCache, selectAttachments } from "./attachments.js";
 import { matchesMediaEntryCapability } from "./entry-capabilities.js";
-import {
-  clearLocalAudioInspectionCacheForTests,
-  inspectLocalAudioSelection,
-} from "./local-audio.js";
+import { inspectLocalAudioSelection } from "./local-audio.js";
 import { resolveOpenAiAudioAuthModelApi } from "./openai-audio-api.js";
 import {
   resolveAutoMediaKeyProvidersFromRegistry,
@@ -62,6 +59,7 @@ import {
   formatDecisionSummary,
   runCliEntry,
   runProviderEntry,
+  type MediaRequestOverrides,
 } from "./runner.entries.js";
 import type {
   MediaAttachment,
@@ -301,16 +299,6 @@ export function buildProviderRegistry(
   cfg?: OpenClawConfig,
 ): ProviderRegistry {
   return buildMediaUnderstandingRegistry(overrides, cfg);
-}
-
-function clearMediaUnderstandingBinaryCacheForTests(): void {
-  clearLocalAudioInspectionCacheForTests();
-}
-
-if (process.env.VITEST || process.env.NODE_ENV === "test") {
-  (globalThis as Record<PropertyKey, unknown>)[
-    Symbol.for("openclaw.mediaUnderstandingRunnerTestApi")
-  ] = { clearMediaUnderstandingBinaryCacheForTests };
 }
 
 async function resolveKeyEntry(params: {
@@ -645,6 +633,7 @@ async function runAttachmentEntries(params: {
   entries: Iterable<ResolvedMediaModelEntry> | AsyncIterable<ResolvedMediaModelEntry>;
   automaticAudio: boolean;
   config?: MediaUnderstandingConfig;
+  request?: MediaRequestOverrides;
 }): Promise<{
   output: MediaUnderstandingOutput | null;
   attempts: MediaUnderstandingModelDecision[];
@@ -660,29 +649,11 @@ async function runAttachmentEntries(params: {
     try {
       const attempt =
         entryType === "cli"
-          ? ok(
-              await runCliEntry({
-                capability,
-                entry,
-                cfg: params.cfg,
-                ctx: params.ctx,
-                attachment: params.attachment,
-                cache: params.cache,
-                config: params.config,
-              }),
-            )
+          ? ok(await runCliEntry({ ...params, entry }))
           : await runProviderEntry({
-              capability,
+              ...params,
               entry,
-              cfg: params.cfg,
-              ctx: params.ctx,
               attachmentIndex,
-              cache: params.cache,
-              agentId: params.agentId,
-              agentDir: params.agentDir,
-              workspaceDir: params.workspaceDir,
-              providerRegistry: params.providerRegistry,
-              config: params.config,
               secretOwnerId: candidate.secretOwnerId,
             });
       if (!attempt.ok) {
@@ -781,6 +752,7 @@ export async function runCapability(params: {
   providerRegistry: ProviderRegistry;
   config?: MediaUnderstandingConfig;
   activeModel?: ActiveMediaModel;
+  request?: MediaRequestOverrides;
 }): Promise<RunCapabilityResult> {
   const { capability, cfg, ctx } = params;
   const config: MediaUnderstandingConfig = params.config ?? cfg.tools?.media?.[capability] ?? {};
@@ -1000,6 +972,7 @@ export async function runCapability(params: {
         : resolvedEntries,
       automaticAudio,
       config,
+      request: params.request,
     });
     if (output) {
       outputs.push(output);

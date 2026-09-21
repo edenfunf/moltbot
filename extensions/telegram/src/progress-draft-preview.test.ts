@@ -1,5 +1,6 @@
 import {
   buildChannelProgressDraftLine,
+  createChannelProgressDraftCompositor,
   type ChannelProgressDraftCompositorSnapshot,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { describe, expect, it } from "vitest";
@@ -27,6 +28,29 @@ describe("renderTelegramProgressDraftPreview", () => {
     expect(preview.text.split(line.icon)).toHaveLength(2);
     expect(preview.text).toContain(`<b>${line.icon} ${line.label}</b>`);
   });
+
+  it.each(["running", "failed"])(
+    "renders a prepared named %s row once in both transports",
+    (status) => {
+      const line = buildChannelProgressDraftLine({
+        event: "item",
+        itemId: "agents",
+        name: "agents_list",
+        title: "Agents",
+        status,
+      });
+      if (!line) {
+        throw new Error("Expected prepared tool line");
+      }
+      const html = renderTelegramProgressDraftPreview({ lines: [line] }, options);
+      const rich = renderTelegramProgressDraftPreview(
+        { lines: [line] },
+        { ...options, richMessages: true },
+      );
+      expect(html.text).toBe(`<b>🧭 Agents</b> <i>${status}</i>`);
+      expect(rich.text).toBe(`🧭 Agents ${status}`);
+    },
+  );
 
   it("renders native checkboxes and equivalent readable HTML from the same plan", () => {
     const snapshot: ChannelProgressDraftCompositorSnapshot = {
@@ -101,23 +125,39 @@ describe("renderTelegramProgressDraftPreview", () => {
   );
 
   it.each([true, false])(
-    "keeps quiet non-zero exits visible above a full plan (rich=%s)",
-    (richMessages) => {
-      const preview = renderTelegramProgressDraftPreview(
-        {
-          lines: [{ kind: "command-output", label: "Exec", text: "🛠️ exit 1", status: "exit 1" }],
-          plan: [
-            { step: "Inspect", status: "completed" },
-            { step: "Repair", status: "in_progress" },
-            { step: "Verify", status: "pending" },
-          ],
+    "renders a quiet plan without intermediate command failures (rich=%s)",
+    async (richMessages) => {
+      const previews: string[] = [];
+      const progress = createChannelProgressDraftCompositor({
+        active: true,
+        mode: "progress",
+        seed: "test",
+        entry: { streaming: { mode: "progress", progress: { toolProgress: false, label: false } } },
+        update: (_text, { snapshot }) => {
+          const preview = renderTelegramProgressDraftPreview(snapshot, {
+            ...options,
+            richMessages,
+            toolProgress: false,
+            maxLines: 3,
+          });
+          previews.push(telegramHtmlToPlainTextFallback(preview.text));
         },
-        { ...options, richMessages, toolProgress: false, maxLines: 3 },
-      );
-      const text = telegramHtmlToPlainTextFallback(preview.text);
-      expect(text).toContain("exit 1");
-      expect(text).toContain("Repair (in progress)");
-      expect(text.split("\n")).toHaveLength(3);
+      });
+      try {
+        await progress.pushPlanProgress([
+          { step: "Inspect", status: "completed" },
+          { step: "Repair", status: "in_progress" },
+          { step: "Verify", status: "pending" },
+        ]);
+        await progress.pushCommandOutputEvent({ name: "Bash", phase: "end", exitCode: 1 });
+        await progress.pushCommandOutputEvent({ name: "Bash", phase: "end", exitCode: 2 });
+        expect(previews).toHaveLength(1);
+        expect(previews[0]).not.toMatch(/Bash|exit [12]/u);
+        expect(previews[0]).toContain("Repair (in progress)");
+        expect(previews[0]?.split("\n")).toHaveLength(3);
+      } finally {
+        progress.cancel();
+      }
     },
   );
 

@@ -1,5 +1,6 @@
 // Verifies runtime config snapshots preserve normalized public settings.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { freezeJsonSnapshot } from "../shared/immutable-data.js";
 import {
   cloneConfigWithResolutionFacts,
   createConfigResolutionFacts,
@@ -30,6 +31,7 @@ import {
   setRuntimeConfigSnapshotRefreshHandler,
 } from "./runtime-snapshot.js";
 import { createProviderConfigFixture } from "./runtime-snapshot.test-fixtures.js";
+import { captureRuntimeConfig } from "./runtime-source-projection.js";
 import type { OpenClawConfig } from "./types.js";
 
 function resetRuntimeConfigState(): void {
@@ -141,6 +143,37 @@ describe("runtime snapshot state", () => {
     expect(hashRuntimeConfigValue({ logging: { level: "info" } })).toBe(first);
   });
 
+  it.each([false, true])("hashes one immutable fleet only once (captured: %s)", (captured) => {
+    const source = {
+      agents: {
+        entries: Object.fromEntries(
+          Array.from({ length: 200 }, (_, index) => [`agent-${index}`, { name: `${index}` }]),
+        ),
+      },
+    };
+    const keys = vi.spyOn(Object, "keys");
+    try {
+      const config = captured ? captureRuntimeConfig(source) : freezeJsonSnapshot(source);
+      const first = hashRuntimeConfigValue(config);
+      for (let index = 0; index < 200; index += 1) {
+        expect(hashRuntimeConfigValue(config)).toBe(first);
+      }
+      expect(keys.mock.calls.filter(([value]) => value === config.agents?.entries)).toHaveLength(1);
+    } finally {
+      keys.mockRestore();
+    }
+  });
+
+  it("rehashes mutable descendants of a shallow-frozen config", () => {
+    const config = Object.freeze({ gateway: { port: 18789 } });
+    const before = hashRuntimeConfigValue(config);
+    config.gateway.port = 19001;
+    expect(hashRuntimeConfigValue(config)).not.toBe(before);
+    expect(hashRuntimeConfigValue(config)).toBe(
+      hashRuntimeConfigValue({ gateway: { port: 19001 } }),
+    );
+  });
+
   it.each([false, true])(
     "selects and retains only matching runtime sources (resolution facts: %s)",
     (withFacts) => {
@@ -199,6 +232,30 @@ describe("runtime snapshot state", () => {
       expect(readUnbound()).toBe(scopedResolvedConfig);
     },
   );
+
+  it("does not replace explicit config with a pinned snapshot without a source contract", () => {
+    const sourceConfig = createProviderConfigFixture();
+    const resolvedConfig = createProviderConfigFixture("synthetic-resolved-key");
+    const pinned = loadPinnedRuntimeConfig(() => sourceConfig);
+    expect(getRuntimeConfigSourceSnapshot()).toBeNull();
+
+    expect(
+      selectApplicableRuntimeConfig({ inputConfig: resolvedConfig, runtimeConfig: pinned }),
+    ).toBe(resolvedConfig);
+    expect(
+      selectApplicableRuntimeConfig({ inputConfig: sourceConfig, runtimeConfig: pinned }),
+    ).toBe(sourceConfig);
+    expect(selectApplicableRuntimeConfig({ runtimeConfig: pinned })).toBe(pinned);
+
+    // A resolved but unrelated singleton cannot supply credentials for an explicit source either.
+    setRuntimeConfigSnapshot(resolvedConfig);
+    expect(
+      selectApplicableRuntimeConfig({
+        inputConfig: sourceConfig,
+        runtimeConfig: getRuntimeConfigSnapshot(),
+      }),
+    ).toBe(sourceConfig);
+  });
 
   it("matches independently loaded config with equivalent resolution facts", () => {
     const source = createProviderConfigFixture();

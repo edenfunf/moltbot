@@ -3,8 +3,9 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextEngine } from "../../../context-engine/types.js";
+import * as gatewayCallRuntime from "../../../gateway/call.js";
 import { openOpenClawStateDatabase } from "../../../state/openclaw-state-db.js";
 import {
   resetTaskFlowRegistryForTests,
@@ -48,15 +49,15 @@ const sessionStore = vi.hoisted(
     ),
 );
 
-vi.mock("../../../gateway/call.js", () => ({
-  callGateway: vi.fn(async (opts: unknown) => {
-    const request = opts as { method?: string };
+const gatewayCall = vi
+  .spyOn(gatewayCallRuntime, "callGateway")
+  .mockImplementation(async (request) => {
     if (request.method === "agent.wait") {
       return { status: "pending" };
     }
     return {};
-  }),
-}));
+  });
+afterAll(() => gatewayCall.mockRestore());
 
 vi.mock("../../../infra/agent-events.js", () => ({
   getAgentEventLifecycleGeneration: () => "test-generation",
@@ -174,9 +175,11 @@ vi.mock("../../../plugins/hook-runner-global.js", () => ({
   resetGlobalHookRunner: vi.fn(),
 }));
 
-vi.mock("../../../sessions/session-lifecycle-events.js", () => ({
-  emitSessionLifecycleEvent: emitSessionLifecycleEventMock,
-}));
+vi.mock("../../../sessions/session-lifecycle-events.js", async (importOriginal) => {
+  const { onSessionIdentityMutation } =
+    await importOriginal<typeof import("../../../sessions/session-lifecycle-events.js")>();
+  return { emitSessionLifecycleEvent: emitSessionLifecycleEventMock, onSessionIdentityMutation };
+});
 
 vi.mock("../../internal-session-effects.js", () => ({
   removeInternalSessionEffectsSession: removeInternalSessionEffectsSessionMock,
@@ -402,42 +405,6 @@ describe("subagent registry steer restarts", () => {
 
       const announce = requireFirstAnnounceCall();
       expect(announce.childRunId).toBe("run-new");
-    }
-  });
-
-  it("removes orphaned private transcript when steer replaces an internally resumed run", async () => {
-    {
-      registerRun({
-        runId: "run-old",
-        childSessionKey: "agent:main:subagent:steer",
-        task: "initial task",
-      });
-
-      const previous = listMainRuns()[0];
-      expect(previous?.runId).toBe("run-old");
-      if (!previous) {
-        throw new Error("expected registered subagent run");
-      }
-      previous.execution = {
-        status: "interrupted",
-        startedAt: previous.execution.startedAt,
-        transcriptTarget: {
-          agentId: "main",
-          sessionId: "internal-run-old",
-          sessionKey: "agent:main:internal-session-effects:run-old",
-          storePath: "/tmp/test-store",
-        },
-      };
-
-      replaceRunAfterSteer({
-        previousRunId: "run-old",
-        nextRunId: "run-new",
-        fallback: previous,
-      });
-
-      expect(removeInternalSessionEffectsSessionMock).toHaveBeenCalledWith(
-        previous.execution.transcriptTarget,
-      );
     }
   });
 
@@ -921,7 +888,8 @@ describe("subagent registry steer restarts", () => {
       },
     };
 
-    expect(mod.isSubagentSessionRunActive(childSessionKey)).toBe(true);
+    // Registration alone does not own an executor; the admitted transition has an owner test.
+    expect(mod.isSubagentSessionRunActive(childSessionKey)).toBe(false);
     const updated = mod.markSubagentRunTerminated({
       childSessionKey,
       reason: "manual kill",

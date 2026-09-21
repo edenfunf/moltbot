@@ -16,6 +16,7 @@ import { formatSlackError } from "../../errors.js";
 import { SLACK_EDIT_TEXT_MAX_BYTES, SLACK_TEXT_LIMIT } from "../../limits.js";
 import {
   buildSlackProgressStreamChunks,
+  buildSlackProgressTextBlocks,
   reconcileSlackNativeTaskChunks,
   EMPTY_SLACK_NATIVE_STREAM_SNAPSHOT,
   type SlackNativeStreamSnapshot,
@@ -86,7 +87,6 @@ export function createSlackProgressRuntime(runtimeParams: {
         warn: logVerbose,
       })
     : undefined;
-  let hasStreamedAnswer = false;
   const isProgressMode = slackStreaming.mode === "progress";
   const useNativeProgressStreaming = useStreaming && slackStreaming.mode === "progress";
   const progressDraftActive = Boolean(draftStream) || useNativeProgressStreaming;
@@ -129,6 +129,11 @@ export function createSlackProgressRuntime(runtimeParams: {
   const progressWorkCounter = createChannelProgressWorkCounter();
   const progressSeed = `${account.accountId}:${message.channel}`;
   const slackProgressStyle = resolveSlackProgressStyle(account.config);
+  // Compact quiet Slack is the latest model preamble, not the shared progress
+  // card's summary. Keep reasoning and tool telemetry (including failures and
+  // edit counters) out of this lane when refactoring channel presentation.
+  const preambleOnlyProgress =
+    isProgressMode && slackProgressStyle === "compact" && !previewToolProgressEnabled;
   // THIS BEHAVIOR IS INTENTIONAL AND MUST NOT BE CASUALLY ADJUSTED.
   // DO NOT CHANGE THIS WITHOUT APPROVAL FROM SJF OR PASHPASHPASH.
   const useDraftProgressCard =
@@ -201,7 +206,14 @@ export function createSlackProgressRuntime(runtimeParams: {
     if (!candidate) {
       return false;
     }
-    const title = normalizeProgressText(resolveNativeProgressTitle(progressDraft.getSnapshot()));
+    const snapshot = progressDraft.getSnapshot();
+    const title = normalizeProgressText(
+      combineProgressHeadlineAndExplanation(
+        explicitProgressTitle ??
+          (snapshot.statusHeadlineFormat === "plain" ? undefined : snapshot.statusHeadline),
+        snapshot.planExplanationFormat === "plain" ? undefined : snapshot.planExplanation,
+      ),
+    );
     return title.length > 0 && title.includes(candidate);
   };
 
@@ -336,13 +348,17 @@ export function createSlackProgressRuntime(runtimeParams: {
   };
 
   const progressDraft = createChannelProgressDraftCompositor({
+    preparedItems: true,
     entry: account.config,
     mode: slackStreaming.mode,
     active: progressDraftActive,
     seed: progressSeed,
     formatLine: formatSlackProgressDraftLine,
     reasoningLinePrefix: "🧠 ",
-    updateOnLineChange: useNativeProgressStreaming || useDraftProgressCard,
+    reasoningGate: !preambleOnlyProgress,
+    // A completed preamble may have the same text as its final delta. Its
+    // completion still has to reach the transport after a human boundary.
+    updateOnLineChange: useNativeProgressStreaming || useDraftProgressCard || preambleOnlyProgress,
     update: async (previewText, options) => {
       if (useNativeProgressStreaming) {
         const priorSnapshot = nativeStreamSnapshot;
@@ -361,14 +377,30 @@ export function createSlackProgressRuntime(runtimeParams: {
         return false;
       }
       const snapshot = options.snapshot;
+      const latestLine = snapshot.lines.at(-1);
+      if (preambleOnlyProgress && typeof latestLine === "object" && latestLine.complete === false) {
+        // Keep the last complete preamble visible. A human reply can rotate this
+        // draft between deltas, leaving a word fragment visible until cleanup.
+        return false;
+      }
       progressCard.setFallbackText(previewText);
       draftStream.update(
-        useDraftProgressCard
+        preambleOnlyProgress
           ? {
               text: previewText,
-              blocks: progressCard.resolvePresentation(snapshot, "working"),
+              allowNewMessage: typeof latestLine !== "object" || latestLine.complete !== false,
+              ...(snapshot.preparedBlocks
+                ? { blocks: buildSlackProgressTextBlocks(snapshot.preparedBlocks) }
+                : {}),
             }
-          : previewText,
+          : useDraftProgressCard
+            ? {
+                text: previewText,
+                blocks: progressCard.resolvePresentation(snapshot, "working"),
+              }
+            : snapshot.preparedBlocks
+              ? { text: previewText, blocks: buildSlackProgressTextBlocks(snapshot.preparedBlocks) }
+              : previewText,
       );
       if (options?.flush) {
         await draftStream.flush();
@@ -477,11 +509,15 @@ export function createSlackProgressRuntime(runtimeParams: {
     delivery.streamFailed = false;
   };
 
-  const pushPlanProgress = async (steps?: AgentPlanStep[], explanation?: string) => {
+  const pushPlanProgress = async (
+    steps?: AgentPlanStep[],
+    explanation?: string,
+    explanationFormat?: "plain",
+  ) => {
     if (isProgressMode && slackProgressStyle === "compact") {
       return false;
     }
-    return await progressDraft.pushPlanProgress(steps, { explanation });
+    return await progressDraft.pushPlanProgress(steps, { explanation, explanationFormat });
   };
 
   const updateDraftFromPartial = (text?: string) => {
@@ -503,7 +539,6 @@ export function createSlackProgressRuntime(runtimeParams: {
         return false;
       }
       draftStream?.update(next.rendered);
-      hasStreamedAnswer = true;
       return false;
     }
 
@@ -513,7 +548,6 @@ export function createSlackProgressRuntime(runtimeParams: {
 
     progressDraft.resetActivity({ suppressed: true });
     draftStream?.update(trimmed);
-    hasStreamedAnswer = true;
     return false;
   };
   const pushReasoningProgress = async (payload?: {
@@ -548,7 +582,6 @@ export function createSlackProgressRuntime(runtimeParams: {
     });
   };
   const resetDraftDeliveryState = () => {
-    hasStreamedAnswer = false;
     appendRenderedText = "";
     appendSourceText = "";
   };
@@ -599,9 +632,8 @@ export function createSlackProgressRuntime(runtimeParams: {
             progressDraft.beginAssistantMessage();
             return;
           }
-          if (hasStreamedAnswer) {
-            draftStream?.forceNewMessage();
-          }
+          // Model boundaries do not accept a provisional preview as a reply.
+          // Keep editing it; the draft owner rotates separately when a human speaks.
           resetDraftDeliveryState();
           progressDraft.beginAssistantMessage();
         };
@@ -624,9 +656,10 @@ export function createSlackProgressRuntime(runtimeParams: {
           progressDraft.reset();
         };
   // A queued turn can drain after its dispatch returned, so dispatch closeout is
-  // no longer available to settle the card it published. Leave none in Working.
+  // no longer available to settle its presentation. Quiet preambles are also
+  // temporary: leaving one behind falsely suggests the completed run is working.
   const onQueuedFollowupSettled =
-    !useDraftProgressCard && !useNativeProgressStreaming
+    !useDraftProgressCard && !useNativeProgressStreaming && !preambleOnlyProgress
       ? undefined
       : async () => {
           if (useNativeProgressStreaming) {
@@ -637,6 +670,13 @@ export function createSlackProgressRuntime(runtimeParams: {
                 ? undefined
                 : buildNativeProgressCompletionChunks(nativeProgressTerminalStatus),
             );
+            progressDraft.markFinalReplyDelivered();
+            return;
+          }
+          if (preambleOnlyProgress) {
+            progressDraft.markFinalReplyStarted();
+            await draftStream?.clear();
+            await draftStream?.dropDetachedMessages();
             progressDraft.markFinalReplyDelivered();
             return;
           }
@@ -653,6 +693,7 @@ export function createSlackProgressRuntime(runtimeParams: {
     useNativeProgressStreaming,
     progressDraftActive,
     previewToolProgressEnabled,
+    preambleOnlyProgress,
     suppressDefaultToolProgressMessages,
     progressDraft,
     progressWorkCounter,

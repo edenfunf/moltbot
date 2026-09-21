@@ -4,6 +4,7 @@
  * The public facade lives here; codec, storage, persistence, and branching
  * behavior are split into focused internal modules.
  */
+import path from "node:path";
 import type { AgentMessage } from "../../../packages/agent-core/src/types.js";
 import {
   appendTranscriptMessageSync,
@@ -11,24 +12,26 @@ import {
 } from "../../config/sessions/session-accessor.js";
 import { readSessionTranscriptBoundedActiveContextCore } from "../../config/sessions/session-accessor.sqlite-active-context.js";
 import { prepareTranscriptRewriteSync } from "../../config/sessions/session-accessor.sqlite-branch-rewrite.js";
+import type { SessionTranscriptContextVersion } from "../../config/sessions/session-accessor.sqlite-contract.js";
 import {
   readSessionTranscriptContextMessages,
   readSessionTranscriptModelContext,
+  type SessionModelContextLimits,
   validateSessionTranscriptContextAdmission,
   validateSessionTranscriptContextAnchor,
   validateSessionTranscriptContextVersion,
 } from "../../config/sessions/session-accessor.sqlite-model-context.js";
 import { loadTranscriptReadSnapshotSync } from "../../config/sessions/session-accessor.sqlite-read.js";
-import type { SessionTranscriptContextVersion } from "../../config/sessions/session-accessor.sqlite-transcript-state.js";
 import { assertCurrentSessionTranscriptHeader } from "../../config/sessions/session-entry-codec.js";
-import { readSessionTranscriptModelContextAsync } from "../../config/sessions/session-model-context-worker-runtime.js";
 import {
   resolveSessionTranscriptReadFence,
   withSessionContextAdmission,
 } from "../../config/sessions/session-transcript-read-fence.js";
+import { readSessionTranscriptModelContextAsync } from "../../config/sessions/session-transcript-read-worker-runtime.js";
 import type { TranscriptEntryAnchor } from "../../config/sessions/transcript-entry-anchor.js";
 import { CURRENT_SESSION_VERSION } from "../../config/sessions/version.js";
 import type { Message } from "../../llm/types.js";
+import { isIncognitoSessionKey } from "../../routing/session-key.js";
 import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-turn-transcript.types.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import { SessionManagerBranching } from "./session-manager-branching.js";
@@ -188,14 +191,15 @@ export class SessionManager extends SessionManagerBranching {
         ...(cwdOverride !== undefined ? { cwd: cwdOverride } : {}),
       });
     }
-    const snapshot = loadTranscriptReadSnapshotSync(target);
+    const capturedTarget = { ...target, storePath: path.resolve(target.storePath) };
+    const snapshot = loadTranscriptReadSnapshotSync(capturedTarget);
     const entries = snapshot.events as FileEntry[];
     const header = entries.find(
       (entry) => typeof entry === "object" && entry !== null && entry.type === "session",
     );
     return new SessionManager(
       cwdOverride ?? header?.cwd ?? process.cwd(),
-      target,
+      capturedTarget,
       entries,
       undefined,
       snapshot.version.updatedAt,
@@ -209,7 +213,8 @@ export class SessionManager extends SessionManagerBranching {
     options: SessionManagerBoundedContextLimits & { cwd?: string; onTruncated?: () => void },
   ): SessionManager {
     const { cwd, onTruncated, ...limits } = options;
-    const context = readSessionTranscriptBoundedActiveContextCore(target, limits);
+    const capturedTarget = { ...target, storePath: path.resolve(target.storePath) };
+    const context = readSessionTranscriptBoundedActiveContextCore(capturedTarget, limits);
     if (context.truncated) {
       onTruncated?.();
     }
@@ -218,7 +223,7 @@ export class SessionManager extends SessionManagerBranching {
     const header = entries.find(
       (entry) => typeof entry === "object" && entry !== null && entry.type === "session",
     );
-    return new SessionManager(cwd ?? header?.cwd ?? process.cwd(), target, entries, {
+    return new SessionManager(cwd ?? header?.cwd ?? process.cwd(), capturedTarget, entries, {
       ...context,
       limits,
     });
@@ -244,10 +249,11 @@ export class SessionManager extends SessionManagerBranching {
       cwd?: string;
       admission?: UserTurnTranscriptAdmissionReceipt;
       through?: TranscriptEntryAnchor;
+      limits?: SessionModelContextLimits;
     } = {},
   ): SessionManager {
     const context = withSessionContextAdmission(target, options.admission, () =>
-      readSessionTranscriptModelContext(target, options.through),
+      readSessionTranscriptModelContext(target, options.through, options.limits),
     );
     return SessionManager.fromSelectedEntries(context.events, options.cwd);
   }
@@ -260,14 +266,26 @@ export class SessionManager extends SessionManagerBranching {
       admission?: UserTurnTranscriptAdmissionReceipt;
       signal?: AbortSignal;
       through?: TranscriptEntryAnchor;
+      limits?: SessionModelContextLimits;
     } = {},
   ): Promise<SessionManager> {
     const readTarget = { ...target };
     const receipt = options.admission ?? resolveSessionTranscriptReadFence(readTarget);
     const admission = receipt ? { ...receipt } : undefined;
     const through = options.through ? { ...options.through } : undefined;
+    const limits = options.limits ? { ...options.limits } : undefined;
+    options.signal?.throwIfAborted();
     const context = await withSessionContextAdmission(readTarget, admission, () =>
-      readSessionTranscriptModelContextAsync(readTarget, admission, options.signal, through),
+      // Incognito belongs to this process; capture its snapshot before the first await.
+      isIncognitoSessionKey(readTarget.sessionKey)
+        ? readSessionTranscriptModelContext(readTarget, through, limits)
+        : readSessionTranscriptModelContextAsync(
+            readTarget,
+            admission,
+            options.signal,
+            through,
+            limits,
+          ),
     );
     options.signal?.throwIfAborted();
     // Even process-local reads yield here. Admitted history may exclude later

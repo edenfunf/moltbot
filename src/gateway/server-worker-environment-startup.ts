@@ -39,14 +39,12 @@ import type { WorkerEnvironmentService } from "./worker-environments/service.js"
 import type { WorkerTunnelManager } from "./worker-environments/tunnel.js";
 import type { WorkerBootstrapArtifactTransferHttpCallback } from "./worker-environments/worker-bootstrap-artifact-transfer-http.js";
 import { listRetainedWorkerBundleHashes } from "./worker-environments/worker-bundle-retention.js";
+import type { WorkerSessionToolExecutor } from "./worker-environments/worker-session-tool-result.js";
 
 type WorkerEnvironmentStore = ReturnType<
   typeof import("./worker-environments/store.js").createWorkerEnvironmentStore
 >;
 type WorkerEnvironmentRecord = ReturnType<WorkerEnvironmentStore["list"]>[number];
-type WorkerSessionToolExecutor = ReturnType<
-  typeof import("./worker-environments/worker-session-tool-executor.js").createWorkerSessionToolExecutor
->;
 type WorkerEnvironmentLogger = {
   child: (name: string) => { warn: (message: string) => void };
 };
@@ -57,7 +55,6 @@ export type GatewayWorkerEnvironmentStartupState = {
   records: WorkerEnvironmentRecord[];
   store: WorkerEnvironmentStore;
   placementStore: WorkerSessionPlacementStore;
-  hasNonlocalPlacementRecords: boolean;
 };
 
 export type GatewayWorkerEnvironmentRuntime = {
@@ -116,8 +113,6 @@ export async function loadGatewayWorkerEnvironmentStartupState(): Promise<Gatewa
     records,
     store,
     placementStore,
-    // Non-local placements must revive the worker service even without configured profiles.
-    hasNonlocalPlacementRecords: placementStore.listForReconcile().length > 0,
   };
 }
 
@@ -166,7 +161,7 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
     import("./worker-environments/node-workspace-transfer-http.js"),
     import("./worker-environments/node-desktop-carrier.js"),
     import("./worker-environments/portal-node-carrier.js"),
-    import("./worker-environments/computer-transport.js"),
+    import("./worker-environments/computer-service.js"),
     import("../plugins/worker-provider-registry.js"),
     import("../plugins/worker-provider-maintenance.js"),
     import("./worker-environments/worker-bootstrap-artifact-transfer-service.js"),
@@ -204,7 +199,7 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
       },
     }));
     const bundle = await producer.prepare();
-    await producer.prune(listRetainedBundleHashes());
+    await producer.prune(listRetainedBundleHashes);
     if (install === "bundle") {
       return bundle;
     }
@@ -397,6 +392,7 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
     placements: params.startup.placementStore,
     resolveGatewayContext: params.resolveGatewayContext,
     getNodeTransport: () => deviceRuntime.getNodeTransport(),
+    desktopRegistry: params.desktopSessionRegistry,
     warn: (message) => workerEnvironmentLog.warn(message),
   });
   const preparedWorkspaces = createNodeWorkerPreparedWorkspaceTransport({
@@ -408,8 +404,12 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
   const workerEnvironmentServiceBase = createWorkerEnvironmentService({
     projectNamespace: nodeWorkerGatewayNamespace,
     prepareComputer: computers.prepare,
+    prepareAttachedComputer: computers.prepareAttached,
     executeComputer: computers.execute,
     closeComputers: computers.close,
+    closeEnvironmentComputers: computers.closeEnvironment,
+    hasAttachedEnvironmentActivity: (environmentId, ownerEpoch) =>
+      params.desktopSessionRegistry.hasActivity(environmentId, ownerEpoch),
     store: params.startup.store,
     getConfig: getRuntimeConfig,
     maintainProviders: (signal) =>
@@ -474,6 +474,8 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
     },
     tunnelManager: workerTunnelManager,
     nodeTunnelManager: nodeWorkerTunnelManager,
+    runSessionEnvironmentCommand: (binding, command) =>
+      nodeWorkerTunnelManager.runSessionCommand(binding, command),
     nodeDesktopCarrier: workerNodeDesktopCarrier,
     nodePortalCarrier: workerNodePortalCarrier,
     closeWorkerPortals: async (environmentId, ownerEpoch) => {

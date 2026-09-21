@@ -8,8 +8,31 @@ title: "Anthropic"
 
 Anthropic builds the **Claude** model family. OpenClaw supports two auth routes:
 
-- **API key** - direct Anthropic API access with usage-based billing (`anthropic/*` models)
+- **API key** - Anthropic API access with usage-based billing
 - **Claude CLI** - reuse an existing Claude Code login through the installed executable on the same host
+
+## Choose a model route
+
+The model picker can show **Anthropic** and **Claude CLI** separately. These are
+not interchangeable billing choices: `anthropic/*` is the canonical model
+identity and can run through either runtime; `claude-cli/*` selects the native
+Claude runtime explicitly.
+
+- **API / API · OpenClaw** uses the configured Anthropic API connection.
+- **Claude CLI / Claude CLI · native** runs through Claude Code, using its native
+  login or a selected saved account.
+- **Configured route** means the picker does not have a resolved runtime to show.
+  The provider name alone is not proof of API or subscription billing.
+  An Anthropic Default row also uses this label when it will clear a pinned session runtime:
+  the current session route does not describe the configured route being restored.
+
+The web picker shows route details on hover or keyboard focus. Telegram `/models`
+shows route guidance before selection and labels models when their runtime is
+known. Model IDs and explicit runtime choices remain unchanged.
+
+Check the selected account as well as the runtime. An API key explicitly selected
+for Claude CLI still uses separate API billing. A Claude CLI selection does not
+silently switch to the direct API if the executable cannot run.
 
 ## Usage and cost tracking
 
@@ -119,8 +142,12 @@ OpenClaw release:
         Gateway startup shares the native login availability check across agent
         workspaces using the same config and environment. Explicit catalog/auth
         captures recheck availability for their own generation.
-        Explicitly selected API-key or token credentials still use protected
-        file-descriptor forwarding. Native-tool approvals remain under OpenClaw
+        New sessions select saved subscription credentials by account order and
+        use protected file-descriptor forwarding, including tokens saved with
+        `openclaw models auth paste-token --provider anthropic`. API keys saved for
+        the `anthropic` provider require an explicit account selection for CLI
+        forwarding. Existing sessions keep their account until you select another
+        or remove its saved profile. Native-tool approvals remain under OpenClaw
         control. Schema-valid native calls pass through OpenClaw's canonical
         tool policy before native approval. Isolated side-question completions
         and paired-node execution retain the supervised CLI path.
@@ -129,6 +156,11 @@ OpenClaw release:
         when their authenticated session and execution policy
         match. If that process ends or the gateway restarts, the next turn
         resumes the persisted Claude Code session.
+
+        An explicit Claude CLI model selection stays on that runtime across resumed
+        turns. If the executable cannot run, the selection fails instead of switching
+        to direct Anthropic API access. Selecting an API route or forwarding an API
+        key through an explicit account selection remains a separate billing choice.
       </Step>
       <Step title="Verify the model is available">
         ```bash
@@ -163,6 +195,13 @@ OpenClaw release:
     ```bash
     openclaw models auth login --provider anthropic --method setup-token
     ```
+
+    Direct Messages API requests using a setup token advertise a maintained
+    Claude Code client version, or the installed CLI version when newer.
+    Anthropic uses that identity to gate newer models. A missing, older, or
+    failed CLI probe uses OpenClaw's maintained version floor. Discovery is
+    shared with the CLI backend and cached until process restart; API-key
+    requests do not run the probe.
 
     ### Config example
 
@@ -241,8 +280,8 @@ For Claude CLI authentication, keep that same ref and select the CLI runtime:
 ```
 
 The API and Claude CLI catalogs expose a 1,000,000-token context window and
-128,000-token output limit. Fable 5.1 always uses adaptive thinking, defaults to
-`high`, and supports native `low`, `medium`, `high`, `xhigh`, and `max` effort.
+128,000-token output limit. Fable 5.1 always uses adaptive thinking. OpenClaw defaults to
+`medium`, with native `low`, `medium`, `high`, `xhigh`, and `max` effort available.
 For API-key billing, input and output remain `$10/$50` per million tokens;
 cache reads cost `$0.25` per million tokens, one quarter of Fable 5's rate.
 See Anthropic's [Fable 5.1 specifications](https://platform.claude.com/docs/en/models/fable-5-1/overview).
@@ -458,16 +497,28 @@ per million tokens. Anthropic canceled the previously scheduled September 2026
 increase; see [current model pricing](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
 
 `anthropic/claude-fable-5-1` and `anthropic/claude-fable-5` always use adaptive
-thinking and default to `high` effort. Anthropic does not allow thinking to be
-disabled for these models, so `/think off` and `/think minimal` map to `low`
+thinking. OpenClaw defaults both versions to `medium` effort. Anthropic does not allow thinking to be
+disabled for these models, so stored `off` and `minimal` settings map to `low`
 effort instead. OpenClaw also omits caller-selected sampling parameters for
 both Fable versions.
 
+Fable effort controls offer `low`, `medium`, `high`, `xhigh`, and `max`, matching
+[Anthropic's effort levels](https://platform.claude.com/docs/en/build-with-claude/effort).
+Adaptive thinking is always on; it is not a separate effort choice. Existing
+stored `adaptive` selections resolve to OpenClaw's `medium` default. Custom
+`anthropic-messages` providers use the same profile, including model IDs with
+routing namespaces such as `Claude Gateway/claude-fable-5-1`.
+
 `anthropic/claude-mythos-5` is a limited-access model with the same always-on
-adaptive-thinking contract. OpenClaw defaults to `high`, maps `/think off` and
-`/think minimal` to `low`, and omits caller-selected sampling parameters.
+adaptive-thinking and five-effort contract. OpenClaw defaults to `high`, maps
+stored `off` and `minimal` settings to `low`, and omits caller-selected sampling parameters.
 The catalog publishes its 1,000,000-token context window, 128,000-token output
 limit, image input, and `$10/$50` input/output pricing.
+
+For Fable and Mythos, new `/think minimal` and `/think adaptive` directives are
+rejected with the supported choices. Use `/think low` in place of `minimal`,
+and `/think default` to use the model's default effort. The remapping above
+applies to previously stored settings.
 
 Claude Opus 4.8 keeps thinking off by default in OpenClaw. When you explicitly
 enable adaptive thinking with `/think high|xhigh|max`, OpenClaw sends
@@ -685,8 +736,11 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
 
     OpenClaw adds the `compact-2026-01-12` beta header and sends an Anthropic
     `context_management` compaction edit. When compaction occurs, OpenClaw
-    stores the newest summary as hidden provider replay state and sends it
-    first on the next matching request. The full transcript remains local;
+    assembles the streamed summary and stores it with the provider's opaque
+    compaction metadata as hidden replay state. Both survive session reopening
+    and are sent first on the next matching request. Summary text still passes
+    through transcript redaction; opaque metadata is preserved for replay.
+    The full transcript remains local;
     only the outbound history before the checkpoint is omitted.
     If Anthropic rejects a stored checkpoint, that turn reports the provider
     error and the following turn falls back to full local history.
@@ -810,7 +864,14 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
   </Accordion>
 
   <Accordion title='No API key found for provider "anthropic"'>
-    Anthropic auth is **per agent**; new agents do not inherit the main agent's keys. Re-run onboarding for that agent (or configure an API key on the gateway host), then verify with `openclaw models status`.
+    Agents read shared auth profiles at runtime, with agent-local profiles overriding shared profiles with the same ID. A new agent does not need a separate API key when a usable shared Anthropic profile exists.
+
+    Check the affected agent with `openclaw models status --agent <agentId>`. If no usable credential is available, configure an Anthropic API key on the Gateway host or set up auth for that agent.
+
+    Read-through is separate from copying: non-portable profiles can still be used from the shared store. Explicit copy flows follow the [agent copy portability policy](/auth-credential-semantics#agent-copy-portability).
+
+    Native Claude CLI logins remain owned by Claude Code, not the shared OpenClaw auth store. For that route, use the [Claude CLI setup](/providers/anthropic#getting-started); do not copy native OAuth tokens into OpenClaw.
+
   </Accordion>
 
   <Accordion title='No credentials found for profile "anthropic:default"'>

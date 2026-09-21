@@ -1,7 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { expectDefined } from "@openclaw/normalization-core";
 import type { OpenClawPluginService, WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
+import { createPluginStateKeyedStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
 import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,6 +48,11 @@ describe("Crabbox runtime preflight cleanup", () => {
     )(
       createTestPluginApi({
         id: "crabbox",
+        runtime: createPluginRuntimeMock({
+          state: {
+            openKeyedStore: (options) => createPluginStateKeyedStoreForTests("crabbox", options),
+          },
+        }),
         rootDir: fileURLToPath(new URL("../../../extensions/crabbox/", import.meta.url)),
         registerWorkerProvider: (provider) => {
           registered = provider;
@@ -101,7 +108,9 @@ describe("Crabbox runtime preflight cleanup", () => {
       const service = support.createService(await registerProvider(), {
         prepareNodeEnrollment: vi.fn(),
       });
-      await expect(service.create("development", "fresh-preflight")).rejects.toMatchObject({
+      await expect(
+        service.createWithRequest({ profileId: "development", idempotencyKey: "fresh-preflight" }),
+      ).rejects.toMatchObject({
         code: "provider_failure",
       });
       const failed = expectDefined(support.testState.store.list()[0], "failed fresh intent");
@@ -297,7 +306,11 @@ describe("Crabbox runtime preflight cleanup", () => {
     };
     let service = support.createService(await makeProvider(), { prepareNodeEnrollment });
     await expect(
-      service.create("development", "runtime-replay", undefined, "worker-turn"),
+      service.createWithRequest({
+        profileId: "development",
+        idempotencyKey: "runtime-replay",
+        executionMode: "worker-turn",
+      }),
     ).rejects.toMatchObject({ code: "provider_failure" });
     const original = expectDefined(support.testState.store.list()[0], "unreported allocation");
     expect(original).toMatchObject({ state: "provisioning", leaseId: null });
@@ -387,7 +400,12 @@ describe("Crabbox runtime preflight cleanup", () => {
         });
       const provider = await registerProvider();
       const service = support.createService(provider, { prepareNodeEnrollment: vi.fn() });
-      await expect(service.create("development", "invalid-immutable")).rejects.toMatchObject({
+      await expect(
+        service.createWithRequest({
+          profileId: "development",
+          idempotencyKey: "invalid-immutable",
+        }),
+      ).rejects.toMatchObject({
         code: "invalid_profile",
         message: expect.stringContaining(message),
       });

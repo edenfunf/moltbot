@@ -1,63 +1,23 @@
+import nodePath from "node:path";
 // Memory Core tests cover manager search plugin behavior.
 import type { DatabaseSync } from "node:sqlite";
 import { expectDefined } from "@openclaw/normalization-core";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/memory-core-host-engine-knn";
 import {
   ensureMemoryIndexSchema,
   loadSqliteVecExtension,
   requireNodeSqlite,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { describe, expect, it, vi } from "vitest";
-import { bm25RankToScore, buildFtsQuery } from "./hybrid.js";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { bm25RankToScore, buildFtsQuery } from "./keyword-query.js";
 import { runVectorKnnQuery } from "./manager-search-knn.js";
-import { searchKeyword, searchPathKeyword, searchVector } from "./manager-search.js";
+import { searchKeyword, searchVector } from "./manager-search.js";
+import { createMemorySearchDb, insertKeywordFixture } from "./manager-search.test-support.js";
 import { runMemorySearchWithDeadline } from "./search-deadline.js";
 import { vectorToBlob } from "./vector-blob.js";
 
-function insertKeywordFixture(
-  db: DatabaseSync,
-  params: {
-    id: string;
-    path: string;
-    text?: string;
-    source?: "memory" | "sessions";
-    model?: string;
-    startLine?: number;
-    endLine?: number;
-  },
-): void {
-  const {
-    id,
-    path,
-    text = "unrelated body",
-    source = "memory",
-    model = "mock-embed",
-    startLine = 1,
-    endLine = 2,
-  } = params;
-  db.prepare(
-    "INSERT OR IGNORE INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, 0, 0)",
-  ).run(path, source, `${path}:${source}:hash`);
-  db.prepare(
-    "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(
-    id,
-    path,
-    source,
-    startLine,
-    endLine,
-    `${id}:hash`,
-    model,
-    text,
-    JSON.stringify([0]),
-    Date.now(),
-  );
-  db.prepare(
-    "INSERT INTO memory_index_chunks_fts (text, id, path, source, model, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(text, id, path, source, model, startLine, endLine);
-}
-
 type KeywordSearchOptions = Omit<Parameters<typeof searchKeyword>[0], "db" | "query">;
-type PathSearchOptions = Omit<Parameters<typeof searchPathKeyword>[0], "db" | "query">;
 type VectorSearchOptions = Omit<Parameters<typeof searchVector>[0], "db">;
 
 function searchKeywordFixture(
@@ -71,25 +31,6 @@ function searchKeywordFixture(
     query,
     ftsTokenizer: "unicode61",
     limit: 10,
-    snippetMaxChars: 200,
-    sourceFilter: { sql: "", params: [] },
-    buildFtsQuery,
-    bm25RankToScore,
-    ...options,
-  });
-}
-
-function searchPathKeywordFixture(
-  db: DatabaseSync,
-  query: string,
-  options: Partial<PathSearchOptions> = {},
-) {
-  return searchPathKeyword({
-    db,
-    pathFtsTable: "memory_index_paths_fts",
-    query,
-    ftsTokenizer: "unicode61",
-    limit: 1,
     snippetMaxChars: 200,
     sourceFilter: { sql: "", params: [] },
     buildFtsQuery,
@@ -112,23 +53,6 @@ function searchVectorFixture(db: DatabaseSync, options: Partial<VectorSearchOpti
     sourceFilterChunks: { sql: "", params: [] },
     ...options,
   });
-}
-
-function createMemorySearchDb(options: { ftsTokenizer?: "unicode61" | "trigram" } = {}) {
-  const { DatabaseSync } = requireNodeSqlite();
-  const db = new DatabaseSync(":memory:");
-  try {
-    const schema = ensureMemoryIndexSchema({
-      db,
-      cacheEnabled: false,
-      ftsEnabled: true,
-      ...options,
-    });
-    return { db, schema };
-  } catch (error) {
-    db.close();
-    throw error;
-  }
 }
 
 describe("searchKeyword trigram fallback", () => {
@@ -500,430 +424,67 @@ describe("searchKeyword FTS MATCH fallback", () => {
   });
 });
 
-describe("searchPathKeyword", () => {
-  it("returns the first scoped chunk and reserves exact precedence for path identifiers", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      insertKeywordFixture(db, {
-        id: "memory-late",
-        path: "memory/projects/Project-Lantern.md",
-        startLine: 20,
-        endLine: 25,
-        text: "later unrelated body",
-      });
-      insertKeywordFixture(db, {
-        id: "memory-early",
-        path: "memory/projects/Project-Lantern.md",
-        endLine: 5,
-        text: "early unrelated body",
-      });
-      insertKeywordFixture(db, {
-        id: "session-early",
-        path: "memory/projects/Project-Lantern.md",
-        source: "sessions",
-        text: "session unrelated body",
-      });
-
-      const search = (query: string) =>
-        searchPathKeywordFixture(db, query, {
-          limit: 10,
+describe("searchKeyword ranked limits", () => {
+  it.each(["unicode61", "trigram"] as const)(
+    "stops examining scoped candidates after filling the %s result window",
+    async (ftsTokenizer) => {
+      const { db } = createMemorySearchDb({ ftsTokenizer });
+      try {
+        for (let index = 0; index < 64; index++) {
+          insertKeywordFixture(db, {
+            id: `chunk-${index}`,
+            path: `memory/${index}.md`,
+            text: "common keyword",
+            source: index % 2 === 0 ? "memory" : "sessions",
+          });
+        }
+        let examined = 0;
+        db.function("observe_keyword_candidate", () => {
+          examined++;
+          return 1;
+        });
+        const results = await searchKeywordFixture(db, "common", {
+          ftsTokenizer,
+          limit: 3,
           sourceFilter: {
-            sql: " AND memory_index_paths_fts.source IN (?)",
-            params: ["memory"],
+            sql: " AND source IN (?) AND observe_keyword_candidate() = 1",
+            params: ["sessions"],
           },
         });
+        expect(results.map((row) => row.id)).toEqual(["chunk-1", "chunk-3", "chunk-5"]);
+        expect(examined).toBeLessThanOrEqual(6);
+      } finally {
+        db.close();
+      }
+    },
+  );
 
-      const exact = await search("project-lantern");
-      expect(exact).toHaveLength(1);
-      expect(exact[0]).toMatchObject({
-        id: "memory-early",
-        path: "memory/projects/Project-Lantern.md",
-        source: "memory",
-        startLine: 1,
-        snippet: "early unrelated body",
-        exactPathSpecificity: 1,
-        textScore: 0,
-      });
-      expect(exact[0]?.score).toBe(exact[0]?.pathScore);
-
-      const token = await search("lantern");
-      expect(token).toHaveLength(1);
-      expect(token[0]?.exactPathSpecificity).toBe(0);
-      expect(token[0]?.textScore).toBe(0);
-      expect(token[0]?.score).toBe(token[0]?.pathScore);
-      expect(token[0]?.score).toBeLessThan(1);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("finds an ASCII exact path amid many unrelated source rows", async () => {
-    const { db, schema } = createMemorySearchDb();
+  it("preserves default BM25 scores without changing a configured rank mapping", async () => {
+    const { db } = createMemorySearchDb();
     try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      const unrelatedCount = 256;
-      const insertSource = db.prepare(
-        "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, 'memory', ?, 0, 0)",
-      );
-      for (let index = 0; index < unrelatedCount; index += 1) {
-        insertSource.run(`memory/unrelated-${index}.md`, `unrelated-${index}`);
-      }
-      insertSource.run("memory/project-lantern.notes.md", "near");
       insertKeywordFixture(db, {
-        id: "exact-ascii-path",
-        path: "memory/project-lantern.md",
+        id: "weak",
+        path: "memory/weak.md",
+        text: "common " + "unrelated ".repeat(20),
       });
-
-      const results = await searchPathKeywordFixture(db, "project-lantern");
-
-      expect(results).toMatchObject([{ id: "exact-ascii-path", exactPathSpecificity: 1 }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("skips empty exact sources before applying the exact result limit", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
+      insertKeywordFixture(db, {
+        id: "strong",
+        path: "memory/strong.md",
+        text: "common common common",
+      });
+      const expected = await searchKeywordFixture(db, "common");
+      expect(expected.map((row) => row.id)).toEqual(["strong", "weak"]);
       db.prepare(
-        "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, 0, 0)",
-      ).run("a/foo.md", "memory", "empty-source");
-      insertKeywordFixture(db, {
-        id: "live-exact-source",
-        path: "z/foo.md",
-        text: "live exact source",
-      });
+        "INSERT INTO memory_index_chunks_fts(memory_index_chunks_fts, rank) VALUES ('rank', 'bm25(0.0)')",
+      ).run();
 
-      await expect(
-        searchPathKeyword({
-          db,
-          pathFtsTable: "memory_index_paths_fts",
-          query: "foo",
-          ftsTokenizer: "unicode61",
-          limit: 1,
-          snippetMaxChars: 200,
-          sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
-        }),
-      ).resolves.toMatchObject([{ id: "live-exact-source", exactPathSpecificity: 1 }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("keeps exact basename truncation independent of path BM25", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      for (const fixture of [
-        { id: "exact-a", path: "a/very/deep/foo.md" },
-        { id: "exact-b", path: "b/foo.md" },
-        { id: "exact-c", path: "c/foo.md" },
-      ]) {
-        insertKeywordFixture(db, fixture);
-      }
-
-      const results = await searchPathKeywordFixture(db, "foo.md", {
-        limit: 2,
-      });
-
-      expect(results.map((entry) => entry.id)).toEqual(["exact-a", "exact-b"]);
-      expect(results.every((entry) => entry.textScore === 0)).toBe(true);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("ranks exact full names above last-extension stem collisions", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      for (const fixture of [
-        { id: "foo-stem", path: "a/foo.md.bak" },
-        { id: "foo-basename", path: "z/foo.md" },
-        { id: "bar-stem", path: "a/bar.md" },
-        { id: "bar-basename", path: "z/bar" },
-      ]) {
-        insertKeywordFixture(db, fixture);
-      }
-      const search = (query: string) => searchPathKeywordFixture(db, query);
-
-      await expect(search("foo.md")).resolves.toMatchObject([
-        { id: "foo-basename", exactPathSpecificity: 2 },
-      ]);
-      await expect(search("bar")).resolves.toMatchObject([
-        { id: "bar-basename", exactPathSpecificity: 2 },
-      ]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("keeps mixed-case Unicode exact identifiers in the predicate candidate set", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      for (const fixture of [
-        { id: "cyrillic-near", path: "МОСКВА.notes.md" },
-        { id: "cyrillic-exact", path: "я/Москва.md" },
-        { id: "cyrillic-unrelated", path: "Киев.md" },
-      ]) {
-        insertKeywordFixture(db, fixture);
-      }
-
-      const results = await searchPathKeywordFixture(db, "МОСКВА");
-
-      expect(results).toMatchObject([{ id: "cyrillic-exact", exactPathSpecificity: 1 }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("applies the final exact predicate before limiting multi-dot and Unicode matches", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        throw new Error(schema.ftsError ?? "FTS unavailable");
-      }
-      for (const fixture of [
-        { id: "foo-near", path: "foo.bar.md" },
-        { id: "foo-exact", path: "memory/deep/archive/foo.md" },
-        { id: "unicode-near", path: "CAFÉ.notes.md" },
-        { id: "unicode-exact", path: "memory/deep/Cafe\u0301.md" },
-      ]) {
-        insertKeywordFixture(db, fixture);
-      }
-
-      const search = (query: string) => searchPathKeywordFixture(db, query);
-
-      await expect(search("foo")).resolves.toMatchObject([
-        { id: "foo-exact", exactPathSpecificity: 1 },
-      ]);
-      await expect(search("CAFÉ")).resolves.toMatchObject([
-        { id: "unicode-exact", exactPathSpecificity: 1 },
-      ]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("applies short CJK trigram substring matching to the path table", async () => {
-    const { db, schema } = createMemorySearchDb({ ftsTokenizer: "trigram" });
-    try {
-      if (!schema.ftsAvailable) {
-        return;
-      }
-      insertKeywordFixture(db, {
-        id: "cjk-path",
-        path: "memory/成语-notes.md",
-      });
-      insertKeywordFixture(db, {
-        id: "cjk-exact",
-        path: "memory/成语.md",
-      });
-      insertKeywordFixture(db, {
-        id: "readme-exact",
-        path: "memory/README.md",
-      });
-      insertKeywordFixture(db, {
-        id: "normalized-exact",
-        path: "memory/Cafe\u0301.md",
-      });
-      insertKeywordFixture(db, {
-        id: "tokenless-exact",
-        path: "memory/🧠.md",
-      });
-
-      const results = await searchPathKeywordFixture(db, "成语", {
-        ftsTokenizer: "trigram",
-        limit: 10,
-      });
-
-      expect(results.map((entry) => entry.id)).toEqual(["cjk-exact", "cjk-path"]);
-      await expect(
-        searchPathKeyword({
-          db,
-          pathFtsTable: "memory_index_paths_fts",
-          query: "成语.md",
-          ftsTokenizer: "trigram",
-          limit: 1,
-          snippetMaxChars: 200,
-          sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
-        }),
-      ).resolves.toMatchObject([{ id: "cjk-exact", exactPathSpecificity: 2 }]);
-      await expect(
-        searchPathKeyword({
-          db,
-          pathFtsTable: "memory_index_paths_fts",
-          query: "README.md",
-          ftsTokenizer: "trigram",
-          limit: 1,
-          snippetMaxChars: 200,
-          sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
-        }),
-      ).resolves.toMatchObject([{ id: "readme-exact", exactPathSpecificity: 2 }]);
-      await expect(
-        searchPathKeyword({
-          db,
-          pathFtsTable: "memory_index_paths_fts",
-          query: "CAFÉ",
-          ftsTokenizer: "trigram",
-          limit: 1,
-          snippetMaxChars: 200,
-          sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
-        }),
-      ).resolves.toMatchObject([{ id: "normalized-exact", exactPathSpecificity: 1 }]);
-      await expect(
-        searchPathKeyword({
-          db,
-          pathFtsTable: "memory_index_paths_fts",
-          query: "🧠",
-          ftsTokenizer: "trigram",
-          limit: 1,
-          snippetMaxChars: 200,
-          sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
-        }),
-      ).resolves.toMatchObject([{ id: "tokenless-exact", exactPathSpecificity: 1 }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("case-folds short Cyrillic and Greek trigram terms", async () => {
-    const { db, schema } = createMemorySearchDb({ ftsTokenizer: "trigram" });
-    try {
-      if (!schema.ftsAvailable) {
-        return;
-      }
-      for (const fixture of [
-        { id: "cyrillic-short", path: "memory/Москва-notes.md" },
-        { id: "greek-short", path: "memory/Αθήνα-notes.md" },
-        { id: "cyrillic-negative", path: "memory/Мир.md" },
-        { id: "greek-negative", path: "memory/Αλφα.md" },
-      ]) {
-        insertKeywordFixture(db, fixture);
-      }
+      await expect(searchKeywordFixture(db, "common")).resolves.toEqual(expected);
       expect(
-        db.prepare("SELECT 1 FROM memory_index_paths_fts WHERE path LIKE ? LIMIT 1").get("%МО%"),
-      ).toBeUndefined();
-      expect(
-        db.prepare("SELECT 1 FROM memory_index_paths_fts WHERE path LIKE ? LIMIT 1").get("%ΑΘ%"),
-      ).toBeUndefined();
-      const search = (query: string) =>
-        searchPathKeywordFixture(db, query, {
-          ftsTokenizer: "trigram",
-        });
-
-      await expect(search("МО")).resolves.toMatchObject([
-        { id: "cyrillic-short", exactPathSpecificity: 0 },
-      ]);
-      await expect(search("ΑΘ")).resolves.toMatchObject([
-        { id: "greek-short", exactPathSpecificity: 0 },
-      ]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("bridges NFC trigram queries to partial NFD path spellings", async () => {
-    const { db, schema } = createMemorySearchDb({ ftsTokenizer: "trigram" });
-    try {
-      if (!schema.ftsAvailable) {
-        return;
-      }
-      insertKeywordFixture(db, {
-        id: "normalized-partial",
-        path: "memory/Cafe\u0301-notes.md",
-      });
-      const search = (query: string) =>
-        searchPathKeywordFixture(db, query, {
-          ftsTokenizer: "trigram",
-          limit: 10,
-        });
-
-      for (const query of ["Café", "fé"]) {
-        const results = await search(query);
-        expect(results).toMatchObject([{ id: "normalized-partial", exactPathSpecificity: 0 }]);
-      }
-    } finally {
-      db.close();
-    }
-  });
-
-  it("matches partial Unicode path text with the default unicode61 tokenizer", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        return;
-      }
-      insertKeywordFixture(db, {
-        id: "unicode61-partial",
-        path: "memory/Café.md",
-      });
-
-      const search = (query: string) => searchPathKeywordFixture(db, query);
-
-      for (const query of ["afé", "AFE\u0301", "memory afé"]) {
-        await expect(search(query)).resolves.toMatchObject([
-          { id: "unicode61-partial", exactPathSpecificity: 0 },
-        ]);
-      }
-      await expect(search("emory afé")).resolves.toEqual([]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("bounds exact-path headroom independently from lexical candidates", async () => {
-    const { db, schema } = createMemorySearchDb();
-    try {
-      if (!schema.ftsAvailable) {
-        return;
-      }
-      for (let index = 0; index < 205; index += 1) {
-        insertKeywordFixture(db, {
-          id: `duplicate-${index}`,
-          path: `memory/duplicates/${index.toString().padStart(3, "0")}/README.md`,
-        });
-      }
-      for (let index = 0; index < 6; index += 1) {
-        insertKeywordFixture(db, {
-          id: `partial-${index}`,
-          path: `memory/partial/${index}/notes-README.md.bak`,
-        });
-      }
-
-      const results = await searchPathKeywordFixture(db, "README.md", {
-        exactPathLimit: 200,
-        limit: 4,
-      });
-
-      expect(results).toHaveLength(204);
-      expect(results.filter((entry) => entry.exactPathSpecificity === 2)).toHaveLength(200);
-      expect(results.filter((entry) => entry.exactPathSpecificity === 0)).toHaveLength(4);
+        db
+          .prepare("SELECT rank FROM memory_index_chunks_fts WHERE memory_index_chunks_fts MATCH ?")
+          .all("common")
+          .map((row) => row.rank),
+      ).toEqual([-0, -0]);
     } finally {
       db.close();
     }
@@ -1007,6 +568,7 @@ describe("searchKeyword cross-model FTS visibility (issue #48300)", () => {
 
 describe("searchVector sqlite-vec KNN", () => {
   const { DatabaseSync } = requireNodeSqlite();
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   it("yields to the event loop during large fallback scans (issue #81172)", async () => {
     // Real Nextcloud-scale corpus where the vec0 fast path is unavailable
@@ -1084,38 +646,38 @@ describe("searchVector sqlite-vec KNN", () => {
         });
       }
 
-      let scannedBatches = 0;
-      const countedDb = {
-        prepare: (sql: string) => {
-          const statement = db.prepare(sql);
-          if (!sql.includes("SELECT rowid, id, path")) {
-            return statement;
-          }
-          return {
-            all: (...args: Parameters<typeof statement.all>) => {
-              scannedBatches += 1;
-              return statement.all(...args);
-            },
-          };
-        },
-      } as unknown as DatabaseSync;
+      let scannedRows = 0;
+      db.function("observe_embedding", (embedding) => {
+        scannedRows += 1;
+        return embedding;
+      });
+      db.exec(`
+        ALTER TABLE memory_index_chunks RENAME TO observed_chunks;
+        CREATE VIEW memory_index_chunks AS
+          SELECT rowid, id, path, source, start_line, end_line, model, text,
+                 observe_embedding(embedding) AS embedding
+          FROM observed_chunks;
+      `);
       const caller = new AbortController();
       const abortReason = new Error("caller stopped memory search");
       const pending = runMemorySearchWithDeadline({
         timeoutMs: 5_000,
         parentSignal: caller.signal,
-        run: async (signal) => await searchVectorFixture(countedDb, { signal }),
+        run: async (signal) => await searchVectorFixture(db, { signal }),
       });
       setImmediate(() => caller.abort(abortReason));
 
       await expect(pending).rejects.toBe(abortReason);
+      const rowsAtAbort = scannedRows;
+      expect(rowsAtAbort).toBeGreaterThan(0);
+      expect(rowsAtAbort).toBeLessThan(4096);
       await new Promise<void>((resolve) => {
         setImmediate(resolve);
       });
       await new Promise<void>((resolve) => {
         setImmediate(resolve);
       });
-      expect(scannedBatches).toBe(1);
+      expect(scannedRows).toBe(rowsAtAbort);
 
       const healthyResults = await searchVectorFixture(db, { limit: 1 });
       expect(healthyResults.map((result) => result.id)).toEqual(["chunk-4095"]);
@@ -1349,6 +911,210 @@ describe("searchVector sqlite-vec KNN", () => {
       db.close();
     }
   });
+
+  it("keeps scored payloads and equal-score ordering when chunks change between batches", async () => {
+    const db = createFallbackDb();
+    try {
+      for (let index = 0; index < 257; index += 1) {
+        insertFallbackChunk(db, {
+          id: `chunk-${index}`,
+          model: "target-model",
+          vector: index < 2 || index === 256 ? [1, 0] : [0, 1],
+        });
+      }
+      db.prepare("UPDATE memory_index_chunks SET text = ? WHERE id = ?").run(
+        "old 😀 text",
+        "chunk-0",
+      );
+      const changed = new Promise<void>((resolve) => {
+        setImmediate(() => {
+          db.prepare("UPDATE memory_index_chunks SET text = ?, embedding = ? WHERE id = ?").run(
+            "replacement",
+            "[0,1]",
+            "chunk-0",
+          );
+          resolve();
+        });
+      });
+
+      const results = await searchVectorFixture(db, { limit: 2, snippetMaxChars: 5 });
+      await changed;
+      expect(results).toEqual([
+        {
+          id: "chunk-0",
+          path: "memory/chunk-0.md",
+          startLine: 1,
+          endLine: 1,
+          score: 1,
+          snippet: "old ",
+          source: "memory",
+        },
+        {
+          id: "chunk-1",
+          path: "memory/chunk-1.md",
+          startLine: 1,
+          endLine: 1,
+          score: 1,
+          snippet: "chunk",
+          source: "memory",
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reads contender payloads from the scored batch snapshot during external writes", async () => {
+    const filename = nodePath.join(tempDirs.make("memory-search-snapshot-"), "memory.sqlite");
+    const db = new DatabaseSync(filename);
+    const writer = new DatabaseSync(filename);
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      ensureMemoryIndexSchema({ db, cacheEnabled: false, ftsEnabled: false });
+      insertFallbackChunk(db, { id: "winner", model: "target-model", vector: [1, 0] });
+      db.exec(`
+        ALTER TABLE memory_index_chunks RENAME TO observed_chunks;
+        CREATE VIEW memory_index_chunks AS
+          SELECT rowid, id, path, source, start_line, end_line, model, text,
+                 observe_embedding(embedding) AS embedding
+          FROM observed_chunks;
+      `);
+      let replaced = false;
+      db.function("observe_embedding", (embedding) => {
+        if (!replaced) {
+          writer
+            .prepare("UPDATE observed_chunks SET text = ?, embedding = ? WHERE id = ?")
+            .run("replacement payload", "[0,1]", "winner");
+          replaced = true;
+        }
+        return embedding;
+      });
+
+      const results = await searchVectorFixture(db, { limit: 1 });
+      expect(replaced).toBe(true);
+      expect(results[0]).toMatchObject({ id: "winner", score: 1, snippet: "chunk winner" });
+      expect(writer.prepare("SELECT text FROM observed_chunks").get()?.text).toBe(
+        "replacement payload",
+      );
+    } finally {
+      writer.close();
+      db.close();
+    }
+  });
+
+  it.each(
+    ["UTF-8", "UTF-16le", "UTF-16be"].flatMap((encoding) =>
+      ["KNN", "fallback"].map((mode) => ({ encoding, mode })),
+    ),
+  )(
+    "bounds $mode body fetches while preserving snippets in a $encoding database",
+    async ({ encoding, mode }) => {
+      const db = new DatabaseSync(":memory:", { allowExtension: true });
+      try {
+        db.exec(`PRAGMA encoding = '${encoding}'`);
+        const loaded = await loadSqliteVecExtension({ db });
+        expect(loaded.ok, loaded.error).toBe(true);
+        ensureMemoryIndexSchema({ db, cacheEnabled: false, ftsEnabled: false });
+        db.exec(`CREATE VIRTUAL TABLE memory_index_chunks_vec USING vec0(
+          id TEXT PRIMARY KEY, embedding FLOAT[2]
+        )`);
+        const texts = [
+          "",
+          "brief",
+          "\0before and after\0",
+          "abc😀de",
+          "😀😀😀😀",
+          "中文é\u0301\u2003memory",
+          "\ud800unpaired\udfff",
+          "a".repeat(2_799) + "😀" + "tail".repeat(4_000),
+          "a".repeat(699) + "\0" + "tail".repeat(4_000),
+          "文".repeat(16_000),
+        ];
+        for (const [index, text] of texts.entries()) {
+          const id = `snippet-${index}`;
+          insertFallbackChunk(db, { id, model: "target-model", vector: [1, index / 10] });
+          db.prepare("UPDATE memory_index_chunks SET text = ? WHERE id = ?").run(text, id);
+          db.prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)").run(
+            id,
+            vectorToBlob([1, index / 10]),
+          );
+        }
+        // Read stored text first: the SQLite binding normalizes unpaired surrogates.
+        const stored = db.prepare("SELECT id, text FROM memory_index_chunks ORDER BY rowid").all();
+        let fetchedBytes = 0;
+        const prepare = db.prepare.bind(db);
+        const prepareSpy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+          const statement = prepare(sql);
+          statement.get = new Proxy(statement.get.bind(statement), {
+            apply(get, _receiver, values) {
+              const row = get(...values);
+              if (typeof row?.text === "string") {
+                fetchedBytes += Buffer.byteLength(row.text);
+              }
+              return row;
+            },
+          });
+          statement.all = new Proxy(statement.all.bind(statement), {
+            apply(all, _receiver, values) {
+              const rows = all(...values);
+              for (const row of rows) {
+                if (typeof row.text === "string") {
+                  fetchedBytes += Buffer.byteLength(row.text);
+                }
+              }
+              return rows;
+            },
+          });
+          return statement;
+        });
+        try {
+          const snippetLimits = [1, 2, 3, 4, 7, 700];
+          for (const snippetMaxChars of snippetLimits) {
+            const results = await searchVectorFixture(db, {
+              limit: texts.length,
+              snippetMaxChars,
+              ensureVectorReady: async () => mode === "KNN",
+            });
+            expect(results.map(({ id, snippet }) => ({ id, snippet }))).toEqual(
+              stored.map(({ id, text }) => ({
+                id,
+                snippet: truncateUtf16Safe(String(text), snippetMaxChars),
+              })),
+            );
+          }
+          // Allow encoding expansion without materializing complete chunk bodies.
+          const totalSnippetLimit = snippetLimits.reduce((sum, limit) => sum + limit, 0);
+          expect(fetchedBytes).toBeLessThanOrEqual(texts.length * totalSnippetLimit * 8);
+          if (mode === "fallback") {
+            for (const snippetMaxChars of [
+              0,
+              -1,
+              1.5,
+              Number.NaN,
+              Infinity,
+              Number.MAX_SAFE_INTEGER,
+              Number.MAX_SAFE_INTEGER + 1,
+            ]) {
+              const results = await searchVectorFixture(db, {
+                limit: texts.length,
+                snippetMaxChars,
+              });
+              expect(results.map(({ id, snippet }) => ({ id, snippet }))).toEqual(
+                stored.map(({ id, text }) => ({
+                  id,
+                  snippet: truncateUtf16Safe(String(text), snippetMaxChars),
+                })),
+              );
+            }
+          }
+        } finally {
+          prepareSpy.mockRestore();
+        }
+      } finally {
+        db.close();
+      }
+    },
+  );
 
   it("falls back when filters hide matches beyond sqlite-vec's KNN cap", async () => {
     const db = new DatabaseSync(":memory:", { allowExtension: true });

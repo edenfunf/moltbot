@@ -1,18 +1,15 @@
-import type { QueueMode } from "../../../../packages/gateway-protocol/src/schema/logs-chat.js";
-import { GatewayRequestError } from "../../api/gateway.ts";
+import type { GatewayEventFrame } from "../../api/gateway.ts";
 import { t } from "../../i18n/index.ts";
+import { registerChatGoalsEnglish } from "../../i18n/locales/en-chat-goals.ts";
 import {
   chatQueueMovableSegments,
   isMovableChatQueueItem,
   reorderChatQueueItems,
 } from "../../lib/chat/chat-queue-order.ts";
-import type { ChatAttachment, ChatQueueItem, HumanMention } from "../../lib/chat/chat-types.ts";
-import { trimHumanMentions } from "../../lib/chat/human-mentions.ts";
+import type { ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import { hasUiSessionDefaults } from "../../lib/sessions/session-key.ts";
 import { generateUUID } from "../../lib/uuid.ts";
-import { loadChatBranches } from "./chat-history-branches.ts";
 import { isInitialChatHistoryUnavailable } from "./chat-history-state.ts";
-import { loadChatHistory } from "./chat-history.ts";
 import {
   flushStoredChatOutbox,
   resumeStoredChatOutboxes as resumeStoredChatOutboxesDrain,
@@ -34,83 +31,16 @@ import {
   reconnectSafeQueuedSendState,
   setChatError,
 } from "./chat-send-queue-state.ts";
-import {
-  isActiveLeafChangedError,
-  requestChatSend,
-  resolveDisplayedLeafEntryId,
-} from "./chat-send-request.ts";
 import { OFFLINE_QUEUE_STORAGE_ERROR } from "./chat-send-support.ts";
-import type { ChatHistoryHost } from "./chat-state-contract.ts";
 import { storedChatOutboxScopeKey } from "./composer-persistence.ts";
-import { formatConnectError } from "./connect-error.ts";
 import {
-  activeQueuedMessageEdit,
   isQueuedMessageBeingEdited,
   QUEUED_MESSAGE_RETRY_CONFLICT_ERROR,
   QUEUED_MESSAGE_REORDER_CONFLICT_ERROR,
   QUEUED_MESSAGE_STEER_CONFLICT_ERROR,
 } from "./queued-message-edit.ts";
 
-function applyChatSendError(
-  state: ChatHistoryHost,
-  err: unknown,
-  canApplyError: () => boolean,
-): string {
-  const error = isActiveLeafChangedError(err)
-    ? t("chat.sendErrors.activeLeafChanged")
-    : formatConnectError(err);
-  if (canApplyError()) {
-    setChatError(state, error);
-    if (isActiveLeafChangedError(err)) {
-      void Promise.all([loadChatHistory(state), loadChatBranches(state)]);
-    }
-  }
-  return error;
-}
-
-export async function sendChatMessageWithGeneratedRunId(
-  state: ChatHistoryHost,
-  message: string,
-  attachments?: ChatAttachment[],
-  options: {
-    canApplyError?: () => boolean;
-    expectedLeafEntryId?: string | null;
-    mentions?: readonly HumanMention[];
-    queueMode?: QueueMode;
-    replyToId?: string;
-    runId?: string;
-  } = {},
-) {
-  const submitted = trimHumanMentions(message, options.mentions);
-  if (!state.client || !state.connected || (!submitted.text && !attachments?.length)) {
-    return null;
-  }
-  const canApplyError = options.canApplyError ?? (() => true);
-  if (canApplyError()) {
-    setChatError(state, null);
-  }
-  const runId = options.runId ?? generateUUID();
-  // Direct sends fail closed on the authoritative leaf; restored drains omit it.
-  const expectedLeafEntryId = resolveDisplayedLeafEntryId(state);
-  try {
-    return await requestChatSend(state, {
-      message: submitted.text,
-      mentions: submitted.mentions,
-      attachments,
-      runId,
-      ...(options.queueMode !== "steer" && options.expectedLeafEntryId !== undefined
-        ? { expectedLeafEntryId: options.expectedLeafEntryId }
-        : options.queueMode !== "steer" && expectedLeafEntryId !== undefined
-          ? { expectedLeafEntryId }
-          : {}),
-      ...(options.queueMode ? { queueMode: options.queueMode } : {}),
-      ...(options.replyToId ? { replyToId: options.replyToId } : {}),
-    });
-  } catch (err) {
-    const error = applyChatSendError(state, err, canApplyError);
-    return err instanceof GatewayRequestError ? { kind: "rejected" as const, error } : null;
-  }
-}
+registerChatGoalsEnglish();
 
 const resetRetryState = (
   entry: ChatQueueItem,
@@ -156,16 +86,14 @@ export async function steerQueuedChatMessage(host: ChatHost, id: string): Promis
   await retryQueuedChatMessage(host, id);
 }
 
-export const resumeStoredChatOutboxes = (host: ChatHost) =>
-  resumeStoredChatOutboxesDrain(host, chatOutboxDrainDependencies);
+export const resumeStoredChatOutboxes = (host: ChatHost, event?: GatewayEventFrame) =>
+  resumeStoredChatOutboxesDrain(host, chatOutboxDrainDependencies, event);
 
 export const flushChatQueueForEvent = (host: ChatHost) =>
   flushStoredChatOutbox(host, chatOutboxDrainDependencies);
 
-export const retryReconnectableQueuedChatSends = resumeStoredChatOutboxes;
-
 /**
- * Moves a queued row to `toIndex` within its own movable segment. A locked row
+ * Moves a queued row to the target row's position in its own movable segment. A locked row
  * ends that segment, so the move can never carry a message past work the drain
  * is still waiting on. Every changed row commits as one durable unit, so a
  * storage failure mid-permutation leaves the prior order intact instead of a
@@ -176,7 +104,7 @@ type ChatQueueMoveResult = "moved" | "rejected" | "noop";
 export function moveQueuedChatMessage(
   host: ChatHost,
   id: string,
-  toIndex: number,
+  targetId: string,
 ): ChatQueueMoveResult {
   const owner = chatOutboxOwner(host);
   const located = owner.locate(host, id);
@@ -188,37 +116,27 @@ export function moveQueuedChatMessage(
     return "rejected";
   }
   const scope = owner.snapshot(host, located.scope);
-  // This pane already excludes its own edited row from rendered move indices,
-  // but cannot see edits owned by peers. Rebuild that exact offered index space
-  // so a peer-edit barrier is distinguishable from an ordinary no-op.
-  const localEditId = activeQueuedMessageEdit(host)?.id;
-  const offeredSegment = chatQueueMovableSegments(
-    scope,
-    (row) => isMovableChatQueueItem(row) && row.id !== localEditId,
-  ).find((rows) => rows.some((row) => row.id === id));
+  // Stable targets survive display filtering and intervening queue changes.
+  // Inspect edits before splitting so crossing a peer's edit remains a visible conflict.
+  const offeredSegment = chatQueueMovableSegments(scope).find((rows) =>
+    rows.some((row) => row.id === id),
+  );
   const fromIndex = offeredSegment?.findIndex((row) => row.id === id) ?? -1;
-  const requestedIndex = offeredSegment
-    ? Math.min(Math.max(toIndex, 0), offeredSegment.length - 1)
-    : -1;
-  if (fromIndex < 0 || fromIndex === requestedIndex) {
+  const requestedIndex = offeredSegment?.findIndex((row) => row.id === targetId) ?? -1;
+  if (fromIndex < 0 || requestedIndex < 0 || fromIndex === requestedIndex) {
     return "noop";
   }
-  const crossedPeerEdit = offeredSegment!.some(
-    (row, index) =>
-      index >= Math.min(fromIndex, requestedIndex) &&
-      index <= Math.max(fromIndex, requestedIndex) &&
-      row.id !== id &&
-      isQueuedMessageBeingEdited(host, row.id),
-  );
+  const crossedPeerEdit = offeredSegment!
+    .slice(Math.min(fromIndex, requestedIndex), Math.max(fromIndex, requestedIndex) + 1)
+    .some((row) => isQueuedMessageBeingEdited(host, row.id));
   if (crossedPeerEdit) {
     setChatError(host, QUEUED_MESSAGE_REORDER_CONFLICT_ERROR);
     return "rejected";
   }
   const segment = chatQueueMovableSegments(
-    scope,
-    (row) => isMovableChatQueueItem(row) && !isQueuedMessageBeingEdited(host, row.id),
+    offeredSegment!,
+    (row) => !isQueuedMessageBeingEdited(host, row.id),
   ).find((rows) => rows.some((row) => row.id === id));
-  const targetId = offeredSegment![requestedIndex]?.id;
   const segmentTargetIndex = segment?.findIndex((row) => row.id === targetId) ?? -1;
   const moves = reorderChatQueueItems(segment ?? [], id, segmentTargetIndex);
   if (moves.length === 0) {
@@ -235,11 +153,20 @@ export function moveQueuedChatMessage(
     setChatError(host, OFFLINE_QUEUE_STORAGE_ERROR);
     return "rejected";
   }
+  for (const key of ["lastError", "chatError"] as const) {
+    if (host[key] === QUEUED_MESSAGE_REORDER_CONFLICT_ERROR) {
+      host[key] = null;
+    }
+  }
   return "moved";
 }
 
-export async function retryQueuedChatMessage(host: ChatHost, id: string) {
-  if (isInitialChatHistoryUnavailable(host)) {
+export async function retryQueuedChatMessage(
+  host: ChatHost,
+  id: string,
+  canDispatch?: () => boolean,
+) {
+  if (isInitialChatHistoryUnavailable(host) || (canDispatch && !canDispatch())) {
     return;
   }
   const item = host.chatQueue.find((entry) => entry.id === id);
@@ -254,6 +181,7 @@ export async function retryQueuedChatMessage(host: ChatHost, id: string) {
     !item ||
     item.pendingRunId ||
     item.sendState === "executing-command" ||
+    item.sendState === "submitting" ||
     item.sendState === "sending" ||
     item.sendState === "waiting-model"
   ) {
@@ -285,6 +213,7 @@ export async function retryQueuedChatMessage(host: ChatHost, id: string) {
         await deliverChatQueueItem(host, retry, {
           routingSessionKey: retry.sessionKey ?? host.sessionKey,
           storageMode: "memory",
+          canDispatch,
         });
         return;
       }
@@ -314,6 +243,7 @@ export async function retryQueuedChatMessage(host: ChatHost, id: string) {
     explicitAdmission
       ? {
           routingSessionKey: host.sessionKey,
+          canDispatch,
           ...(retriesFailedDelivery ? { allowActiveRunSend: true } : {}),
         }
       : undefined,

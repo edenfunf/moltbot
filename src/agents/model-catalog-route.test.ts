@@ -11,7 +11,7 @@ import type { ProviderDefaultThinkingPolicyContext } from "../plugins/provider-t
 import {
   type ModelCatalogRoutePolicy,
   projectModelCatalogEntryForRoute,
-  resolveConfiguredModelCatalogOverrides,
+  createConfiguredModelCatalogOverridesResolver,
 } from "./model-catalog-route.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "./model-catalog.types.js";
 
@@ -78,13 +78,24 @@ describe("projectModelCatalogEntryForRoute", () => {
     const { entry: publicEntry, runtimeEntry } = projectModelCatalogEntryForRoute({
       entry,
       projection: { kind: "selected", route: chatGPTRoute, policy: routePolicy },
-      catalog: [platformEntry, chatGPTEntry],
+      catalog: [
+        platformEntry,
+        {
+          ...chatGPTEntry,
+          contextWindows: [{ id: "native", label: "Native", contextWindow: 400_000 }],
+          contextWindowDefault: "native",
+        },
+      ],
     });
     expect(runtimeEntry.params).toEqual({ chatGPTOnly: true });
     expect(runtimeEntry.compat).toEqual({ supportsTools: true });
     expect(runtimeEntry.contextWindow).toBe(400_000);
     expect(publicEntry).not.toHaveProperty("params");
     expect(publicEntry).not.toHaveProperty("compat");
+    expect(publicEntry.contextWindows).toEqual([
+      { id: "native", label: "Native", contextWindow: 400_000 },
+    ]);
+    expect(runtimeEntry.contextWindowDefault).toBe("native");
   });
 
   it("projects one physical row onto the selected route capabilities", () => {
@@ -267,7 +278,7 @@ describe("projectModelCatalogEntryForRoute", () => {
         },
       },
     } as unknown as OpenClawConfig;
-    const overrides = resolveConfiguredModelCatalogOverrides({ cfg, entry: platformEntry });
+    const overrides = createConfiguredModelCatalogOverridesResolver({ cfg })(platformEntry);
 
     expect(
       projectModelCatalogEntryForRoute({
@@ -318,7 +329,7 @@ describe("projectModelCatalogEntryForRoute", () => {
     };
 
     expect(
-      resolveConfiguredModelCatalogOverrides({ cfg, entry: { ...platformEntry, id } }),
+      createConfiguredModelCatalogOverridesResolver({ cfg })({ ...platformEntry, id }),
     ).toEqual({
       name: id,
       contextWindow: 32_000,
@@ -381,14 +392,12 @@ describe("projectModelCatalogEntryForRoute", () => {
         },
       };
 
-      for (const id of ["gpt-5.5", "openai/gpt-5.5"]) {
-        expect(
-          resolveConfiguredModelCatalogOverrides({
-            cfg,
-            entry: { ...platformEntry, id },
-            policy: canonicalPolicy,
-          }),
-        ).toEqual(
+      const resolveOverrides = createConfiguredModelCatalogOverridesResolver({
+        cfg,
+        policy: canonicalPolicy,
+      });
+      for (const id of ["gpt-5.5", "openai/gpt-5.5", "gpt-5.5"]) {
+        expect(resolveOverrides({ ...platformEntry, id })).toEqual(
           exact
             ? {
                 name: "Logical row",
@@ -410,6 +419,40 @@ describe("projectModelCatalogEntryForRoute", () => {
     },
   );
 
+  it("keeps reused lookups scoped to raw provider spelling without retaining query entries", () => {
+    const cfg: OpenClawConfig = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "",
+            models: ["first", "second"].map((id) => ({
+              id,
+              name: id,
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              maxTokens: 4096,
+            })),
+          },
+        },
+      },
+    };
+    const policy: ModelCatalogRoutePolicy = {
+      ...routePolicy,
+      resolveIdentity: ({ provider, id }) => ({
+        id: id === "alias" ? (provider === "CUSTOM" ? "second" : "first") : id,
+        key: JSON.stringify([provider, id]),
+      }),
+    };
+    const resolveOverrides = createConfiguredModelCatalogOverridesResolver({ cfg, policy });
+    const query = { provider: "custom", id: "first" };
+    expect(resolveOverrides(query)?.name).toBe("first");
+    query.provider = "CUSTOM";
+    query.id = "alias";
+    expect(resolveOverrides(query)?.name).toBe("second");
+    expect(resolveOverrides({ provider: "custom", id: "alias" })?.name).toBe("first");
+  });
+
   it("preserves literal provider-scoped model ids", () => {
     const cfg = {
       models: {
@@ -423,11 +466,7 @@ describe("projectModelCatalogEntryForRoute", () => {
     const literalEntry = { ...platformEntry, id: "openai/acme-model" };
 
     expect(
-      resolveConfiguredModelCatalogOverrides({
-        cfg,
-        entry: literalEntry,
-        policy: routePolicy,
-      }),
+      createConfiguredModelCatalogOverridesResolver({ cfg, policy: routePolicy })(literalEntry),
     ).toEqual({ name: "Configured Acme" });
   });
 });

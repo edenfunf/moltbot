@@ -392,6 +392,27 @@ async function pickProviderTokenMethod(params: {
     .then((id) => tokenMethods.find((method) => method.id === id) ?? null);
 }
 
+async function refreshProviderAuthAfterLogin(
+  params: Pick<
+    ModelsAuthLoginFlowOptions,
+    "refreshAfterLogin" | "runtime" | "signal" | "assertCurrent"
+  > & {
+    agentId: string;
+  },
+): Promise<ModelAuthRefreshOutcome> {
+  if (!params.refreshAfterLogin) {
+    return refreshRunningGatewayAuthState(params.agentId, "login", params.runtime);
+  }
+  try {
+    await params.refreshAfterLogin(params.agentId);
+    return "refreshed";
+  } catch {
+    params.signal?.throwIfAborted();
+    params.assertCurrent?.();
+    return "gateway-rejected";
+  }
+}
+
 async function persistProviderAuthResult(params: {
   result: ProviderAuthResult;
   profiles?: ProviderAuthResult["profiles"];
@@ -405,6 +426,7 @@ async function persistProviderAuthResult(params: {
   env?: NodeJS.ProcessEnv;
   beforePersistentEffect?: () => void | Promise<void>;
   assertCurrent?: () => void;
+  signal?: AbortSignal;
   refreshAfterLogin?: ModelsAuthLoginFlowOptions["refreshAfterLogin"];
 }): Promise<{ profiles: ProviderAuthResult["profiles"]; authRefresh: ModelAuthRefreshOutcome }> {
   const defaultModel = params.result.defaultModel
@@ -467,7 +489,7 @@ async function persistProviderAuthResult(params: {
         configSnapshot: params.configSnapshot,
         configPatch,
         credentialsSaved: persistedProfiles.length > 0,
-        beforeCommit: params.assertCurrent,
+        writeOptions: { assertCurrent: params.assertCurrent },
         finalizeConfig: (replayed, cfg) => {
           const priorAgentsDefaultsModel = cfg.agents?.defaults?.model;
           const next = restorePriorAgentsDefaultsModelUnlessOptIn({
@@ -499,13 +521,7 @@ async function persistProviderAuthResult(params: {
       logConfigUpdated(params.runtime);
     }
 
-    let authRefresh: ModelAuthRefreshOutcome;
-    if (params.refreshAfterLogin) {
-      await params.refreshAfterLogin(params.agentId);
-      authRefresh = "refreshed";
-    } else {
-      authRefresh = await refreshRunningGatewayAuthState(params.agentId, "login", params.runtime);
-    }
+    const authRefresh = await refreshProviderAuthAfterLogin(params);
 
     for (const profile of persistedProfiles) {
       params.runtime.log(
@@ -659,6 +675,7 @@ async function runProviderAuthMethod(params: {
     result: connectionResult,
     profiles,
     assertCurrent: params.assertCurrent,
+    signal: params.signal,
     config: params.config,
     configSnapshot: params.configSnapshot,
     agentId: params.agentId,
@@ -851,7 +868,7 @@ export async function modelsAuthPasteApiKeyCommand(
     },
   });
 
-  const profileId = await saveModelProviderApiKey({
+  const { profileId, warning } = await saveModelProviderApiKey({
     config,
     provider,
     apiKey: key,
@@ -860,6 +877,9 @@ export async function modelsAuthPasteApiKeyCommand(
   });
 
   await refreshRunningGatewayAuthState(agentId, "login", runtime);
+  if (warning) {
+    runtime.error(warning);
+  }
 
   logConfigUpdated(runtime);
   runtime.log(`Auth profile: ${profileId} (${provider}/api_key)`);
@@ -1069,6 +1089,19 @@ function maybeLogOpenAICodexNativeSearchTip(runtime: RuntimeEnv, providerId: str
 export async function runModelsAuthLoginFlowCore(
   opts: ModelsAuthLoginFlowOptions,
 ): Promise<ModelsAuthLoginFlowResult> {
+  return runModelsAuthLoginFlow(opts, true);
+}
+
+export async function runModelsAuthLoginFlowForGateway(
+  opts: ModelsAuthLoginFlowOptions,
+): Promise<ModelsAuthLoginFlowResult> {
+  return runModelsAuthLoginFlow(opts, false);
+}
+
+async function runModelsAuthLoginFlow(
+  opts: ModelsAuthLoginFlowOptions,
+  showScopeNote: boolean,
+): Promise<ModelsAuthLoginFlowResult> {
   const requestedProviderId = opts.provider
     ? normalizeManualAuthProvider(opts.provider)
     : undefined;
@@ -1108,15 +1141,17 @@ export async function runModelsAuthLoginFlowCore(
   } else if (requestedProviderId && !requestedProvider) {
     requestedProvider = resolveRequestedLoginProviderOrThrow(authProviders, requestedProviderId);
   }
-  await prompter.note(
-    [
-      "Scope: System / agent",
-      `Agent: ${context.agentId}`,
-      "Location: the machine running OpenClaw",
-      `For personal model accounts on a Gateway, run ${formatCliCommand("openclaw models accounts login --help")}.`,
-    ].join("\n"),
-    "Provider sign-in",
-  );
+  if (showScopeNote) {
+    await prompter.note(
+      [
+        "Scope: System / agent",
+        `Agent: ${context.agentId}`,
+        "Location: the machine running OpenClaw",
+        `For personal model accounts on a Gateway, run ${formatCliCommand("openclaw models accounts login --help")}.`,
+      ].join("\n"),
+      "Provider sign-in",
+    );
+  }
   const selectedProvider =
     requestedProvider ??
     (await prompter
@@ -1181,13 +1216,7 @@ export async function runModelsAuthLoginFlowCore(
       provider: imported.provider,
       profileId: imported.profileId,
     });
-    let authRefresh: ModelAuthRefreshOutcome;
-    if (opts.refreshAfterLogin) {
-      await opts.refreshAfterLogin(context.agentId);
-      authRefresh = "refreshed";
-    } else {
-      authRefresh = await refreshRunningGatewayAuthState(context.agentId, "login", opts.runtime);
-    }
+    const authRefresh = await refreshProviderAuthAfterLogin({ ...opts, agentId: context.agentId });
     if (imported.configUpdated) {
       logConfigUpdated(opts.runtime);
     }

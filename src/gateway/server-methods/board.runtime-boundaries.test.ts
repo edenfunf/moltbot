@@ -23,11 +23,15 @@ import { withPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gate
 import { resetGatewayWorkAdmission } from "../../process/gateway-work-admission.js";
 import { runWithGatewayRootWorkAdmissionForTest } from "../../process/gateway-work-admission.test-helpers.js";
 import {
+  closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
-import { resolveCoreOperatorGatewayMethodScope } from "../methods/core-descriptors.js";
+import {
+  closeOpenClawStateDatabaseAsync,
+  closeOpenClawStateDatabaseForTest,
+} from "../../state/openclaw-state-db.js";
+import { resolveCoreOperatorGatewayMethodScope } from "../methods/core-method-policy.js";
 import {
   createCoreGatewayMethodDescriptors,
   createGatewayMethodRegistry,
@@ -75,9 +79,11 @@ describe("board gateway runtime boundaries", () => {
     cronRun.mockReset();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     resetGatewayWorkAdmission();
+    await closeOpenClawAgentDatabasesAsync();
     closeOpenClawAgentDatabasesForTest();
+    await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
   });
 
@@ -702,9 +708,16 @@ describe("board gateway runtime boundaries", () => {
         method: string,
         params: Record<string, unknown>,
       ) => {
-        const response = await invoke(method, params);
-        expect(response.mock.calls[0]?.[0]).toBe(true);
-        return response.mock.calls[0]?.[1] as T;
+        let payload: unknown;
+        if (method === "sessions.describe") {
+          // This injected board-store harness has no shared presentation metadata.
+          payload = { session: null };
+        } else {
+          const response = await invoke(method, params);
+          expect(response.mock.calls[0]?.[0]).toBe(true);
+          payload = response.mock.calls[0]?.[1];
+        }
+        return payload as T;
       };
       return createDashboardTool({ agentSessionKey: sessionKey, agentId: "main", callGateway });
     };
@@ -743,7 +756,9 @@ describe("board gateway runtime boundaries", () => {
     );
     expect(descriptor).not.toHaveProperty("props");
 
+    await closeOpenClawAgentDatabasesAsync();
     closeOpenClawAgentDatabasesForTest();
+    await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
     tool = createTool();
     const reopened = (await tool.execute("reopen", { action: "read" })).details as BoardSnapshot;

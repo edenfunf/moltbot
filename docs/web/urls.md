@@ -23,6 +23,11 @@ the connected Gateway's HTTP(S) address; a tunnel-only address remains local.
 Normal navigation and **Open in** continue using the current UI. Copied links
 contain no connection credentials, and recipients still need Gateway access.
 
+If the Gateway disconnects while a session link is loading, the Control UI retries
+the interrupted load after reconnecting. Navigating elsewhere cancels that recovery;
+it does not reopen an old destination or add a browser-history entry. Already loaded
+conversations stay mounted across reconnects.
+
 The Dashboards gallery adds `?dashboard=expanded` to the owning task's chat
 link, for example `/chat/main/deploy-monitor-6db92d48?dashboard=expanded`.
 This makes Dashboard the main view and focuses it. **Restore split** brings
@@ -58,6 +63,12 @@ authoritative part: at least eight lowercase hexadecimal characters from the
 start of the key's trailing UUID, with UUID dashes omitted. Longer prefixes up
 to all 32 hexadecimal characters are accepted. The row's rotating `sessionId`
 is not part of the URL identity.
+
+The Control UI generates links with all 32 UUID characters by default, so a
+selected session keeps its identity even when another session shares its prefix
+and display name. Existing shorter links still resolve, and the disambiguation
+view can offer the shortest unique prefix. Resolving a literal or display-name
+link to a UUID session also keeps the full UUID in its canonical URL.
 
 Every other key uses the literal-key form. Each colon-delimited segment after
 `agent:<agentId>:` becomes one URL-encoded path segment. For example,
@@ -479,6 +490,9 @@ for a tab with an available slug is replaced once in browser history with
 `/<slug>`, preserving `p.*` parameters and the fragment. Tabs without an available
 slug keep the generic URL. Both forms mount the same plugin page inside the
 Control UI shell; slugs do not create plugin HTTP routes.
+Opening or reloading a slug keeps that destination while the Gateway connects,
+even when the browser remembers a chat session. Unknown slugs fall back to chat
+after the Gateway supplies its plugin tabs.
 
 Automation links open the exact job independently of the current list filters or
 loaded page. Adding `run` opens its run history and highlights the matching loaded
@@ -487,6 +501,12 @@ run. A missing job shows the Gateway's lookup error.
 Settings routes that use schema-backed deep links accept `?section=<section>`,
 `?advanced=1`, and `#<setting-id>`. These values select content within the page;
 they do not change the route identity.
+
+Links to Settings sections that moved to another page replace the old URL with
+the current destination while keeping the setting anchor. Back returns to the
+page before the link, and Forward returns to the current destination.
+
+Model setup links with `?firstRun=1` or `?firstRun=explicit` retain the first-run onboarding flow. Without either marker, `/settings/model-setup` and `/model-setup` redirect to `/settings/model-providers?connect=1`, which opens the connection dialog on Models. The Models page otherwise stays in place while connecting a provider or reviewing Gateway discovery.
 
 The retired General route and its `/config` alias are replaced once with
 `/settings/appearance?section=__appearance__#settings-language`. The historical

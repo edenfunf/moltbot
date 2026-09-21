@@ -41,6 +41,8 @@ export type SettingsSectionProps = {
   description?: unknown;
   /** Right-aligned inline actions next to the heading (e.g. an Add button). */
   actions?: TemplateResult;
+  /** Section notice above the group, keeping bordered callouts outside the card. */
+  notice?: TemplateResult | typeof nothing;
   /** Extra count shown next to the heading. */
   count?: number;
   /** Marks the group surface as a danger zone. */
@@ -183,7 +185,7 @@ export function renderSettingsSection(props: SettingsSectionProps, rows: unknown
     .join(" ");
   return html`
     <section class="settings-section ${props.carapace ? "oc-settings-section" : ""}">
-      ${header}
+      ${header} ${props.notice ?? nothing}
       <div class=${groupClass}>${rows}</div>
     </section>
   `;
@@ -305,6 +307,7 @@ export function renderSettingsToggle(props: {
 /** Toggle row: one <label> wraps title, description, and switch, so the whole
  * row is clickable and the checkbox gets its accessible name from the title. */
 export function renderSettingsToggleRow(props: {
+  icon?: unknown;
   title: unknown;
   ariaLabel?: unknown;
   description?: unknown;
@@ -340,6 +343,7 @@ export function renderSettingsToggleRow(props: {
         props.onChange(checked);
       }}
     >
+      ${props.icon ?? nothing}
       <div class="settings-row__text">
         <span class="settings-row__title">${props.title}</span>
         ${
@@ -370,8 +374,9 @@ export function renderSettingsToggleRow(props: {
   `;
 }
 
+// Controls already show inherited values; reserve default references for overrides.
 export function renderSettingsDefaultDescription(value: string, overridden: boolean) {
-  return html`${t(overridden ? "configForm.defaultValue" : "configForm.usingDefault", { value })}`;
+  return overridden ? html`${t("configForm.defaultValue", { value })}` : undefined;
 }
 
 export function renderSettingsSegmented<T extends string>(
@@ -388,6 +393,7 @@ export function renderSettingsSegmented<T extends string>(
     }>;
     disabled?: boolean;
     ariaLabel?: string;
+    descriptionId?: string;
     className?: string;
     carapace?: boolean;
   } & (
@@ -444,9 +450,10 @@ export function renderSettingsSegmented<T extends string>(
     <wa-radio-group
       class="settings-segmented ${props.carapace ? "oc-segmented" : ""} ${props.className ?? ""}"
       size="s"
+      aria-describedby=${props.descriptionId ?? nothing}
       orientation="horizontal"
       .value=${live(props.value)}
-      ?disabled=${props.disabled ?? false}
+      ?disabled=${live(props.disabled ?? false)}
       @change=${(event: Event) => {
         const group = event.currentTarget as HTMLElement & { value?: string };
         const value = group.value;
@@ -474,7 +481,7 @@ export function renderSettingsSegmented<T extends string>(
             appearance="button"
             value=${option.value}
             .checked=${live(option.value === props.value)}
-            ?disabled=${option.disabled ?? false}
+            ?disabled=${live(option.disabled ?? false)}
             title=${option.title ?? nothing}
             data-test-id=${option.testId ?? nothing}
             @click=${(event: Event) => {

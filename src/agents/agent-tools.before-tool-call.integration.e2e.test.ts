@@ -36,9 +36,11 @@ import {
   bindAuthorizedClientVoiceConfirmation,
   checkClientVoiceToolConfirmationPolicy,
   deactivateClientVoiceConfirmationSession,
-  noteClientVoiceConfirmationUtterance,
 } from "../talk/client-voice-confirmation.js";
-import { resetClientVoiceConfirmationStateForTest } from "../talk/client-voice-confirmation.test-support.js";
+import {
+  noteClientVoiceConfirmationUtteranceForTest as noteClientVoiceConfirmationUtterance,
+  resetClientVoiceConfirmationStateForTest,
+} from "../talk/client-voice-confirmation.test-support.js";
 import * as clientVoiceSession from "../talk/client-voice-session.js";
 import { toClientToolDefinitions, toToolDefinitions } from "./agent-tool-definition-adapter.js";
 import { bindAgentToolSourceExecutionGuard } from "./agent-tool-source-execution-guard.js";
@@ -1055,14 +1057,12 @@ describe("before_tool_call hook deduplication (#15502)", () => {
           language: "typescript",
         },
         toolKind: "code_mode_exec",
-        toolInputKind: "typescript",
         runId: "run-main",
         toolCallId: "call-code-mode-exec-typescript",
       },
       {
         toolName: "exec",
         toolKind: "code_mode_exec",
-        toolInputKind: "typescript",
         agentId: "main",
         sessionKey: "agent:main:main",
         sessionId: "session-main",
@@ -1674,14 +1674,12 @@ describe("before_tool_call hook deduplication (#15502)", () => {
             language: "typescript",
           },
           toolKind: "code_mode_exec",
-          toolInputKind: "typescript",
           runId: "run-main",
           toolCallId: "call-code-mode-trusted-language",
         },
         expect.objectContaining({
           toolName: "exec",
           toolKind: "code_mode_exec",
-          toolInputKind: "typescript",
           agentId: "main",
           sessionKey: "agent:main:main",
           sessionId: "session-main",
@@ -1699,14 +1697,12 @@ describe("before_tool_call hook deduplication (#15502)", () => {
             language: "typescript",
           },
           toolKind: "code_mode_exec",
-          toolInputKind: "typescript",
           runId: "run-main",
           toolCallId: "call-code-mode-trusted-language",
         },
         expect.objectContaining({
           toolName: "exec",
           toolKind: "code_mode_exec",
-          toolInputKind: "typescript",
           agentId: "main",
           sessionKey: "agent:main:main",
           sessionId: "session-main",

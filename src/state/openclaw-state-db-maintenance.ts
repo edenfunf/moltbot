@@ -22,7 +22,7 @@ import {
   hasDanglingSkillWorkshopCollectionReviewIndex,
   LEGACY_SKILL_WORKSHOP_COLLECTION_REVIEWS_INDEX,
   withSqliteWritableSchema,
-} from "./openclaw-state-db-dangling-workshop-index.js";
+} from "./openclaw-state-db-doctor-schema.js";
 import { ensureColumn, tableExists, tableHasColumn } from "./openclaw-state-db-schema-helpers.js";
 import { migrateJsonCanonicalWideRowsV13 } from "./openclaw-state-db-schema-v13-widerow.js";
 import {
@@ -259,101 +259,20 @@ function assertOpenClawStateDatabaseVersionForMigration(
   });
 }
 
-/** Require every stable v5 table before the v6 additive migration can run. */
-function assertOpenClawStateDatabaseV5ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 5 });
-}
-
-/** Require every stable v6 table before the v7 retirement migration can run. */
-function assertOpenClawStateDatabaseV6ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 6 });
-}
-
-/** Require every stable v7 table before the v8 placement migration can run. */
-function assertOpenClawStateDatabaseV7ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 7 });
-}
-
-/** Require every stable v8 table before the v9 registry migration can run. */
-function assertOpenClawStateDatabaseV8ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 8 });
-}
-
-/** Require every stable v9 table before the v10 retirement migration can run. */
-function assertOpenClawStateDatabaseV9ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 9 });
-}
-
-/** Require every stable v10 table before the v11 curator retirement can run. */
-function assertOpenClawStateDatabaseV10ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 10 });
-}
-
-/** Require every stable v11 table before singleton state folds into the v12 store. */
-function assertOpenClawStateDatabaseV11ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 11 });
-}
-
-/** Require every stable v12 table before wide rows become JSON-canonical. */
-function assertOpenClawStateDatabaseV12ForMigration(
-  database: DatabaseSync,
-  options: { pathname: string },
-): void {
-  assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 12 });
-}
-
 /** Keep historical migration gates beside their version-specific ownership assertions. */
-export const openClawStateMigrationAssertions = new Map([
-  [5, assertOpenClawStateDatabaseV5ForMigration],
-  [6, assertOpenClawStateDatabaseV6ForMigration],
-  [7, assertOpenClawStateDatabaseV7ForMigration],
-  [8, assertOpenClawStateDatabaseV8ForMigration],
-  [9, assertOpenClawStateDatabaseV9ForMigration],
-  [10, assertOpenClawStateDatabaseV10ForMigration],
-  [11, assertOpenClawStateDatabaseV11ForMigration],
-  [12, assertOpenClawStateDatabaseV12ForMigration],
-  [
-    13,
-    (database: DatabaseSync, options: { pathname: string }) =>
-      assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 13 }),
-  ],
-  [
-    14,
-    (database: DatabaseSync, options: { pathname: string }) =>
-      assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 14 }),
-  ],
-  [
-    15,
-    (database: DatabaseSync, options: { pathname: string }) =>
-      assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 15 }),
-  ],
-  [
-    16,
-    (database: DatabaseSync, options: { pathname: string }) =>
-      assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 16 }),
-  ],
-]);
+export const openClawStateMigrationAssertions = new Map<
+  number,
+  (database: DatabaseSync, options: { pathname: string }) => void
+>(
+  ([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] as const).map(
+    (version) =>
+      [
+        version,
+        (database: DatabaseSync, options: { pathname: string }) =>
+          assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version }),
+      ] as const,
+  ),
+);
 
 export function markCurrentStateSchemaVersion(
   db: DatabaseSync,
@@ -622,44 +541,59 @@ export function runStateSchemaMigrationTransaction<T>(
   pathname: string,
   migrate: () => T,
   transactionOptions: SqliteTransactionOptions,
+  prepareSchema?: () => void,
 ): T {
-  return runSqliteImmediateTransactionSync(
-    db,
-    () => {
-      const publishedVersion = readSqliteUserVersion(db);
-      const blocker =
-        publishedVersion < OPENCLAW_STATE_SCHEMA_VERSION
-          ? readStateSchemaPublicationBlocker(db)
-          : undefined;
-      if (!blocker) {
-        return migrate();
-      }
-      try {
-        // Check before canonical DDL could recreate the missing publication owner.
-        if (!tableExists(db, "config_machine_state")) {
-          throw new Error("Shared state schema publication requires config_machine_state.");
+  const foreignKeysWereEnabled =
+    Number(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys) === 1;
+  // Referenced-table rebuilds require this before BEGIN, including runtime convergence.
+  if (foreignKeysWereEnabled) {
+    db.exec("PRAGMA foreign_keys = OFF;");
+  }
+  try {
+    return runSqliteImmediateTransactionSync(
+      db,
+      () => {
+        // Doctor restores catalog readability before the publication prelude reads it.
+        prepareSchema?.();
+        const publishedVersion = readSqliteUserVersion(db);
+        const blocker =
+          publishedVersion < OPENCLAW_STATE_SCHEMA_VERSION
+            ? readStateSchemaPublicationBlocker(db)
+            : undefined;
+        if (!blocker) {
+          return migrate();
         }
-        return migrate();
-      } catch (cause) {
-        if (cause instanceof OpenClawStateOwnershipError) {
-          throw cause;
+        try {
+          // Check before canonical DDL could recreate the missing publication owner.
+          if (!tableExists(db, "config_machine_state")) {
+            throw new Error("Shared state schema publication requires config_machine_state.");
+          }
+          return migrate();
+        } catch (cause) {
+          if (cause instanceof OpenClawStateOwnershipError) {
+            throw cause;
+          }
+          throw new UpdateSchemaRefusalError(
+            [
+              {
+                kind: "state",
+                path: pathname,
+                foundVersion: publishedVersion,
+                supportedVersion: OPENCLAW_STATE_SCHEMA_VERSION,
+              },
+            ],
+            blocker.updaterVersion,
+            { targetVersion: VERSION, cause },
+          );
         }
-        throw new UpdateSchemaRefusalError(
-          [
-            {
-              kind: "state",
-              path: pathname,
-              foundVersion: publishedVersion,
-              supportedVersion: OPENCLAW_STATE_SCHEMA_VERSION,
-            },
-          ],
-          blocker.updaterVersion,
-          { targetVersion: VERSION, cause },
-        );
-      }
-    },
-    transactionOptions,
-  );
+      },
+      transactionOptions,
+    );
+  } finally {
+    if (foreignKeysWereEnabled && db.isOpen) {
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
+  }
 }
 
 export function writeCurrentStateSchemaMetadata(db: DatabaseSync, now: number): void {

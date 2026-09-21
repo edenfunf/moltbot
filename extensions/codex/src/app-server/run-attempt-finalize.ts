@@ -27,6 +27,7 @@ import {
   shouldKeepCodexSharedAbortOpen,
 } from "./run-attempt-lifecycle.js";
 import type { CodexAttemptNotificationController } from "./run-attempt-notification-controller.js";
+import { settleReplyMedia } from "./run-attempt-reply-media.js";
 import type { CodexAttemptResources } from "./run-attempt-resources.js";
 import {
   clearCodexBindingAfterInvalidImagePayload,
@@ -44,6 +45,7 @@ import {
   markCodexAuthProfileBlockedFromRateLimits,
   refreshCodexUsageLimitPromptError,
 } from "./usage-limit-error.js";
+import { buildCodexUserPromptMessage } from "./user-prompt-message.js";
 
 export async function finalizeCodexAttempt(
   resources: CodexAttemptResources,
@@ -135,6 +137,11 @@ export async function finalizeCodexAttempt(
     clearTimeout(drainGraceTimer);
     deadlines.dispose();
   };
+  if (state.pluginRuntimeRefreshStop) {
+    // Snapshot only after native cleanup and projection. Cleanup retains the rejection
+    // so a failed handoff still returns its completed effects and preserves its binding.
+    await state.pluginRuntimeRefreshStop.catch(() => undefined);
+  }
   const settlement = drainNotificationQueue().then(async () => {
     await closeProjection();
     await activeProjector.settlement.drain();
@@ -162,6 +169,10 @@ export async function finalizeCodexAttempt(
     }
     const result = activeProjector.buildResult(toolBridge.telemetry, {
       yieldDetected: toolState.yieldDetected,
+      // The original transcript fence excludes steering accepted during this turn.
+      steeringMessages: params.pluginRuntimeRefreshPending?.()
+        ? turnRuntime.steeringQueueRef.current?.getAcceptedMessages()
+        : undefined,
     });
     const projectedTerminal = attemptTerminal.project(result.terminal);
     // Transport loss aborts in-flight work mechanically, but its terminal outcome
@@ -434,9 +445,7 @@ export async function finalizeCodexAttempt(
           degradedSettlement,
         ]);
       }
-      if (runAbortController.signal.aborted) {
-        await state.abortCleanup;
-      }
+      await settleReplyMedia(activeTurn, result, turnRuntime, runAbortController.signal);
     } finally {
       // Retire this exact write before releasing the run. A queued mirror cannot
       // borrow a later session writer after its settlement deadline has elapsed.
@@ -585,7 +594,8 @@ export async function finalizeCodexAttempt(
       !runAbortController.signal.aborted &&
       !finalAborted &&
       !finalPromptError;
-    if (turnSucceeded && !runAbortController.signal.aborted) {
+    // Refresh replies did not reach the native thread; successful handoff clears its binding.
+    if (turnSucceeded && !runAbortController.signal.aborted && !state.pluginRuntimeRefreshStop) {
       try {
         // Only no-engine continuity prompts may calibrate their measured history.
         // Billing spans every model call; density needs only the latest full prompt.
@@ -654,34 +664,54 @@ export async function finalizeCodexAttempt(
     const terminalAssistantText = collectTerminalAssistantText(result);
     if (
       terminalAssistantText &&
-      (!streamState.eventEmitted || streamState.needsTerminalSnapshot) &&
-      !finalAborted &&
-      !finalPromptError
+      (assistantTranscriptIdempotencyKey ||
+        ((!streamState.eventEmitted || streamState.needsTerminalSnapshot) &&
+          !finalAborted &&
+          !finalPromptError))
     ) {
       void emitCodexAppServerEvent(params, {
         stream: "assistant",
-        data: { text: terminalAssistantText },
+        data: {
+          text: terminalAssistantText,
+          // The receipt identifies the selected persisted occurrence, which can
+          // exclude candidates streamed before a native tool or sleep boundary.
+          ...(assistantTranscriptIdempotencyKey
+            ? {
+                itemId: assistantTranscriptIdempotencyKey,
+                replace: true,
+                replaceable: true,
+              }
+            : {}),
+        },
       });
     }
-    emitLifecycleTerminal(
-      finalPromptError
-        ? {
-            phase: "error",
-            error: formatErrorMessage(finalPromptError),
-            ...buildLifecycleTerminalMeta({ aborted: finalAborted, timedOut: effectiveTimedOut }),
-          }
-        : {
-            phase: "end",
-            ...buildLifecycleTerminalMeta({
-              aborted: finalAborted,
-              timedOut: effectiveTimedOut,
-              yielded: toolState.yieldDetected,
-            }),
-          },
-    );
+    emitLifecycleTerminal({
+      phase: finalPromptError ? "error" : "end",
+      ...(finalPromptError ? { error: formatErrorMessage(finalPromptError) } : {}),
+      ...(assistantTranscriptIdempotencyKey ? { assistantTranscriptIdempotencyKey } : {}),
+      ...buildLifecycleTerminalMeta({
+        aborted: finalAborted,
+        timedOut: effectiveTimedOut,
+        yielded: finalPromptError ? undefined : toolState.yieldDetected,
+      }),
+    });
     // Preserve the exact result identity carrying host-issued TTS delivery provenance.
     const finalizedResult: EmbeddedRunAttemptResult = Object.assign(result, {
       ...(runtimeModelSelection ? { runtimeModelSelection } : {}),
+      ...(turnSucceeded && params.pluginRuntimeRefreshPending?.()
+        ? {
+            // Host-persisted input is absent from the native snapshot. The first
+            // handoff carries it once; later handoffs retain that existing prefix.
+            pluginRuntimeRefreshMessages:
+              params.suppressNextUserMessagePersistence && !params.pluginRuntimeRefreshMessages
+                ? [
+                    params.userTurnTranscriptRecorder?.getPersistedMessage?.() ??
+                      buildCodexUserPromptMessage(params),
+                    ...result.messagesSnapshot,
+                  ]
+                : result.messagesSnapshot,
+          }
+        : {}),
       ...(toolState.yieldAcknowledgment
         ? { yieldAcknowledgment: toolState.yieldAcknowledgment }
         : {}),

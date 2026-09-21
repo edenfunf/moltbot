@@ -8,11 +8,15 @@ import { normalizeOptionalString as readOptionalString } from "@openclaw/normali
 import { parse as parseYaml } from "yaml";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { hasErrnoCode } from "./errors.js";
+import { resolveInstallWorkTimeoutMs } from "./install-mode-options.js";
 import type { NpmSpecResolution } from "./install-source-utils.js";
 import { JsonFileReadError, readJson, readJsonIfExists, writeJson } from "./json-files.js";
+import { createManagedNpmPeerPlanArgs } from "./npm-managed-peer-plan.js";
 import type { ParsedRegistryNpmSpec } from "./npm-registry-spec.js";
 import { resolveOpenClawPackageRootSync } from "./openclaw-root.js";
-import { createSafeNpmInstallArgs, createSafeNpmInstallEnv } from "./safe-package-install.js";
+import { replaceFileAtomicSync } from "./replace-file.js";
+import { createSafeNpmInstallEnv } from "./safe-package-install.js";
+import { UPDATE_NETWORK_TIMEOUT_MS } from "./update-network-budget.js";
 
 // Managed npm roots are private package roots used for installed plugins. This
 // module owns package.json dependency/override edits and peer repair helpers.
@@ -777,32 +781,12 @@ function isHostPeerResolutionFailure(
   return /(^|[^@\w.-])openclaw(?=$|[@\s:,"'])/i.test(output);
 }
 
-function createManagedNpmPeerPlanArgs(params?: {
-  force?: boolean;
-  legacyPeerDeps?: boolean;
-}): string[] {
-  return [
-    "npm",
-    "install",
-    "--package-lock-only",
-    ...(params?.force ? ["--force"] : []),
-    ...createSafeNpmInstallArgs({
-      omitDev: true,
-      omitPeer: true,
-      legacyPeerDeps: params?.legacyPeerDeps,
-      loglevel: "error",
-      ignoreWorkspaces: true,
-      noAudit: true,
-      noFund: true,
-    }).slice(1),
-  ];
-}
-
 async function collectNpmResolvedManagedNpmRootPeerDependencyPins(params: {
   npmRoot: string;
   manifest: ManagedNpmRootManifest;
   runCommand?: ManagedNpmRootRunCommand;
   timeoutMs?: number;
+  workTimeoutMs?: number | null;
   signal?: AbortSignal;
 }): Promise<Record<string, string>> {
   const manifest = params.manifest;
@@ -843,7 +827,10 @@ async function collectNpmResolvedManagedNpmRootPeerDependencyPins(params: {
     const npmPeerPlanArgs = createManagedNpmPeerPlanArgs({ force: true });
     const npmPlanOptions = {
       cwd: tempRoot,
-      timeoutMs: Math.max(params.timeoutMs ?? 300_000, 300_000),
+      timeoutMs: resolveInstallWorkTimeoutMs(
+        params.workTimeoutMs,
+        params.timeoutMs ?? UPDATE_NETWORK_TIMEOUT_MS,
+      ),
       signal: params.signal,
       killProcessTree: true,
       env: createSafeNpmInstallEnv(process.env, {
@@ -887,10 +874,12 @@ async function collectNpmResolvedManagedNpmRootPeerDependencyPins(params: {
 /** Sync package.json with peer dependency pins resolved from npm's lock plan. */
 export async function syncManagedNpmRootPeerDependencies(params: {
   npmRoot: string;
+  beforePersistentApply?: () => void;
   managedOverrides?: Record<string, unknown>;
   omitNpmAliasOverrides?: boolean;
   runCommand?: ManagedNpmRootRunCommand;
   timeoutMs?: number;
+  workTimeoutMs?: number | null;
   signal?: AbortSignal;
 }): Promise<boolean> {
   const manifestPath = path.join(params.npmRoot, "package.json");
@@ -915,6 +904,7 @@ export async function syncManagedNpmRootPeerDependencies(params: {
     manifest: { ...manifest, overrides: plannedOverrides },
     runCommand: params.runCommand,
     timeoutMs: params.timeoutMs,
+    workTimeoutMs: params.workTimeoutMs,
     signal: params.signal,
   });
   const managedPeerDependencyNames = new Set(
@@ -970,7 +960,17 @@ export async function syncManagedNpmRootPeerDependencies(params: {
   }
   const changed = JSON.stringify(next) !== JSON.stringify(manifest);
   if (changed) {
-    await writeJson(manifestPath, next, { trailingNewline: true });
+    // Planning yields; publish this small manifest without yielding after authority revalidation.
+    params.beforePersistentApply?.();
+    replaceFileAtomicSync({
+      filePath: manifestPath,
+      content: `${JSON.stringify(next, null, 2)}\n`,
+      mode: 0o600,
+      dirMode: 0o777 & ~process.umask(),
+      copyFallbackOnPermissionError: true,
+      syncTempFile: true,
+      syncParentDir: true,
+    });
   }
   return changed;
 }
@@ -980,6 +980,7 @@ export async function repairManagedNpmRootOpenClawPeer(params: {
   npmRoot: string;
   packageRoot?: string | null;
   timeoutMs?: number;
+  workTimeoutMs?: number | null;
   signal?: AbortSignal;
   logger?: ManagedNpmRootLogger;
   runCommand?: ManagedNpmRootRunCommand;
@@ -1037,7 +1038,10 @@ export async function repairManagedNpmRootOpenClawPeer(params: {
   try {
     const result = await command(npmArgs, {
       cwd: params.npmRoot,
-      timeoutMs: Math.max(params.timeoutMs ?? 300_000, 300_000),
+      timeoutMs: resolveInstallWorkTimeoutMs(
+        params.workTimeoutMs,
+        Math.max(params.timeoutMs ?? 300_000, 300_000),
+      ),
       signal: params.signal,
       killProcessTree: true,
       env: createSafeNpmInstallEnv(process.env, {

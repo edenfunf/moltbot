@@ -59,7 +59,7 @@ describe("concurrent worker workspace results", () => {
     }
     const inputTurn = {
       ...turn("cleanup-failure"),
-      skillsSnapshot: buildSkillSnapshot(source, {
+      skillsSnapshot: await buildSkillSnapshot(source, {
         entries: loadWorkspaceSkills(source, { workspaceOnly: true }),
       }),
     };
@@ -152,7 +152,8 @@ describe("concurrent worker workspace results", () => {
     expect(placements.get(SESSION_ID)?.turnClaim).toBeNull();
   });
 
-  it.each([1, 50])(
+  // Two worktrees cover concurrent publication; the upload barrier orders stale retention.
+  it.each([1, 2])(
     "reconciles %i completed turns when an older retention snapshot arrives after upload",
     async (count) => {
       const repository = path.join(root, "repository");
@@ -304,7 +305,7 @@ describe("concurrent worker workspace results", () => {
                     sequence: 1,
                     retain,
                   },
-                  () => [],
+                  async () => [],
                 );
                 retained.resolve();
               } catch (error) {

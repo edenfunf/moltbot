@@ -47,9 +47,11 @@ const mockLog: SubsystemLogger = {
 function createParams(): SubscriptionParams {
   const chatRunState = createChatRunState();
   return {
+    signal: new AbortController().signal,
     log: mockLog,
     broadcast: vi.fn(),
     broadcastToConnIds: vi.fn(),
+    nodeHasSessionSubscribers: () => false,
     nodeSendToSession: vi.fn(),
     agentRunSeq: new Map(),
     chatRunState,
@@ -59,6 +61,7 @@ function createParams(): SubscriptionParams {
     chatAbortControllers: new Map(),
     restartRecoveryCandidates: new Map(),
     terminalSessions: { closeTaskSessions: vi.fn() },
+    refreshConnectedUserProfiles: vi.fn(),
   };
 }
 describe("bound ACP terminal lifecycle", () => {

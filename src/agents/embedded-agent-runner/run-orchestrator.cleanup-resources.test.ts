@@ -18,13 +18,10 @@ import { createAgentCleanupScope, runOwnedAgentCleanup } from "../run-cleanup-ti
 import { SessionManager } from "../sessions/session-manager.js";
 import { immediateEnqueue } from "../test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import { runEmbeddedAgent } from "./run-orchestrator.js";
-import type { PreparedEmbeddedRunInput } from "./run/execution-context.js";
 import type { RunEmbeddedAgentInternalParams } from "./run/internal-params.js";
 import type { EmbeddedAgentRunResult } from "./types.js";
 
-const loop = vi.hoisted(() =>
-  vi.fn<(input: PreparedEmbeddedRunInput) => Promise<EmbeddedAgentRunResult>>(),
-);
+const loop = vi.hoisted(() => vi.fn<(typeof import("./run-loop.js"))["runPreparedEmbeddedLoop"]>());
 vi.mock("./run-loop.js", () => ({ runPreparedEmbeddedLoop: loop }));
 
 type Registration = {
@@ -59,6 +56,9 @@ it.each([
     const cleanupSettled = createDeferred();
     const nestedStarted = createDeferred();
     const finishNested = createDeferred();
+    const initialWriterStarted = createDeferred();
+    const finishInitialWriter = createDeferred();
+    let initialWriterDisposals = 0;
     const warnings: string[] = [];
     const cleanupScope = createAgentCleanupScope();
     let selected: Registration | undefined;
@@ -137,7 +137,7 @@ it.each([
           entries: { [fixture.pluginId]: { enabled: true } },
         },
       };
-      loop.mockImplementation(async (input) => {
+      loop.mockImplementation(async (_refresh, input) => {
         const prepared = input.preparedModelRuntime;
         if (!prepared) {
           throw new Error("Runner did not supply its prepared candidate runtime");
@@ -151,6 +151,15 @@ it.each([
         }
         selected = record;
         expect(record.read()).toBe(42);
+        input.onInitialWriterPrepared({
+          async [Symbol.asyncDispose]() {
+            initialWriterDisposals += 1;
+            initialWriterStarted.resolve();
+            expect(getPluginRegistryForContext()).toBe(prepared.pluginRegistry);
+            await finishInitialWriter.promise;
+            expect(record.read()).toBe(42);
+          },
+        });
         workSignal = getAsyncWorkSignal();
         if (cliResources) {
           workSignal?.addEventListener(
@@ -287,6 +296,10 @@ it.each([
         throw new Error("Cleanup did not start its nested work");
       }
       await expect(nested).resolves.toBe(42);
+      await initialWriterStarted.promise;
+      expect(selected.disposed).toBe(0);
+      expect(initialWriterDisposals).toBe(1);
+      finishInitialWriter.resolve();
       await selected.close.promise;
       await parentClose;
       if (cliResources) {
@@ -312,6 +325,7 @@ it.each([
     } finally {
       finishCleanup.resolve();
       finishNested.resolve();
+      finishInitialWriter.resolve();
       await Promise.allSettled([logical, actualCleanup, nested]);
       admission?.close();
       await parentClose;

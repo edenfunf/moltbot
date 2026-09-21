@@ -6,9 +6,11 @@ import { resolveIsNixMode } from "../config/paths.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { HeartbeatEventPayload } from "../infra/heartbeat-events.js";
 import type { PluginCompatibilityNotice } from "../plugins/status.js";
-import type { StatusSummary } from "../status/types.js";
+import type { BackupRunFreshness } from "../state/backup-run-records.js";
+import type { MemoryPluginStatus } from "../status/memory-plugin.js";
+import type { StatusSummary } from "../status/summary.js";
 import { VERSION } from "../version.js";
-import { buildBackupStatusValue, readBackupFreshness } from "./backup-health.js";
+import { buildBackupStatusValue } from "./backup-health.js";
 import type { HealthSummary } from "./health.js";
 import {
   buildStatusOverviewRowsFromSurface,
@@ -32,11 +34,16 @@ import {
   buildStatusTasksValue,
   type StatusMemoryStateResolvers,
 } from "./status.command-sections.js";
-import type { MemoryPluginStatus, MemoryStatusSnapshot } from "./status.scan.shared.js";
+import type { MemoryStatusSnapshot } from "./status.scan.shared.js";
 
 type StatusDegradationSummary = Pick<
   StatusSummary,
-  "degradedSecretOwners" | "degradedPlugins" | "startupMigrationWarning" | "secretEgressProxy"
+  | "degradedSecretOwners"
+  | "degradedPlugins"
+  | "startupMigrationWarning"
+  | "startupRecoveryWarning"
+  | "installationReplacementWarning"
+  | "secretEgressProxy"
 >;
 
 function buildStatusDegradationRows(
@@ -46,6 +53,15 @@ function buildStatusDegradationRows(
   const rows: Array<{ Item: string; Value: string }> = [];
   if (summary.startupMigrationWarning) {
     rows.push({ Item: "Startup migrations", Value: decorate(summary.startupMigrationWarning) });
+  }
+  if (summary.startupRecoveryWarning) {
+    rows.push({ Item: "Session recovery", Value: decorate(summary.startupRecoveryWarning) });
+  }
+  if (summary.installationReplacementWarning) {
+    rows.push({
+      Item: "Installation replaced",
+      Value: decorate(summary.installationReplacementWarning),
+    });
   }
   if (summary.secretEgressProxy) {
     const status = summary.secretEgressProxy;
@@ -82,6 +98,7 @@ function buildStatusDegradationRows(
 export function buildStatusCommandOverviewRows(
   params: {
     env: NodeJS.ProcessEnv;
+    backupFreshness: BackupRunFreshness;
     opts: {
       deep?: boolean;
     };
@@ -129,6 +146,7 @@ export function buildStatusCommandOverviewRows(
   const lastHeartbeatValue = buildStatusLastHeartbeatValue({
     deep: params.opts.deep,
     gatewayReachable: params.surface.gatewayReachable,
+    gatewayStartupPhase: params.surface.gatewayProbe?.startupPhase,
     lastHeartbeat: params.lastHeartbeat,
     warn: params.warn,
     muted: params.muted,
@@ -191,7 +209,7 @@ export function buildStatusCommandOverviewRows(
       {
         Item: "Backups",
         Value: buildBackupStatusValue({
-          freshness: readBackupFreshness(params.env),
+          freshness: params.backupFreshness,
           formatTimeAgo: params.formatTimeAgo,
         }),
       },
@@ -227,12 +245,9 @@ export function buildStatusAllOverviewRows(params: {
       lastActiveAgeMs?: number | null;
     }>;
   };
-  tailscaleBackendState?: string | null;
 }) {
   return buildStatusOverviewRowsFromSurface({
     surface: params.surface,
-    tailscaleBackendState: params.tailscaleBackendState,
-    includeBackendStateWhenOff: true,
     includeBackendStateWhenOn: true,
     includeDnsNameWhenOff: true,
     prefixRows: [

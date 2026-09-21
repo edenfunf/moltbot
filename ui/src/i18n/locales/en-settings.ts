@@ -3,7 +3,107 @@ import { en } from "./en.ts";
 
 // Settings copy loads with its lazy page or search, not the startup shell.
 const enSettings = {
+  searchPage: {
+    enabled: "Web search",
+    advanced: "Advanced search settings",
+    enabledHint: "Allow agents to find up-to-date information on the web.",
+    provider: "Search provider",
+    automatic: "Automatic",
+    automaticHint:
+      "Prefer native search when supported; otherwise use a configured search provider.",
+    scopeHint:
+      "Search settings apply to all agents. Choose an agent and model to see their effective route.",
+    agent: "Agent",
+    model: "Model",
+    agentDefault: "Agent default",
+    route: "Search for this model",
+    routeKinds: {
+      native: "Native search",
+      external: "Check in chat",
+      managed: "Provider search",
+      disabled: "Off",
+      unavailable: "Unavailable",
+    },
+    loading: "Checking search configuration…",
+    offline: "Connect to the Gateway to configure search.",
+    readOnly: "An administrator can change search settings and credentials.",
+    setup: "Provider setup",
+    setupProvider: "Configure provider",
+    setupHint:
+      "Configure a provider for OpenClaw web search. External harnesses may also supply their own search tools.",
+    configured: "Configured",
+    pluginUnavailable: "Enable plugin to use",
+    pluginMissing: "Install plugin to use",
+    testInChat: "Test in chat",
+    testInChatHint:
+      "Open a new chat with this agent and model selected. Nothing is sent automatically.",
+    needsSetup: "Needs setup",
+    configuration: "Configuration",
+    credentialSources: {
+      config: "Saved credential",
+      secretRef: "Secret reference",
+      env: "Gateway environment",
+      "auth-profile": "Connected account",
+      none: "No separate API key required",
+      missing: "Credential missing",
+    },
+    health: "Search health",
+    untested: "Not tested",
+    untestedHint:
+      "Configuration alone does not verify access. Run a search to check the current route.",
+    test: "Test search",
+    testProvider: "Test {provider}",
+    testing: "Searching…",
+    query: "Search query",
+    queryPlaceholder: "What would you like to find?",
+    queryDefault: "OpenClaw documentation",
+    success: "Search succeeded",
+    failure: "Search failed",
+    duration: "{ms} ms",
+    cached: "Cached result",
+    result: "Answer",
+    sources: "Sources",
+    noResults: "The provider returned no results for this query.",
+    pluginSettings: "All provider settings",
+    pluginSettingsHint: "Open the plugin’s complete configuration and access controls.",
+    moreProviders: "Add search providers",
+    moreProvidersHint:
+      "Install a search plugin, or configure a custom endpoint with a compatible provider.",
+    docs: "Provider documentation",
+    refresh: "Refresh search status",
+  },
   connection: {
+    browser: {
+      title: "Browser",
+      savedSignIn: "Saved sign-in for this gateway",
+      forgetDevice: "Forget this browser",
+      confirmTitle: "Forget this browser?",
+      confirmMessage:
+        "Removes the saved sign-in for {gateway} and signs this tab out, clearing any active password or session credential, then reconnects fresh. Other gateways, your preferences, and this browser’s device identity are kept. You may need to sign in or approve this browser again.",
+      confirmLabel: "Forget",
+    },
+    ping: {
+      title: "Gateway ping",
+      latest: "Latest ping",
+      average: "Avg ping",
+      averageHint: "Average browser-to-Gateway round-trip time, including Gateway handling.",
+      p50: "p50",
+      p50Hint: "50% of measured pings completed in this time or less (median).",
+      p95: "p95",
+      p95Hint: "95% of measured pings completed in this time or less.",
+      p99: "p99",
+      p99Hint: "99% of measured pings completed in this time or less.",
+      unit: "ms",
+      samples: "Samples: {count}/100 · every 5 s while visible",
+      measuring: "Measuring ping…",
+      failed: "Last ping failed. Retrying…",
+    },
+    activity: {
+      title: "Gateway activity",
+      description: "Process CPU, memory, and event-loop delay · every 5 s while visible",
+      failed: "Activity refresh failed. Retrying…",
+      offline: "Connect to see Gateway activity.",
+    },
     access: {
       title: "Connection",
       descriptionOffline: "Not connected.",
@@ -18,6 +118,10 @@ const enSettings = {
       status: {
         connected: "Connected",
         offline: "Offline",
+        connecting: "Connecting…",
+        starting: "Starting…",
+        reconnecting: "Reconnecting…",
+        "reload-required": "Reload required",
       },
       gatewayUrl: "Gateway URL",
       gatewayUrlHint: "Use wss:// when the Gateway sits behind HTTPS or Tailscale Serve.",
@@ -31,8 +135,18 @@ const enSettings = {
       trustedProxy: "Authenticated via trusted proxy.",
       trustedProxyStatus: "Trusted proxy",
       sessionKey: "Default session",
-      sessionKeyHint: "Session opened after connecting.",
-      unsavedHint: "Unsaved changes apply when you connect.",
+      sessionKeyHint: "Save the session to open in this browser without reconnecting.",
+      sessionTitle: "Session",
+      saved: "Saved",
+      sessionDescription: "For {host} in this browser.",
+      unsavedHint: "Connection changes have not been applied.",
+      applyReconnect: "Apply and reconnect",
+      discard: "Discard changes",
+      retry: "Retry connection",
+      details: "Connection details",
+      reconnect: "Reconnect",
+      reconnectHint:
+        "Reconnect this browser to the current Gateway to troubleshoot a stuck connection.",
       lastError: "Last error",
       showSecret: "Show secret",
       hideSecret: "Hide secret",
@@ -280,17 +394,28 @@ const enSettings = {
   },
   modelProviders: {
     title: "Configured providers",
-    configureModels: "Configure Models",
+    configureModels: "Model setup",
     login: {
       action: "Connect provider",
       title: "Connect a provider",
+      noOptions: "No account connection methods are available.",
+      method: "Connection method",
+      searchProviders: "Search providers…",
+      noMatches: "No providers match your search.",
+      noProviders: "No providers are available to connect.",
+      discover: "On this Gateway",
       description: "Save credentials for this agent. Choose the active model separately.",
       done: "Provider credentials saved.",
       finishing: "Credentials are being saved. Wait for the result.",
       sessionExpired:
         "This sign-in session ended. Close this dialog and refresh Models to check the result.",
     },
-    subtitle: "Providers and credentials for the selected agent.",
+    subtitle: "Global model defaults and provider access for your agents.",
+    accessTitle: "Provider access",
+    accessDescription:
+      "Manage connections for the selected agent. Global defaults above apply to all agents.",
+    search: "Search providers…",
+    noMatches: "No providers match your search.",
     updated: "Updated {time}",
     refreshing: "Refreshing…",
     disconnected: "Connect to the gateway to see configured model providers.",
@@ -305,6 +430,7 @@ const enSettings = {
       apiKey: "API key",
       denied: "Credentials rejected",
       configured: "Credentials configured",
+      modelsUnavailable: "Models unavailable",
     },
     expiresIn: "Credential expires in {time}",
     models: "{count} models",
@@ -313,7 +439,7 @@ const enSettings = {
     globalUsage: "Global usage and cost",
     noStats: "No live usage data reported by this provider.",
     localCost: "Global session spend · {days}d",
-    localCostDetail: "{tokens} tokens · {sessions} sessions",
+    localCostDetail: "{tokens} tokens · {messages} messages",
     saving: "Saving…",
     requestFailed: "Request failed.",
     configUnavailable: "Configuration is unavailable. Refresh and try again.",
@@ -330,6 +456,8 @@ const enSettings = {
     profiles: {
       title: "Provider profiles",
       accountOne: "1 account",
+      account: "Account {number}",
+      details: "Details",
       accounts: "{count} accounts",
       reorderHint: "Drag to set your preferred account order.",
       reorder: "Reorder {account}, position {position}",
@@ -405,7 +533,7 @@ const enSettings = {
       saved: "Provider {provider} added.",
     },
     defaults: {
-      title: "Global defaults",
+      title: "Defaults for all agents",
       subtitle:
         "Model and behavior defaults for all agents. Agent-specific settings override these defaults. View each agent's model in Agents → Overview.",
       primary: "Model",
@@ -416,11 +544,12 @@ const enSettings = {
       utilityHelpAutomatic:
         "Automatic uses the primary model provider's recommended small model when available. Generated titles otherwise use the primary model.",
       automatic: "Automatic (provider default)",
+      automaticUnavailable: "No recommended small model",
       disabled: "Disabled",
       fallback: "Fallback Model",
       noFallback: "No fallback model",
       selectModel: "Select a model",
-      noModels: "Configure a provider before selecting default models.",
+      noModels: "Configure a chat provider to select a primary, utility, or fallback model.",
       discoveringMore: "Discovering more models…",
       discoverFailed: "More models could not be discovered.",
       retryDiscover: "Retry",
@@ -434,7 +563,31 @@ const enSettings = {
         "Sets the global default for new sessions. Auto starts in fast mode and returns to standard mode after the model's configured interval; On and Off keep that behavior fixed.",
       fastModeDefaultHelp:
         "Uses the selected model's fast-mode policy. Unlike Auto, Default does not enable fast mode by itself.",
-      saved: "Defaults saved.",
+    },
+    installedAgents: {
+      title: "Installed agents",
+      description:
+        "Coding apps on the Gateway computer. Each app manages its own account and permissions. Enabling an app does not sign you in.",
+      status: {
+        installed: "Installed",
+        missing: "Not detected",
+        unverified: "Not verified",
+        signIn: "Sign in required",
+        discovering: "Discovering models…",
+        modelsAvailable: "Models available",
+      },
+      unverifiedHint:
+        "Check this app's custom launch command on the Gateway computer, then check again.",
+      installHint: "Install and sign in to {name} on the Gateway computer, then check again.",
+      disabledHint: "Enable this app to include its models in the picker.",
+      signInHint: "Open {name} on the Gateway computer and check its sign-in, then check again.",
+      discoveryHint:
+        "Open {name} on the Gateway computer and check its connection and sign-in, then check again.",
+      toggle: "Use {name}",
+      check: "Check again",
+      checking: "Checking…",
+      empty: "No supported coding apps are available.",
+      note: "Update installed agents from Control UI",
     },
     readOnly: {
       disconnected: "Connect to the gateway to change model settings.",
@@ -499,6 +652,9 @@ const enSettings = {
       gitFetchFailed: "Could not fetch the tracked upstream",
       gitNoUpstream: "No tracked upstream is configured",
       gitComparisonFailed: "Could not compare this checkout with its tracked upstream",
+      checking: "Checking for updates…",
+      checkRequired: "Check for updates successfully before starting an update.",
+      updating: "Updating…",
       updateNow: "Update now",
       updateNowDescription: "Install the available update and restart the Gateway.",
       latestAttempt: "Latest update attempt",
@@ -540,6 +696,9 @@ const enSettings = {
       permissionsIntro: "macOS access for notifications, capture, voice, and device context.",
       permissionsIntroIos: "Device access for notifications, capture, voice, and personal data.",
       app: "App",
+      nativeExperience: "Native experience (Experimental)",
+      nativeExperienceHint:
+        "Use native Mac views for chat and navigation. When off, use the Web experience. Settings always open here.",
       appearance: "Appearance",
       appearanceModes: { system: "System", light: "Light", dark: "Dark" },
       notificationsEnabled: "Notifications",
@@ -568,6 +727,8 @@ const enSettings = {
       cameraHint: "Allow the agent to capture a photo or short video via the built-in camera.",
       keepAwake: "Keep awake",
       keepAwakeHint: "Keep the screen awake while OpenClaw is active.",
+      keepAwakeComputerHint:
+        "Prevent idle sleep while OpenClaw is running. Manual sleep and locking remain available.",
       healthSummary: "Health summaries",
       healthSummaryHint: "Allow the agent to request a health summary from this device.",
       device: "Device",
@@ -582,7 +743,19 @@ const enSettings = {
       computerControlHint:
         "Starts enabled. After this Mac is paired and macOS access is granted, the paired Gateway can move the pointer, click, and type without per-action confirmation. High risk.",
       computerControlProvider: "Computer Control provider",
-      unattendedDesktop: "Unattended desktop hosting",
+      desktopSharing: "Desktop sharing",
+      desktopSharingHint:
+        "View and control this Mac from Systems. Enabled by default. Requires Screen Sharing in macOS System Settings → General → Sharing. Changes briefly reconnect this Mac; a new capability may need pairing approval.",
+      desktopSharingComputerHint:
+        "View and control this computer from Systems. Enabled by default. Requires an authenticated local VNC server. Changes briefly reconnect this computer; a new capability may need pairing approval.",
+      desktopSharingStatus: "Desktop sharing status",
+      desktopSharingStates: {
+        off: "Off",
+        starting: "Starting",
+        running: "Running",
+        error: "Unavailable",
+      },
+      unattendedDesktop: "Keep computer awake",
       unattendedDesktopHint:
         "Keep this Mac awake between jobs while it is connected and hosting. Manual lock and logout are still respected; OpenClaw never unlocks the Mac.",
       desktopAvailability: "Desktop availability",
@@ -599,6 +772,21 @@ const enSettings = {
         "Allow signed tools to drive UI automation via Peekaboo Bridge. Requires Computer Control; otherwise run Peekaboo's own Mac app.",
       browser: "Browser",
       chromeExtension: "Chrome extension",
+      chromeExtensionOnMac: "Chrome on this Mac",
+      chromeExtensionDetected: "Installed",
+      chromeExtensionNotInstalled: "Not installed",
+      chromeExtensionUnknown: "Status unavailable",
+      chromeExtensionChecking: "Checking installation…",
+      chromeExtensionCheckAgain: "Check again",
+      chromeExtensionRepair: "Repair Mac connection",
+      chromeExtensionRepairHint:
+        "The extension is installed. Repair the Mac connection to enable automatic pairing.",
+      chromeExtensionEnableHint:
+        "The extension is installed but not enabled. Open Chrome and approve or enable OpenClaw.",
+      chromeExtensionStatusFailed:
+        "Could not check Chrome installation automatically. You can still run setup. Make sure the OpenClaw Mac app and CLI are up to date.",
+      chromeExtensionStatusUnsupported:
+        "Automatic installation checks require an updated Mac app. Open Chrome to check whether OpenClaw is installed and enabled.",
       chromeExtensionSetup: "Set up Chrome on this Mac",
       chromeExtensionHint:
         "Prepare the OpenClaw extension on this Mac, then approve it in Chrome. This does not install on a remote Gateway.",
@@ -642,6 +830,7 @@ const enSettings = {
         limited: "Limited",
         denied: "Denied",
         notDetermined: "Not determined",
+        notGranted: "Not granted",
         unavailable: "Unavailable",
       },
       permissions: {
@@ -664,10 +853,6 @@ const enSettings = {
           hint: "Use Apple Speech; passive Voice Wake stays on-device.",
         },
         location: { title: "Location", hint: "Share location when requested by the agent." },
-        automation: {
-          title: "Automation (Terminal)",
-          hint: "Control Terminal for automation actions; other apps request access separately.",
-        },
         contacts: { title: "Contacts", hint: "Access contacts when requested by the agent." },
         calendars: {
           title: "Calendars",
@@ -685,9 +870,9 @@ const enSettings = {
       preciseLocationReadOnlyHint: "Manage precise location access in Settings.",
       preciseLocationStatuses: { enabled: "Enabled", disabled: "Disabled" },
       privacy: "Privacy",
-      activePresence: "Active computer presence",
+      activePresence: "System-wide presence detection",
       activePresenceHint:
-        "Share this Mac's idle duration so OpenClaw can identify the Mac you used most recently and route node alerts. Never sends keys, pointer positions, app names, or window titles. Requires Accessibility.",
+        "OpenClaw activity identifies this Mac without extra permissions. Enable this to also detect activity in other apps. Shares only idle duration, never keys, pointer positions, app names, or window titles. Requires Accessibility.",
     },
     deviceTalk: {
       title: "This Mac",
@@ -892,7 +1077,8 @@ const enSettings = {
     appearance: {
       intro: "Theme, chat, and sidebar preferences for this Control UI client.",
       theme: "Theme",
-      chooseTheme: "Choose a theme family.",
+      chooseTheme: "Choosing a different theme resets its fonts and accent colors.",
+      themeUnavailable: "{id} is unavailable. Using Claw until the theme becomes available again.",
       typography: "Typography",
       fonts: {
         ui: "Interface",
@@ -920,7 +1106,7 @@ const enSettings = {
       accent: "Accent color",
       accentHint: "Choose an accent color for buttons, highlights, and other controls.",
       customAccent: "Custom color",
-      usingInheritedAccent: "Using inherited accent",
+      usingThemeAccent: "Using theme accent",
       usingAccent: "Using {value}",
       accents: {
         default: "Theme default",
@@ -959,9 +1145,27 @@ const enSettings = {
         "Optional CSS width for the centered transcript, such as 960px, 82%, or min(1280px, 82%).",
       messageWidthInvalid:
         "Enter a CSS width such as 960px, 82%, min(1280px, 82%), or calc(100% - 2rem).",
+      showTaskProgress: "Show task progress cards",
+      showTaskProgressHint:
+        "Show task progress in the chat composer. Hiding it does not stop the agent or clear saved progress. Dashboard widgets and session previews are unchanged.",
       collapseTaskProgress: "Collapse task progress by default",
       collapseTaskProgressHint:
-        "Keep task progress collapsed while work is active, then expand it when the response finishes.",
+        "Start task progress collapsed. It can expand when the response finishes if you are at the end of the chat. A manual close keeps it collapsed for that session.",
+    },
+    sessionSources: {
+      title: "Session sources",
+      hint: "Choose which coding apps show their existing conversations in the sidebar.",
+      scope: "Applies to everyone on this Gateway. Changes require a Gateway restart.",
+      claude: "Show Claude Code sessions",
+      codex: "Show Codex sessions",
+      opencode: "Show OpenCode sessions",
+      pi: "Show Pi sessions",
+      sourceHint:
+        "Discover conversations on this Gateway and eligible paired computers. Requires the {plugin} plugin to be enabled.",
+      empty: "No supported session source plugins are installed. Add one in Manage plugins.",
+      unavailable:
+        "Session source settings are unavailable. Reconnect or reload Settings to try again.",
+      managePlugins: "Manage plugins",
     },
     sidebarPrefs: {
       title: "Sidebar",
@@ -971,6 +1175,45 @@ const enSettings = {
       deleteConfirm: "Confirm before deleting sessions",
       deleteConfirmHint:
         "Applies to sidebar deletes. Stopping cloud workers and removing preserved worktrees always ask.",
+    },
+    sessionStorage: {
+      title: "Session storage",
+      description: "Transcript counts and disk usage across this Gateway's agent databases.",
+      transcripts: "Transcripts",
+      transcriptCounts: "{hot} uncompressed · {cold} archived",
+      database: "Databases",
+      walSize: "Write-ahead logs: {size}",
+      archives: "Archive files",
+      embeddedArchives: "Compressed archives in database",
+      embeddedArchivesHint: "Included in the database size above.",
+      refreshAfterError: "Refresh to check the current maintenance state.",
+      byAgent: "Details by agent",
+      agentCounts:
+        "{hot} uncompressed · {cold} archived · Database {database} · WAL {wal} · Archive files {archives} · Compressed in database {embedded}",
+      worker: "Background maintenance",
+      completed: "Last completed {time} · {count} transcripts archived",
+      notRun: "No completed maintenance run in this Gateway process.",
+      running: "Running",
+      runningProgress: "{archived} transcripts archived · {externalized} archives moved to files",
+      externalized: "{count} compressed archives moved from the database to files.",
+      idle: "Idle",
+      failed: "Needs attention",
+      adminRequired: "Administrator access is required to inspect session storage.",
+      disconnected: "Connect to the Gateway to inspect session storage.",
+      automatic: "Automatic archival",
+      enabled: "Archive older transcripts",
+      enabledHint:
+        "Workers move inactive transcripts into compressed JSONL files. Running sessions stay in the database; archived history is restored before use.",
+      afterDays: "Archive after (days)",
+      afterDaysHint:
+        "Days since the transcript last changed. Changes apply without a Gateway restart.",
+      backupHint:
+        "OpenClaw backups capture archived history with the database. Direct database copies also need the archive files. Missing or damaged archives require recovery from a backup.",
+      advanced: "Advanced session settings",
+      runNow: "Run now",
+      runHint: "Run one background batch using the saved, applied policy.",
+      runStarted: "Background batch started. You can leave this page while it runs.",
+      runCompleted: "Batch completed. {count} transcripts archived.",
     },
     sessionObserver: {
       title: "Session observer",
@@ -997,11 +1240,236 @@ const enSettings = {
       assistant: "Assistant",
     },
   },
+  memoryPage: {
+    intro: "Choose how OpenClaw stores, searches, and maintains agent memory.",
+    tablistLabel: "Memory sections",
+    tabs: {
+      overview: "Overview",
+      memories: "Memories",
+      dreams: "Dreams",
+      settings: "Settings",
+    },
+    overview: {
+      hero: {
+        awake: "Memory is awake",
+        waking: "Waking memory…",
+        hibernating: "Memory is hibernating",
+        needsAttention: "Memory needs attention",
+        activeDescription: "{engine} · {mode}",
+        loadingDescription: "Checking this agent's memory engine and dream cycle.",
+        offDescription: "Choose a memory engine in Settings to wake it up.",
+        disabledDescription: "The selected memory engine is disabled. Re-enable it in Settings.",
+        gatewayOffline: "The gateway is offline, so memory status is unavailable.",
+        hybridSearch: "hybrid search",
+        keywordSearch: "keyword search (no embeddings)",
+        openSettings: "Open Settings",
+        retry: "Retry",
+        refresh: "Refresh status",
+      },
+      schedule: {
+        title: "Sleep schedule",
+        lightDescription:
+          "Sorts fresh short-term notes and stages promising candidates without changing long-term memory.",
+        remDescription:
+          "Reflects on themes and recurring ideas across recent activity to strengthen ranking without changing long-term memory.",
+        deepDescription:
+          "Scores staged candidates, promotes the keepers into long-term memory (MEMORY.md), and writes the dream diary.",
+        nextRun: "next {time}",
+        lastRun: "last {time}",
+        notScheduled: "Not scheduled",
+        learnMore: "How dreaming works",
+        openDocs: "Open dreaming guide",
+      },
+      activity: {
+        title: "Activity",
+        promotedToday: "Promoted today",
+        promotedTotal: "Promoted total",
+        shortTermCount: "Pending short-term entries",
+        phaseHitCount: "Phase signals",
+        lightPhaseHitCount: "Light-phase hits",
+        remPhaseHitCount: "REM-phase hits",
+      },
+      health: {
+        title: "Engine health",
+        provider: "Provider",
+        embeddings: "Embeddings",
+        runtime: "Embedding runtime",
+        healthy: "Ready",
+        unavailable: "Unavailable",
+        notChecked: "Not checked",
+        notCheckedDescription: "Embedding readiness has not been checked yet.",
+        checking: "Checking…",
+        test: "Test",
+        testing: "Testing…",
+      },
+      shortcuts: {
+        title: "Explore memory",
+        memories: "Search memories",
+        diary: "Read the dream diary",
+        settings: "Configure memory",
+      },
+    },
+    memories: {
+      searchLabel: "Search memories",
+      searchPlaceholder: "Search this agent's memories",
+      searchButton: "Search",
+      idle: "Search for a person, project, decision, or anything else this agent remembers.",
+      searching: "Searching memories…",
+      results: "{count} results",
+      empty: "No memories matched “{query}”.",
+      error: "Memory search failed: {message}",
+      retry: "Retry",
+      gatewayUpdateRequired: "Update the gateway to search memories from the Control UI.",
+      hybridSearch: "hybrid search",
+      keywordSearch: "keyword search",
+      lineRange: "lines {start}–{end}",
+      score: "score {score}",
+      sourceMemory: "memory",
+      sourceSessions: "sessions",
+      fileLoading: "Loading the full memory file…",
+      fileError: "Could not load this memory file: {message}",
+      fileUnsupported: "This memory file cannot be shown as text.",
+    },
+    engine: {
+      title: "Engine",
+      description:
+        "Exactly one memory plugin owns the memory slot. Selecting an engine enables it and disables the others.",
+      rowTitle: "Memory engine",
+      openClawMemory: "OpenClaw Memory",
+      off: "Off",
+      unavailable: "Unavailable",
+      autoHint: "No engine is pinned in config, so the slot falls back to its default owner.",
+      explicitHint: "This engine is pinned in config under plugins.slots.memory.",
+      offHint: "Memory is switched off in config: plugins.slots.memory is set to none.",
+      catalogUnavailable: "Connect to the gateway to change the memory engine.",
+      changeFailed: "Could not change the memory engine",
+      disabledTitle: "This engine is disabled",
+      disabledHint:
+        "The memory slot points at this plugin, but the plugin itself is disabled, so memory is not running.",
+      enable: "Enable",
+    },
+    addons: {
+      title: "Add-ons",
+      description:
+        "These plugins layer on top of the engine instead of competing for the slot, so any combination can run at once.",
+      activeMemory: {
+        title: "Active memory",
+      },
+      memoryWiki: {
+        title: "Memory wiki",
+      },
+      toggleAriaLabel: "Enable or disable {plugin}",
+      changeFailed: "Could not update {plugin}",
+      stateUnknown: "Unknown",
+      manage: "Enable or disable add-ons",
+      manageLink: "Open Plugins",
+    },
+    import: {
+      title: "Import",
+      description: "Bring existing memory from other assistants into an agent workspace.",
+      link: "Open Memory Import",
+    },
+    search: {
+      intro: "Embedding and retrieval defaults shared by every agent that has no memory override.",
+    },
+    dreaming: {
+      intro:
+        "Dreaming runs as one managed automation across every agent workspace, so these settings are global. They are owned by the {plugin} plugin.",
+      schedule: {
+        title: "Schedule",
+        description: "When the full sweep runs and which model narrates it.",
+      },
+      frequency: {
+        label: "Dreaming frequency",
+        help: "Cron cadence for the full dreaming sweep (light, REM, then deep). Leave empty for the plugin default.",
+        placeholder: "0 3 * * *",
+      },
+      timezone: {
+        label: "Timezone",
+        help: "IANA timezone used to interpret the cron cadence.",
+        placeholder: "Europe/Vienna",
+        default: "Gateway local timezone",
+      },
+      model: {
+        label: "Dreaming model",
+        help: "Provider/model override for dream diary narration. Requires subagent model overrides to be allowed.",
+        placeholder: "anthropic/claude-sonnet-4-6",
+        default: "Agent model",
+      },
+      verboseLogging: {
+        label: "Verbose logging",
+        help: "Log each dreaming phase in detail. Useful when tuning thresholds.",
+      },
+      storage: {
+        title: "Storage",
+        description: "Where promoted memories and dreaming reports are written.",
+        modeLabel: "Storage mode",
+        modeHelp: "Inline writes into the memory file; separate keeps a dedicated report file.",
+        modes: {
+          inline: "Inline",
+          separate: "Separate",
+          both: "Both",
+        },
+        separateReportsLabel: "Separate reports",
+        separateReportsHelp: "Keep dreaming reports out of the main memory file.",
+      },
+      phases: {
+        light: {
+          title: "Light phase",
+          description: "Cheap recent-activity pass that stages replay candidates.",
+        },
+        deep: {
+          title: "Deep phase",
+          description: "Scored promotion pass that graduates short-term entries into memory.",
+        },
+        rem: {
+          title: "REM phase",
+          description: "Pattern pass that looks for recurring themes across the lookback window.",
+        },
+      },
+      phaseFields: {
+        enabled: "Enabled",
+        enabledHelp: "Run this phase during the sweep.",
+        lookbackDays: "Lookback days",
+        lookbackDaysHelp: "How far back this phase reads. Leave empty for the plugin default.",
+        limit: "Limit",
+        limitHelp: "Maximum entries this phase processes per run.",
+        dedupeSimilarity: "Dedupe similarity",
+        dedupeSimilarityHelp: "Similarity above which two candidates are treated as duplicates.",
+        minScore: "Minimum score",
+        minScoreHelp: "Promotion score an entry must reach.",
+        minRecallCount: "Minimum recalls",
+        minRecallCountHelp: "How often an entry must be recalled before it can be promoted.",
+        minUniqueQueries: "Minimum unique queries",
+        minUniqueQueriesHelp: "How many distinct queries must have surfaced the entry.",
+        recencyHalfLifeDays: "Recency half-life (days)",
+        recencyHalfLifeDaysHelp: "How quickly older recall signals lose weight.",
+        maxAgeDays: "Maximum age (days)",
+        maxAgeDaysHelp: "Ignore short-term entries older than this.",
+        maxPromotedSnippetTokens: "Max promoted snippet tokens",
+        maxPromotedSnippetTokensHelp:
+          "Token budget for each promoted snippet. Provenance stays attached.",
+        minPatternStrength: "Minimum pattern strength",
+        minPatternStrengthHelp: "Strength a recurring pattern must reach to be reported.",
+      },
+      agentScope: {
+        rowTitle: "Agent",
+      },
+      unsupported: {
+        title: "Dreaming settings",
+        rowTitle: "Not available for this engine",
+        description:
+          "The {plugin} plugin owns the memory slot and its config schema has no dreaming section, so these settings cannot be stored. Switch the engine above to edit them.",
+      },
+    },
+  },
 } satisfies TranslationMap;
 
 export const registerSettingsEnglish = Object.assign(
   () => {
+    en.memoryPage = enSettings.memoryPage;
     en.modelProviders = enSettings.modelProviders;
+    en.searchPage = enSettings.searchPage;
     // Extend the shared objects: eager save/update copy and existing readers survive.
     en.cloudWorkersPage = enSettings.cloudWorkersPage;
     Object.assign(en.connection, enSettings.connection);

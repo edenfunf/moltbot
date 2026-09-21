@@ -10,11 +10,11 @@ The mode, scope, and backend settings, how a creator-role requirement overrides 
 
 Three independent settings control sandbox behavior:
 
-| Setting | Key                               | Values                                 | Default  |
-| ------- | --------------------------------- | -------------------------------------- | -------- |
-| Mode    | `agents.defaults.sandbox.mode`    | `off`, `non-main`, `all`               | `off`    |
-| Scope   | `agents.defaults.sandbox.scope`   | `agent`, `session`, `shared`           | `agent`  |
-| Backend | `agents.defaults.sandbox.backend` | `docker`, `podman`, `ssh`, `openshell` | `docker` |
+| Setting | Key                               | Values                                            | Default  |
+| ------- | --------------------------------- | ------------------------------------------------- | -------- |
+| Mode    | `agents.defaults.sandbox.mode`    | `off`, `non-main`, `all`                          | `off`    |
+| Scope   | `agents.defaults.sandbox.scope`   | `agent`, `session`, `shared`                      | `agent`  |
+| Backend | `agents.defaults.sandbox.backend` | `docker`, `podman`, `ssh`, `openshell`, `crabbox` | `docker` |
 
 **Mode** controls when sandboxing applies:
 
@@ -28,6 +28,43 @@ is immutable for the session; unavailable backends fail closed, and elevated
 execution or Gateway/node host overrides cannot bypass it. The default
 `"inherit"` preserves existing agent-mode behavior. See
 [Named operator roles](/gateway/operator-scopes#named-operator-roles).
+
+### Per-chat sandbox opt-out
+
+An administrator can opt one idle chat out of configured sandboxing without
+changing the agent or global configuration. `sessions.patch` accepts
+`sandboxMode: "off"`; `sandboxMode: null` clears that choice and restores the
+configured policy. Both mutations require `operator.admin` and existing access
+to the target session. A creator-role requirement (`sandbox: "required"`) is
+immutable and always takes precedence: even an administrator cannot opt that
+session out.
+
+For race-safe updates, include `expectedSessionId`, `expectedLifecycleRevision`,
+and `expectedSandboxMode` (`null` means no override). A stale expectation rejects
+the mutation rather than changing a replaced chat or overwriting another choice.
+`sessions.patchMany` supports the same sandbox mutation with expectations on each
+target. Stop any active run before changing the sandbox mode; the Gateway checks
+again before committing and never changes containment underneath a running turn.
+
+The choice persists with that chat across restarts and resets. A newly forked chat
+does not inherit the opt-out; restoring a checkpoint in the same chat retains it.
+Clearing the override does not remove sandbox containers or change other chats.
+Older versions that do not support this preference follow their configured
+sandbox policy instead.
+
+Native runtime selection and sending can offer **Continue for this chat** when an
+administrator explicitly chooses the native agent's own permissions. This
+combines the optional sandbox opt-out with Full access and consent bound to that
+chat and runtime. Optional native tool and workspace restrictions are then
+delegated to the native agent; OpenClaw-hosted tools keep their existing policy.
+After a refused send, confirmation saves the permissions and retries that message
+once. Selection-only confirmation does not send the draft. Neither changes global
+settings. Native consent is cleared on reset or runtime change and is never
+inherited by a fork. Required sandboxing, required workspace boundaries, and remote
+execution placement remain independently enforced. See
+[native runtime permissions](/tools/acp-agents-setup#permissions-for-native-chat-runtimes).
+
+### Scope and backend
 
 **Scope** controls how many containers/environments are created:
 
@@ -57,7 +94,7 @@ Non-shared runtime identity also includes the resolved agent workspace path. Thi
 
 The first use after upgrading from an older release creates non-shared runtimes and sandbox workspaces under the workspace-qualified identity. Existing non-shared runtimes are not adopted; this is an intentional one-time reset. They can age out through configured prune settings or be removed with `openclaw sandbox recreate`; the next use provisions the current identity.
 
-**Backend** controls which runtime executes sandboxed tools. Docker and Podman share `agents.defaults.sandbox.docker`; SSH-specific config lives under `agents.defaults.sandbox.ssh`; OpenShell-specific config lives under `plugins.entries.openshell.config`.
+**Backend** controls which runtime executes sandboxed tools. Docker and Podman share `agents.defaults.sandbox.docker`; SSH-specific config lives under `agents.defaults.sandbox.ssh`; OpenShell-specific config lives under `plugins.entries.openshell.config`; Crabbox lease settings live under `plugins.entries.crabbox.config.sandbox` (see [Crabbox backend](/gateway/sandboxing/crabbox-backend)).
 
 |                     | Docker or Podman backend                  | SSH                            | OpenShell                                           |
 | ------------------- | ----------------------------------------- | ------------------------------ | --------------------------------------------------- |

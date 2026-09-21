@@ -54,7 +54,7 @@ OpenClaw host:
   | tail -200
 ```
 
-Useful excerpts usually include `openai/gpt-5.6-sol` or `openai/gpt-5.6-luna`,
+Useful excerpts usually include `openai/gpt-6-astra` or `openai/gpt-5.6-luna`,
 `Runtime: OpenAI Codex`, `agentRuntime.id` or `harnessRuntime`,
 `candidateProvider: "openai"`, and a `401`, `Incorrect API key`, or
 `No API key` result. A corrected run should show the OpenAI OAuth path
@@ -82,6 +82,20 @@ heap; it does not cap or enlarge Codex. Managed Gateway installs already choose
 an adaptive V8 heap, and raising it can leave less host memory for Codex. Use
 [Gateway memory troubleshooting](/gateway/troubleshooting#gateway-exits-during-high-memory-use)
 for Gateway pressure, and inspect host or container memory for the Codex child.
+
+**"Cannot inspect Codex processes":** this error comes from local process
+inspection before model inference. For a deadline error, retry after host
+responsiveness recovers. For a permissions error, check access to `/proc` on
+Linux or `ps` on macOS.
+
+**A new turn fails during cleanup after a Gateway restart:** OpenClaw checks
+registered Codex processes before starting a replacement. Registrations for
+processes that have exited or whose PID has been reused are removed automatically,
+without scanning unrelated processes. Boot cleanup and new connections serialize
+recovery so they cannot stop or resume the same orphan concurrently. Live orphaned
+processes still require verified descendant cleanup before replacement work starts.
+If cleanup remains blocked, check Gateway logs and host process-inspection access;
+do not delete process registrations to bypass recovery.
 
 The bundled Codex has no heap or RSS limit and no configurable idle-unload
 delay. After the last client unsubscribes, an inactive thread can remain loaded

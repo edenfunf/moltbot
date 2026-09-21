@@ -4,6 +4,7 @@ import {
   getAgentEventLifecycleGeneration,
   isAgentEventLifecycleGenerationCurrent,
 } from "../../../infra/agent-events.js";
+import { getGatewayContextResolver as getEntryGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import {
   runWithGatewayIndependentRootWorkAdmission,
   GatewayDrainingError,
@@ -18,19 +19,15 @@ import { retrySubagentCleanup } from "../spawn/subagent-spawn-cleanup.js";
 import { readGatewayRunId } from "../spawn/subagent-spawn-gateway.js";
 import { resolveSwarmConfig } from "../swarm/swarm-config.js";
 import { bindSwarmRunReservation, enqueueSwarmRun } from "../swarm/swarm-scheduler.js";
+import { shouldSuppressSubagentRecoverySessionEffects } from "./subagent-recovery-state.js";
 import type { SubagentRegistryDeps } from "./subagent-registry-deps.js";
-import {
-  reconcileOrphanedRestoredRuns,
-  updateSubagentArchiveAtMs,
-} from "./subagent-registry-helpers.js";
+import { updateSubagentArchiveAtMs } from "./subagent-registry-helpers.js";
 import type { SubagentLifecycleController } from "./subagent-registry-lifecycle.js";
-import { isRetiredSubagentExecution } from "./subagent-registry-restart-recovery-helpers.js";
+import { getLatestSubagentRunByChildSessionKeyFromRuns } from "./subagent-registry-queries.js";
+import { isRetiredSubagentSessionOwner } from "./subagent-registry-restart-recovery-helpers.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
-import {
-  loadSubagentSessionEntry,
-  type SubagentSessionStoreCache,
-} from "./subagent-session-reconciliation.js";
+import { loadSubagentSessionEntry } from "./subagent-session-reconciliation.js";
 
 type RestoredQueuedFailureSettlementClaim = {
   entry: SubagentRunRecord;
@@ -55,7 +52,6 @@ export function isRestoredQueuedFailureSettlementClaimed(entry: SubagentRunRecor
 
 export function createSubagentRegistryRestorer(config: {
   runs: Map<string, SubagentRunRecord>;
-  resumedRuns: Set<string>;
   deps: () => SubagentRegistryDeps;
   getGatewayContextResolver: () => GatewayContextResolver | undefined;
   bindGatewayOwners: () => boolean;
@@ -93,7 +89,6 @@ export function createSubagentRegistryRestorer(config: {
 }) {
   const {
     runs,
-    resumedRuns,
     deps,
     getGatewayContextResolver,
     bindGatewayOwners,
@@ -211,7 +206,6 @@ export function createSubagentRegistryRestorer(config: {
     ensureListener();
     // Session-mode runs have no archive deadline but still need TTL cleanup.
     startSweeper();
-    const restoredSessionCache: SubagentSessionStoreCache = new Map();
     for (const [runId, entry] of runs) {
       // Restart recovery exclusively owns receipt-bearing source rows until it
       // remaps or terminalizes them. Generic resume would wait on an obsolete run.
@@ -221,7 +215,6 @@ export function createSubagentRegistryRestorer(config: {
       if (entry.collect && entry.execution.status === "queued") {
         const cleanupSessionEntry = loadSubagentSessionEntry({
           childSessionKey: entry.childSessionKey,
-          storeCache: restoredSessionCache,
         });
         const launch = entry.queuedLaunch;
         if (!launch) {
@@ -324,15 +317,12 @@ export function createSubagentRegistryRestorer(config: {
       }
       const sessionEntry = loadSubagentSessionEntry({
         childSessionKey: entry.childSessionKey,
-        storeCache: restoredSessionCache,
       });
       // Orphan recovery owns aborted sessions and exact still-running retired
       // executions. Completed sessions must resume normal settlement and delivery.
       if (
         sessionEntry?.abortedLastRun === true ||
-        (sessionEntry?.status === "running" &&
-          sessionEntry.lifecycleRunId === entry.runId &&
-          isRetiredSubagentExecution(entry))
+        isRetiredSubagentSessionOwner(entry, sessionEntry)
       ) {
         continue;
       }
@@ -341,7 +331,7 @@ export function createSubagentRegistryRestorer(config: {
     activated = true;
   }
 
-  function restoreSubagentRunsOnce(retryDelayMs = RESTORE_RETRY_DELAY_MS) {
+  function restoreSubagentRunsOnce(retryDelayMs = RESTORE_RETRY_DELAY_MS, throwOnError = false) {
     if (restoreState !== "idle") {
       return;
     }
@@ -358,10 +348,9 @@ export function createSubagentRegistryRestorer(config: {
         return;
       }
       const cfg = deps().getRuntimeConfig();
-      let restoredStateChanged = reconcileOrphanedRestoredRuns({
-        runs,
-        resumedRuns,
-      });
+      // Hydration retains unfinished owners. Gateway-bound resume/sweep must
+      // settle their canonical tasks before normal cleanup may retire them.
+      let restoredStateChanged = false;
       if (backfillSubagentRequesterAgentIds(cfg, runs.values()) > 0) {
         restoredStateChanged = true;
       }
@@ -381,6 +370,9 @@ export function createSubagentRegistryRestorer(config: {
         `failed to restore subagent runs from disk: ${err instanceof Error ? err.message : String(err)}`,
       );
       scheduleRestoreRetry(retryDelayMs);
+      if (throwOnError) {
+        throw err;
+      }
     }
   }
 
@@ -419,8 +411,11 @@ export function createSubagentRegistryRestorer(config: {
       entry.queuedLaunch === claim.queuedLaunch &&
       entry.killIntent === claim.killIntent &&
       entry.killReconciliation === claim.killReconciliation;
-    const ownsCleanup = () =>
-      ownsClaim() && isAgentEventLifecycleGenerationCurrent(lifecycleGeneration);
+    const ownsSessionEffects = () =>
+      isAgentEventLifecycleGenerationCurrent(lifecycleGeneration) &&
+      !shouldSuppressSubagentRecoverySessionEffects(entry) &&
+      getLatestSubagentRunByChildSessionKeyFromRuns(runs, entry.childSessionKey) === entry;
+    const ownsCleanup = () => ownsClaim() && ownsSessionEffects();
     let sessionOwnershipChanged = false;
     let sessionDeleted = false;
     try {
@@ -439,6 +434,8 @@ export function createSubagentRegistryRestorer(config: {
             }
             const outcome = await deleteSubagentSessionForCleanup({
               callGateway: deps().callGateway,
+              gatewayBinding: { resolveGatewayContext: getEntryGatewayContextResolver(entry) },
+              isCurrent: ownsCleanup,
               childSessionKey: entry.childSessionKey,
               expectedSessionId,
               expectedLifecycleRevision,
@@ -484,10 +481,9 @@ export function createSubagentRegistryRestorer(config: {
             const current = runs.get(runId);
             return current !== entry || current.execution.status !== "queued";
           }
-          if (!isAgentEventLifecycleGenerationCurrent(lifecycleGeneration)) {
-            // Lifecycle rotation retires external session effects, not the durable
-            // failure fact. Keep settling the exact row so the collector receives
-            // a visible terminal outcome before its FIFO slot is released.
+          if (!ownsSessionEffects()) {
+            // Retired session authority still permits the original row's durable
+            // failure and task settlement before releasing its FIFO slot.
             entry.execution = {
               ...entry.execution,
               suppressSessionEffects: true,
@@ -521,7 +517,7 @@ export function createSubagentRegistryRestorer(config: {
       }
       if (
         runs.get(runId) === entry &&
-        !isAgentEventLifecycleGenerationCurrent(lifecycleGeneration) &&
+        !ownsSessionEffects() &&
         entry.execution.suppressSessionEffects !== true
       ) {
         const previousExecution = entry.execution;

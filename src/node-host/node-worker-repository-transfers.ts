@@ -1,10 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { REMOTE_GITHUB_PUBLICATION_SNAPSHOT_JS } from "../gateway/github-repository-publication-snapshot.js";
-import {
-  parseWorkerWorkspaceManifest,
-  type WorkerWorkspaceManifest,
-  type WorkerWorkspaceReconciliationJournal,
+import type {
+  WorkerWorkspaceManifest,
+  WorkerWorkspaceReconciliationJournal,
 } from "../gateway/worker-environments/workspace-manifest.js";
 import { applyStagedWorkerWorkspace } from "../gateway/worker-environments/workspace-reconcile.js";
 import { tempWorkspace } from "../infra/private-temp-workspace.js";
@@ -12,23 +11,17 @@ import {
   NODE_WORKSPACE_EMPTY_MANIFEST,
   NODE_WORKSPACE_EMPTY_MANIFEST_REF,
 } from "../worker/node-workspace-transfer-protocol.js";
-import { runWorkspaceCommand } from "./node-worker-workspace-commands.js";
+import { readWorkspaceManifest, runWorkspaceCommand } from "./node-worker-workspace-commands.js";
 
 export async function readNodeRepositoryCheckpointBase(params: {
   manifestHome: string;
   baseManifestRef: string;
   current: WorkerWorkspaceManifest;
 }): Promise<WorkerWorkspaceManifest> {
-  const raw = await fs.readFile(
-    path.join(
-      params.manifestHome,
-      ".openclaw-worker",
-      "manifests",
-      `${params.baseManifestRef.slice("sha256:".length)}.json`,
-    ),
-    "utf8",
+  const { manifest: base } = await readWorkspaceManifest(
+    params.manifestHome,
+    params.baseManifestRef,
   );
-  const base = parseWorkerWorkspaceManifest(raw, params.baseManifestRef);
   if (!base.baseCommit || base.baseCommit !== params.current.baseCommit) {
     throw new Error("Repository checkpoint does not match the cloned commit");
   }

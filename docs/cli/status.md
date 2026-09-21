@@ -8,6 +8,13 @@ title: "openclaw status"
 
 Diagnostics for channels + sessions.
 
+Task counts and audit totals use a read-only metadata summary. Retained task
+payloads and delivery history are not loaded for each status request, and
+overlapping requests share the pending summary read. Database work runs on the
+shared SQLite worker; live task ownership is still checked by the Gateway.
+These summaries are not a full physical database-integrity check. Full registry
+restoration and Doctor retain their integrity verification.
+
 ```bash
 openclaw status
 openclaw status --all
@@ -24,8 +31,10 @@ openclaw status --usage --agent work
 | `--usage`               | Prints normalized provider usage windows as `X% left`.                                                          |
 | `--agent <id>`          | Selects the agent auth/profile scope for `--usage`. Required when an explicit multi-agent fleet has no default. |
 | `--json`                | Machine-readable output.                                                                                        |
-| `--timeout <ms>`        | Probe timeout in milliseconds (default: `10000`).                                                               |
+| `--timeout <ms>`        | Probe timeout in milliseconds (default: `60000`).                                                               |
 | `--verbose` / `--debug` | Also print the raw Gateway target resolution before the report.                                                 |
+
+Status starts one monotonic probe deadline when the command begins. Local readiness, Gateway status, provider usage, and deep health consume the remaining allowance. Remote targets and explicit Gateway URLs skip local readiness but keep the same deadline. Local probes report the observed startup phase while waiting. If the Gateway is still starting when the budget expires, status reports “still starting” instead of unreachable and skips deep channel probes. JSON keeps the status report and adds `gateway.readiness: "still-starting"` and `gateway.startupPhase`. An explicit `--timeout` limits that shared allowance.
 
 Channels without a probe, such as WhatsApp, report lifecycle health instead.
 In the Health table, `healthy` is `OK`; degraded lifecycle states and failed
@@ -42,6 +51,41 @@ security audit, plugin compatibility, and memory-vector probes are left to
 `openclaw status --all`, `openclaw status --deep`, `openclaw security audit`,
 and `openclaw memory status --deep`.
 
+Local agent ownership checks read schema and owner metadata from one consistent
+SQLite snapshot, including committed WAL changes. They do not copy the entire
+agent database unless its journal state requires private recovery. Startup and
+migration readiness checks retain their full validation.
+
+The CLI runs in a separate process and contacts the Gateway over WebSocket, even
+for a local loopback target. `--timeout` bounds probes, not the entire status
+command. Cold device-token worker initialization happens during request preparation,
+before the RPC timeout starts; connection token reads remain fresh. Compare
+`openclaw gateway call status --json` with `openclaw status --json`
+to separate the Gateway response from local report collection. Gateway
+[Prometheus RPC timings](/gateway/prometheus) exclude CLI startup and connection
+setup; a slow CLI can finish without a slow Gateway handler.
+
+When the Gateway is reachable and authorized, `status --json` uses its status
+projection instead of scanning every agent's plugin metadata and database
+ownership locally. The Gateway supplies session counts, heartbeat and task
+state, runtime vitals, and agent roster facts. The request keeps `operator.read`
+scope, including its redaction of session paths, recent sessions, model defaults,
+and detailed admission refusals. After the Gateway hydrates a physical session
+store, clean repeated status reads reuse its resident materialized session rows;
+only topology changes and dirty or missing exact identities return to the
+existing read-only SQLite path.
+
+JSON `collection.notCollected` names fields that were not inspected and explains
+why. Online status leaves workspace and bootstrap checks unknown, including
+`agents.bootstrapPendingCount: null`. It also skips local config validation,
+channel and memory credential inspection, and the local plugin inspections
+normally requested by `--all` or `--deep`. Requested security audit and plugin
+compatibility sections report `collected: false`; memory remains `null`. Use
+`openclaw security audit`, `openclaw plugins inspect --all`, or
+`openclaw memory status --deep` for those local inspections. `--deep` still requests
+Gateway health, and `--usage --agent <id>` retains its credential scope.
+When the Gateway is unavailable, JSON status retains local diagnostics.
+
 For Git installs, plain status compares cached remote-tracking refs without a
 network fetch. If the latest recorded update fetch failed and no later update
 run records a completed fetch, the Update row shows
@@ -56,6 +100,20 @@ not clear the recorded warning. Use `openclaw update status` for a fresh check
 and the last update run, or run `openclaw update` again. `openclaw status --deep`
 also fetches for that check; it does not change the ledger. See
 [Release channels](/install/development-channels#checking-current-status).
+
+## Status timing
+
+Use the existing diagnostic timeline to locate time spent outside Gateway RPCs:
+
+```bash
+OPENCLAW_DIAGNOSTICS=timeline \
+OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=/tmp/openclaw-status-timeline.jsonl \
+  openclaw status --json
+```
+
+The timeline includes configuration and secret resolution, agent admission,
+local session reads, Gateway probes, and summary collection. Durations include
+waiting; parallel stages overlap and should not be added together.
 
 ## Skills diagnosis
 
@@ -101,6 +159,11 @@ Use `openclaw skills check --agent <id>` to inspect the missing requirements.
 
 - `--usage` prints normalized provider usage windows as `X% left`.
   It also adds usage snapshots to `--all`; `--agent` keeps the same usage-only scope.
+  Usage probes receive the remaining shared probe budget, capped by `--timeout` when set;
+  providers that exceed that bound report `Timeout` in the usage output.
+  An exhausted budget reports `Timeout` without starting provider auth or usage
+  requests. Expiry cancels active usage requests and prevents late auth results
+  from starting another request; completed provider snapshots remain available.
 - In an explicit multi-agent setup, `--usage` reads the auth profiles owned by
   `agents.defaults.systemAgent.agentId` by default. Pass `--agent <id>` to
   inspect another agent; without either owner, OpenClaw does not guess one
@@ -115,6 +178,17 @@ Use `openclaw skills check --agent <id>` to inspect the missing requirements.
 
 ## Overview and update status
 
+The Gateway service row compares its installed package with the active CLI.
+If they resolve to different installations, status names both package paths and
+versions. It recommends `openclaw doctor --fix` or `openclaw gateway install --force`
+when service installation is allowed, or reports the installation owner's refusal.
+This local diagnostic remains available when the Gateway connection fails,
+including a protocol mismatch. JSON exposes the comparison as
+`gatewayService.installationDrift`.
+If local session state requires Doctor, status prints any installation drift to stderr alongside the original error and preserves the failure exit status.
+
+- The **Sessions** overview counts stored conversation rows, including archived
+  rows. Running turns and recent activity are separate from this inventory.
 - Overview includes Gateway + node host service install/runtime status when
   available, plus compact Gateway process uptime and host system uptime.
 - `status --all` shows returned host, IP, version, and platform in **Gateway self**.

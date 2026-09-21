@@ -32,7 +32,7 @@ import {
   appendPreparedSessionTranscriptProjectionChunkInTransaction,
 } from "./session-transcript-projection-rebuild.js";
 import { waitForSessionTranscriptIndexReconcile } from "./session-transcript-reconcile.js";
-import { searchSessionTranscripts } from "./session-transcript-search.js";
+import { searchSessionTranscriptsReadOnlySync as searchSessionTranscripts } from "./session-transcript-search.js";
 
 const tempDirs: string[] = [];
 
@@ -83,6 +83,50 @@ describe("SQLite transcript append", () => {
     expect(message["__openclaw"]).toMatchObject({
       media: [expect.objectContaining({ path: "/media/a.png", contentType: "image/png" })],
     });
+
+    const generation = readTranscriptGenerationInTransaction(database, "append-session");
+    const next = {
+      type: "message",
+      id: "event-2",
+      parentId: "event-1",
+      timestamp: 1001,
+      message: { role: "assistant", content: "next" },
+    };
+    const policy = trackSqliteStatementExecutions(database.db, ["policy"], (sql) =>
+      sql.includes('"session_key_contract"') ? "policy" : null,
+    );
+    let nextJson: string | false;
+    try {
+      nextJson = runOpenClawAgentWriteTransaction(
+        (writer) =>
+          appendTranscriptEventInTransaction(
+            writer,
+            {
+              agentId: "main",
+              env,
+              sessionId: "append-session",
+              sessionKey: "agent:main:append-session",
+            },
+            next,
+          ),
+        { agentId: "main", env },
+      );
+    } finally {
+      policy.restore();
+    }
+    expect(nextJson).toBe(JSON.stringify(next));
+    expect(
+      database.db
+        .prepare("SELECT seq, event_json FROM transcript_events WHERE session_id = ? ORDER BY seq")
+        .all("append-session"),
+    ).toEqual([
+      { seq: 0, event_json: committedJson },
+      { seq: 1, event_json: nextJson },
+    ]);
+    expect(readTranscriptGenerationInTransaction(database, "append-session")).toBe(generation);
+    expect(policy.counts).toEqual({ policy: 1 });
+    expect(policy.rowCounts).toEqual({ policy: 1 });
+    expect(policy.textBytes).toEqual({ policy: 4 });
   });
 });
 
@@ -198,7 +242,7 @@ describe("SQLite exact transcript rewrite", () => {
     await withRewriteFixture(({ db, snapshot, rewrite, scope }) => {
       const before = snapshot();
       const work = trackSqliteStatementExecutions(db, ["fts", "size"], (sql) =>
-        sql.includes("session_transcript_fts")
+        /\bsession_transcript_fts\b/i.test(sql)
           ? "fts"
           : sql.includes("octet_length")
             ? "size"
@@ -237,7 +281,7 @@ describe("SQLite exact transcript rewrite", () => {
       expect(sessionTranscriptIndexNeedsReconcile(db, scope.sessionId)).toBe(false);
       const before = prepareSessionTranscriptProjection(db, scope.sessionId)!;
       const work = trackSqliteStatementExecutions(db, ["fts"], (sql) =>
-        sql.includes("session_transcript_fts") ? "fts" : null,
+        /\bsession_transcript_fts\b/i.test(sql) ? "fts" : null,
       );
       try {
         rewrite({ ...rewriteEvents[1], message: { ...message, content: "changed" } });

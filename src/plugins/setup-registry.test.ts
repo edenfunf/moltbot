@@ -27,15 +27,16 @@ vi.mock("../logging/subsystem.js", async (importOriginal) => {
 });
 
 // Registry tests script exports at module binding; real setup ownership stays active.
-vi.mock("./plugin-module-loader-cache.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./plugin-module-loader-cache.js")>();
+vi.mock("./plugin-instance-module-loader.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./plugin-instance-module-loader.js")>();
+  const { getCachedPluginModuleLoader } = await import("./plugin-module-loader-cache.js");
   return {
     ...actual,
     bindPluginInstanceModuleLoader: (
       params: Parameters<typeof actual.bindPluginInstanceModuleLoader>[0],
     ) =>
       params.instance.bindModuleLoader(
-        actual.getCachedPluginModuleLoader({
+        getCachedPluginModuleLoader({
           modulePath: params.source,
           importerUrl: import.meta.url,
           tryNative: false,
@@ -344,6 +345,58 @@ describe("setup-registry module loader", () => {
 
     expect(resolvePluginSetupProviderCore({ provider: "fixture", env: {} })?.label).toBe(
       expectedLabel,
+    );
+  });
+
+  it("executes canonical dist setup entries instead of their staging wrappers", () => {
+    const packageRoot = makeTempDir();
+    const pluginRoot = path.join(packageRoot, "extensions", "fixture");
+    const sourceSetup = path.join(pluginRoot, "setup-api.ts");
+    const stagingSetup = path.join(
+      packageRoot,
+      "dist-runtime",
+      "extensions",
+      "fixture",
+      "setup-api.js",
+    );
+    const canonicalSetup = path.join(packageRoot, "dist", "extensions", "fixture", "setup-api.js");
+    for (const setupPath of [sourceSetup, stagingSetup, canonicalSetup]) {
+      fs.mkdirSync(path.dirname(setupPath), { recursive: true });
+      fs.writeFileSync(setupPath, "export default {};\n", "utf8");
+    }
+    fs.writeFileSync(
+      path.join(path.dirname(stagingSetup), "package.json"),
+      JSON.stringify({ openclaw: { setupEntry: "./setup-api.js" } }),
+    );
+    mocks.loadPluginManifestRegistry.mockReturnValue({
+      plugins: [
+        {
+          id: "fixture",
+          origin: "bundled",
+          rootDir: pluginRoot,
+          setupSource: sourceSetup,
+          setup: { providers: [{ id: "fixture" }] },
+        },
+      ],
+      diagnostics: [],
+    });
+    const canonicalRealPath = fs.realpathSync(canonicalSetup);
+    mocks.createJiti.mockImplementation(() => (modulePath: string) => ({
+      default: {
+        register(api: {
+          registerProvider: (provider: { id: string; label: string; auth: [] }) => void;
+        }) {
+          api.registerProvider({
+            id: "fixture",
+            label: modulePath === canonicalRealPath ? "canonical" : "staging",
+            auth: [],
+          });
+        },
+      },
+    }));
+
+    expect(resolvePluginSetupProviderCore({ provider: "fixture", env: {} })?.label).toBe(
+      "canonical",
     );
   });
 

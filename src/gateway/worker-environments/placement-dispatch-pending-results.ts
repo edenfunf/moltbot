@@ -36,7 +36,7 @@ import { recoverWorkerWorkspaceReconciliation } from "./workspace-reconcile.js";
 import {
   finalizeWorkspaceResultConflicts,
   settleStagedWorkspaceResult,
-} from "./workspace-result-finalize.js";
+} from "./workspace-result-settlement.js";
 import {
   applyStagedWorkerWorkspaceResult,
   cleanupWorkerWorkspaceResultRef,
@@ -222,6 +222,12 @@ export async function recoverPendingWorkspaceResults(
     }
     const placement = placements.get(pending.sessionId);
     if (environmentId !== undefined && placement?.environmentId !== environmentId) {
+      continue;
+    }
+    if (placements.getPlacementMove(pending.sessionId)?.abandonSource) {
+      // Move recovery owns forced abandonment for this session. Preserve the
+      // pending result fence so recoverPlacementMoves can retire it under
+      // FORCED_WORKER_ABANDONMENT_ERROR and return to local placement.
       continue;
     }
     try {
@@ -573,7 +579,7 @@ export async function recoverPendingWorkspaceResults(
           assertPreservedEnvironment();
           placements.acceptWorkspaceResult(turnClaim);
           const recordedStagedResultRef = placements
-            .listPendingWorkspaceResults()
+            .listPendingWorkspaceResults(turnClaim.sessionId)
             .find(
               (result) =>
                 result.sessionId === turnClaim.sessionId &&
@@ -641,7 +647,7 @@ export async function recoverPendingWorkspaceResults(
       try {
         const current = placements.get(pending.sessionId);
         const currentPending = placements
-          .listPendingWorkspaceResults()
+          .listPendingWorkspaceResults(pending.sessionId)
           .find(
             (candidate) =>
               candidate.sessionId === pending.sessionId &&

@@ -16,6 +16,7 @@ const toolingClosure = [
   "scripts/lib/docker-e2e-scenarios.mts",
   "scripts/lib/official-external-channel-catalog.json",
   "scripts/lib/upgrade-survivor-policy.mjs",
+  "scripts/lib/upgrade-survivor-scenarios.json",
   "scripts/lib/release-version.mjs",
   "scripts/lib/frozen-target-compat.sh",
   "scripts/resolve-frozen-codex-live-suite.mjs",
@@ -42,13 +43,19 @@ const shellOwners = {
       `${prefix}ONBOARD_SESSION_MEMORY_HOOK_MODE`,
       `${prefix}TYPED_ONBOARDING_SCENARIO_PATH`,
       `${prefix}TYPED_ONBOARDING_ASSERTIONS_PATH`,
+      `${prefix}TYPED_ONBOARDING_ASSERTION_FILES_PATH`,
       `${prefix}TYPED_ONBOARDING_MOCK_CONFIG_PATH`,
     ],
   ],
   "session-runtime-context": [
-    "runtime_context_contract",
-    [`${prefix}RUNTIME_CONTEXT_INPUT_MODE`, `${prefix}SESSION_REPAIR_MODE`],
+    ["runtime_context_contract", "session_cold_storage_contract"],
+    [
+      `${prefix}RUNTIME_CONTEXT_INPUT_MODE`,
+      `${prefix}SESSION_REPAIR_MODE`,
+      `${prefix}SESSION_COLD_STORAGE_MODE`,
+    ],
   ],
+  "openai-chat-tools": ["session_cold_storage_contract", [`${prefix}SESSION_COLD_STORAGE_MODE`]],
   "mcp-code-mode-gateway": [
     "mcp_code_mode_contract",
     [`${prefix}MCP_MEMORY_CONFIG_MODE`, `${prefix}MCP_CODE_MODE_CATALOG_MODE`],
@@ -142,12 +149,19 @@ const selectedMetadata = {
     "src/commands/onboard-hooks.ts",
     "scripts/e2e/lib/release-typed-onboarding/scenario.sh",
     "scripts/e2e/lib/release-scenarios/assertions.mjs",
+    "scripts/e2e/lib/release-assertion-files.mjs",
     "scripts/e2e/lib/fixtures/mock-openai-config.mjs",
   ],
   "session-runtime-context": [
     "src/state/openclaw-agent-db-session-migrations.ts",
     "src/commands/doctor-session-transcripts.ts",
     "src/agents/embedded-agent-runner/run/runtime-context-prompt.ts",
+    "src/config/zod-schema.session.ts",
+    "src/config/zod-schema.session-config.ts",
+  ],
+  "openai-chat-tools": [
+    "src/config/zod-schema.session.ts",
+    "src/config/zod-schema.session-config.ts",
   ],
   "mcp-code-mode-gateway": ["src/agents/memory-search.ts", "src/agents/code-mode-namespaces.ts"],
   "agent-bundle-mcp-tools": [
@@ -615,6 +629,7 @@ async function planWorkflowAdmission(input) {
   if (
     possibleLanes.some((lane) => /^(published-upgrade-survivor|update-migration)(-|$)/u.test(lane))
   ) {
+    sourcePaths.add("scripts/lib/upgrade-survivor-scenarios.json");
     sourcePaths.add("scripts/e2e/lib/upgrade-survivor/assertions.mjs");
   }
   if (docker.length > 256) {
@@ -1109,7 +1124,10 @@ async function preflightFrozenTargetContracts(input, workflow = false, verifiedT
     if (owner) {
       const [fn, names] = owner;
       const output = shell(
-        `openclaw_resolve_frozen_${fn} "$1" "$2"; shift 2; for key in "$@"; do printf "%s\\0" "\${!key}"; done`,
+        `${[fn]
+          .flat()
+          .map((name) => `openclaw_resolve_frozen_${name} "$1" "$2";`)
+          .join(" ")} shift 2; for key in "$@"; do printf "%s\\0" "\${!key}"; done`,
         [roots.selected, roots.tooling, ...names],
       ).split("\0");
       if (output.pop() !== "" || output.length !== names.length) {

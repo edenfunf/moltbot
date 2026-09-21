@@ -24,11 +24,13 @@ function resolveInstallOptions(
   const parentForce = inheritOptionFromParent<boolean>(command, "force");
   const parentPort = inheritOptionFromParent<string>(command, "port");
   const parentToken = inheritOptionFromParent<string>(command, "token");
+  const parentAllowUnconfigured = inheritOptionFromParent<boolean>(command, "allowUnconfigured");
   return {
     ...cmdOpts,
     force: Boolean(cmdOpts.force || parentForce),
     port: cmdOpts.port ?? parentPort,
     token: cmdOpts.token ?? parentToken,
+    allowUnconfigured: cmdOpts.allowUnconfigured ?? parentAllowUnconfigured,
     json: resolveJsonOption(cmdOpts, command),
   };
 }
@@ -91,11 +93,12 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
   parent
     .command("install")
     .description("Install and start the Gateway service (launchd/systemd/schtasks)")
-    .addOption(new Option("--defer-activation", "Updater service-load handoff").hideHelp())
     .option("--port <port>", "Gateway port")
     .option("--runtime <runtime>", "Daemon runtime (node|bun). Default: node")
+    .option("--runtime-path <path>", "Pin an absolute Node/Bun executable path")
     .option("--token <token>", "Gateway token (token auth)")
     .option("--wrapper <path>", "Executable wrapper for generated service ProgramArguments")
+    .option("--allow-unconfigured", "Allow the service to start without gateway.mode=local")
     .option("--force", "Reinstall if already installed (may restart a running Gateway)", false)
     .option("--json", "Output JSON", false)
     .addOption(
@@ -171,7 +174,7 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
     )
     .description("Restart the Gateway service (launchd/systemd/schtasks)")
     .option("--preserve-definition", "Keep the native service definition", false)
-    .option("--force", "Restart immediately without waiting for active gateway work", false)
+    .option("--force", "Begin restart now; drain admitted work within the shutdown budget", false)
     .option(
       "--safe",
       "Request an OpenClaw-aware restart after active work drains " +

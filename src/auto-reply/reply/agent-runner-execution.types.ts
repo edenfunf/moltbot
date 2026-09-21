@@ -9,6 +9,7 @@ import type { ReplyPayload } from "../types.js";
 import type { BlockReplyPipeline } from "./block-reply-pipeline.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import type { FollowupRun } from "./queue.js";
+import type { DirectBlockDelivery } from "./reply-delivery.js";
 import type { ReplyMediaContext } from "./reply-media-paths.js";
 import type { ReplyOperation } from "./reply-run-registry.js";
 import type { TypingSignaler } from "./typing-mode.js";
@@ -54,10 +55,10 @@ export type AgentTurnInternalResult =
       fallbackAttempts: RuntimeFallbackAttempt[];
       didLogHeartbeatStrip: boolean;
       autoCompactionCount: number;
-      /** Payload keys sent directly (not via pipeline) during tool flush. */
-      directlySentBlockKeys?: Set<string>;
-      /** Payloads successfully sent directly during tool flush. */
-      directlySentBlockPayloads?: ReplyPayload[];
+      /** Captured before cleanup; late settlements remain in the live receipts below. */
+      hasDirectlySentBlockReply?: true;
+      /** Delivery receipts for direct tool-flush payloads, including retry custody. */
+      directBlockDeliveries?: DirectBlockDelivery[];
       /** Prepared terminal failure, appended only after delivery evidence settles. */
       terminalFailurePayload?: ReplyPayload;
       postCompactionModelFailure?: true;
@@ -79,8 +80,8 @@ type SettledAgentTurnBase = {
   autoCompactionCount: number;
   compaction?: AgentTurnCompaction;
   didLogHeartbeatStrip: boolean;
-  directlySentBlockKeys?: Set<string>;
-  directlySentBlockPayloads?: ReplyPayload[];
+  hasDirectlySentBlockReply?: true;
+  directBlockDeliveries?: DirectBlockDelivery[];
 };
 
 export type SettledAgentTurn = SettledAgentTurnBase &

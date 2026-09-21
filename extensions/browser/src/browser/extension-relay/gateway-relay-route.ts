@@ -3,14 +3,18 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { getPluginRuntimeGatewayRequestScope } from "openclaw/plugin-sdk/plugin-runtime";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
-import { rejectWebSocketUpgrade } from "openclaw/plugin-sdk/websocket-runtime";
-import { WebSocketServer, type WebSocket } from "ws";
+import {
+  rejectWebSocketUpgrade,
+  WebSocketServer,
+  type WebSocket,
+} from "openclaw/plugin-sdk/websocket-runtime";
 import { getRuntimeConfig } from "../../config/config.js";
 import {
   getBrowserControlState,
   startBrowserControlServiceFromConfig,
 } from "../../control-service.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { describeBrowserControlUnavailable } from "../../plugin-enabled.js";
 import { resolveProfile } from "../config.js";
 import { getProfileLifecycle } from "../server-context.lifecycle.js";
 import {
@@ -61,7 +65,7 @@ async function resolveGatewayRelay(resource: string) {
   if (!state) {
     state = await startBrowserControlServiceFromConfig();
     if (!state) {
-      throw new Error("Browser control is disabled");
+      throw new Error(await describeBrowserControlUnavailable());
     }
   }
   const profileName = requestedProfileName(

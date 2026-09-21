@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as doctorMaintenance from "../commands/doctor-maintenance.js";
@@ -6,14 +7,19 @@ import { SQLITE_READONLY_CHILD_ARG } from "../infra/runtime-process-entrypoints.
 import * as coordinators from "../infra/state-database-coordinator.js";
 import { DoctorStateMigrationRefusalError } from "../infra/state-migrations.messages.js";
 import {
+  collectUpdateDoctorFailureFacts,
+  UpdateDoctorError,
+} from "../infra/update-doctor-result.js";
+import { buildUpdateDoctorEnv } from "../infra/update-runner-doctor.js";
+import { readConfiguredParsedLogTail } from "../logging/log-tail.js";
+import { flushLogger, resetLogger, setLoggerOverride } from "../logging/logger.js";
+import {
   assertNoOpenClawAgentDatabaseLeasesReadOnly,
   claimOpenClawAgentDatabaseLease,
 } from "../state/openclaw-agent-db-lease.js";
 import { recordOpenClawDatabaseQuarantine } from "../state/openclaw-quarantine-store.js";
-import {
-  closeOpenClawStateDatabaseByPath,
-  openOpenClawStateDatabase,
-} from "../state/openclaw-state-db.js";
+import { closeOpenClawStateDatabaseByPath } from "../state/openclaw-state-db-cache.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { runDoctorHealthFlow } from "./doctor-health.js";
 import { mocks } from "./doctor-health.test-support.js";
@@ -22,16 +28,23 @@ const snapshotProcesses = vi.hoisted(() => ({
   execFile: vi.fn<typeof import("node:child_process").execFile>(),
 }));
 vi.mock("node:child_process", async (importOriginal) => {
+  const { promisify } = await import("node:util");
   const actual = await importOriginal<typeof import("node:child_process")>();
   snapshotProcesses.execFile.mockImplementation(actual.execFile);
-  Object.defineProperties(
+  Object.defineProperty(
     snapshotProcesses.execFile,
-    Object.getOwnPropertyDescriptors(actual.execFile),
+    promisify.custom,
+    Object.getOwnPropertyDescriptor(actual.execFile, promisify.custom)!,
   );
   return { ...actual, execFile: snapshotProcesses.execFile };
 });
 
-const maintenance = vi.hoisted(() => ({ finish: vi.fn(), release: vi.fn() }));
+const maintenance = vi.hoisted(() => ({
+  run: <T>(operation: () => T): T => operation(),
+  finish: vi.fn(),
+  releaseState: vi.fn(),
+  release: vi.fn(),
+}));
 afterEach(() => vi.restoreAllMocks());
 
 describe("Doctor refused-migration maintenance outcome", () => {
@@ -40,6 +53,126 @@ describe("Doctor refused-migration maintenance outcome", () => {
     vi.spyOn(doctorMaintenance, "beginDoctorMaintenance").mockResolvedValue(maintenance);
     mocks.config.mockReturnValue({});
     mocks.packageRoot.mockReturnValue(undefined);
+  });
+
+  it.each([false, true])(
+    "uses the canonical writer for maintenance-time token recovery (refused=%s)",
+    async (refused) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+        const cfg = { gateway: { mode: "local" as const }, plugins: { enabled: false } };
+        await state.writeConfig(cfg);
+        mocks.config.mockReturnValue(cfg);
+        const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+        mocks.runContributions.mockImplementationOnce(async (ctx) => {
+          maintenance.finish.mockImplementationOnce(async (_cfg, writeConfig) => {
+            expect(writeConfig).toBeTypeOf("function");
+            const candidate = {
+              ...ctx.cfg,
+              gateway: {
+                ...ctx.cfg.gateway,
+                auth: { mode: "token" as const, token: "maintenance-recovered-token" },
+                ...(refused ? { port: 0 } : {}),
+              },
+            };
+            if (refused) {
+              await expect(writeConfig(candidate)).rejects.toThrow("did not persist");
+              expect(ctx.configWriteRefusal).toBe("validation");
+              expect(ctx.cfg.gateway?.auth?.token).toBeUndefined();
+            } else {
+              const committed = await writeConfig(candidate);
+              expect(committed).toEqual(ctx.cfg);
+              expect(ctx.cfgForPersistence.gateway?.auth?.token).toBe(
+                "maintenance-recovered-token",
+              );
+            }
+          });
+        });
+        await runDoctorHealthFlow(runtime, { repair: true, nonInteractive: true });
+        expect(maintenance.finish).toHaveBeenCalledOnce();
+        const persisted = JSON.parse(fs.readFileSync(state.configPath, "utf8"));
+        expect(persisted.gateway.auth?.token).toBe(
+          refused ? undefined : "maintenance-recovered-token",
+        );
+        if (refused) {
+          expect(runtime.exit).toHaveBeenCalledWith(1);
+        } else {
+          expect(runtime.exit).not.toHaveBeenCalled();
+        }
+      });
+    },
+  );
+
+  it("retains migration recovery and explains why source rollback cannot undo repaired state", async () => {
+    await withOpenClawTestState(
+      {
+        scenario: "minimal",
+        env: buildUpdateDoctorEnv({
+          allowGatewayServiceRepair: true,
+          allowGatewayActivation: false,
+        }),
+      },
+      async (state) => {
+        const root = state.path("checkout");
+        fs.mkdirSync(root);
+        execFileSync("git", ["init", root], { stdio: "ignore" });
+        mocks.packageRoot.mockReturnValue(root);
+        const failure = new DoctorStateMigrationRefusalError([
+          {
+            id: "agent-ownership",
+            phase: "shared",
+            source: [],
+            target: [],
+            requiredness: "required",
+            reversibility: "not-applicable",
+            outcome: "refused",
+            changes: [],
+            warnings: ["Resolve the reported ownership mismatch before retrying."],
+            refusal: {
+              code: "agent-database-ownership-mismatch",
+              message: "Resolve the reported ownership mismatch before retrying.",
+            },
+          },
+        ]);
+        const originalMessage = failure.message;
+        mocks.runContributions.mockImplementationOnce(async () => {
+          await state.writeConfig({ gateway: { mode: "local" } });
+          throw failure;
+        });
+        setLoggerOverride({
+          level: "warn",
+          consoleLevel: "silent",
+          file: state.path("warnings.log"),
+        });
+        try {
+          await expect(
+            runDoctorHealthFlow(
+              { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+              { repair: true, nonInteractive: true },
+            ),
+          ).rejects.toBe(failure);
+          expect(failure.message.startsWith(originalMessage)).toBe(true);
+          expect(failure.message).toContain(
+            "Checking out the previous source is not enough: state repairs have already run.",
+          );
+          expect(failure.message).toContain("Follow the migration recovery instructions above");
+          expect(failure.message).not.toContain("git -C");
+          expect(failure.message).not.toContain("pnpm install");
+          expect(failure.message).not.toContain("openclaw gateway start");
+          expect(JSON.parse(fs.readFileSync(state.configPath, "utf8"))).toEqual({
+            gateway: { mode: "local" },
+          });
+          expect(maintenance.release).toHaveBeenCalledOnce();
+          expect(maintenance.finish).not.toHaveBeenCalled();
+          await flushLogger();
+          const tail = await readConfiguredParsedLogTail();
+          expect(tail.lines.map((line) => line.message).join("\n")).toContain(failure.message);
+        } finally {
+          await flushLogger();
+          setLoggerOverride(null);
+          resetLogger();
+        }
+      },
+    );
   });
 
   it.each([true, false])(
@@ -91,7 +224,7 @@ describe("Doctor maintenance admission", () => {
           vi.spyOn(
             coordinators,
             owner === "gateway"
-              ? "acquireGatewayLifecycleCoordinator"
+              ? "acquireGatewayMaintenanceCoordinator"
               : "acquireStateDatabaseCoordinator",
           ).mockImplementation(() => {
             throw new coordinators.StateDatabaseCoordinatorContentionError(
@@ -113,7 +246,19 @@ describe("Doctor maintenance admission", () => {
           ),
         ).toEqual([]);
         expect(failure).toBeInstanceOf(Error);
-        expect(String(failure)).toMatch(/Stop.*service|stop.*process/);
+        if (owner === "agent") {
+          expect(failure).toBeInstanceOf(UpdateDoctorError);
+          expect(collectUpdateDoctorFailureFacts(failure)).toEqual([
+            {
+              check: "doctor",
+              code: "agent-database-lease-active",
+              message:
+                "Doctor could not enter maintenance. An agent database is in use. Stop other OpenClaw processes using this state, then retry the update.",
+            },
+          ]);
+        } else {
+          expect(String(failure)).toMatch(/Stop.*service|stop.*process/);
+        }
         expect(performance.now() - started).toBeLessThan(1_000);
         expect(
           fs.existsSync(state.configPath) ? fs.readFileSync(state.configPath, "utf8") : undefined,
@@ -124,7 +269,7 @@ describe("Doctor maintenance admission", () => {
 });
 
 describe("Doctor agent lease admission", () => {
-  it("admits the exact dangling Workshop index without mutating state", async () => {
+  it("reserves dangling Workshop index admission for Doctor without mutating state", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const opened = openOpenClawStateDatabase({ env: state.env });
       const pathname = opened.path;
@@ -152,8 +297,21 @@ describe("Doctor agent lease admission", () => {
       }
       const before = fs.readFileSync(pathname);
 
-      expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
+      expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).toThrow(
+        /legacy-workshop-review-index/,
+      );
       expect(fs.readFileSync(pathname)).toEqual(before);
+      const doctor = await doctorMaintenance.beginDoctorMaintenance({
+        options: { repair: true, nonInteractive: true },
+        root: null,
+        runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      });
+      try {
+        expect(doctor).toBeDefined();
+        expect(fs.readFileSync(pathname)).toEqual(before);
+      } finally {
+        await doctor?.release();
+      }
     });
   });
 

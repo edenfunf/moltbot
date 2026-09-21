@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { VitestBatchRunParams } from "../../scripts/lib/vitest-batch-runner.mts";
 import {
   listVitestRuntimeConsumerFiles,
   resolveVitestCliEntry,
@@ -288,7 +289,7 @@ syncFixtureBuiltinExports();\n`,
       [
         "run",
         "--config",
-        "test/vitest/vitest.gateway-core.config.ts",
+        "test/vitest/vitest.gateway-database-workers.config.ts",
         "gateway-cron-process-identity.windows.test.ts",
       ],
       "runtime",
@@ -426,60 +427,130 @@ async function start(args: string[]) {
 }
 
 describe("full-suite timing metadata", () => {
-  it("carries chunk targets into timing samples without changing launch selection", async () => {
-    vi.stubEnv("OPENCLAW_TEST_PROJECTS_PARALLEL", "2");
-    vi.stubEnv("OPENCLAW_VITEST_MAX_WORKERS", "1");
-    vi.stubEnv("OPENCLAW_VITEST_SHARD_NAME", "same-parent");
-    vi.stubEnv("OPENCLAW_VITEST_ENABLE_MAGLEV", "0");
-    const planner = await import("../../scripts/test-projects.test-support.mts");
+  it("records inherited include selections without replacing whole-config history", async () => {
+    vi.stubEnv("OPENCLAW_TEST_PROJECTS_TIMINGS", "1");
     const timings = await import("../../scripts/lib/vitest-shard-timings.mts");
+    const actual = await vi.importActual<
+      typeof import("../../scripts/lib/vitest-shard-timings.mts")
+    >("../../scripts/lib/vitest-shard-timings.mts");
     const { runTestProjects } = await import("../../scripts/test-projects-run.mts");
-    const files = ["test/scripts/run-with-env.test.ts", "test/scripts/run-node.test.ts"];
+    const root = tempDirs.make("inherited-timing-");
+    const timingFile = path.join(root, "timings.json");
+    vi.stubEnv("OPENCLAW_TEST_PROJECTS_TIMINGS_PATH", timingFile);
+    vi.stubEnv("OPENCLAW_VITEST_SHARD_NAME", "same-parent");
     const config = "test/vitest/vitest.tooling.config.ts";
-    vi.spyOn(planner, "buildFullSuiteVitestRunPlans").mockReturnValue(
-      files.map((file) => ({
-        config,
-        forwardedArgs: [file],
-        timingTargets: [file],
-        includePatterns: null,
-        watchMode: false,
-      })),
-    );
-    const writeTimings = vi.spyOn(timings, "writeShardTimings");
+    actual.writeShardTimings([actual.createShardTimingSample({ config }, 999_999)], root);
+    const writeTimings = vi
+      .spyOn(timings, "writeShardTimings")
+      .mockImplementation(actual.writeShardTimings);
     commands.prepare.mockResolvedValue(0);
     commands.reader.mockImplementation(() => ({
       completion: Promise.resolve({ code: 0, signal: null, groupJoined: true }),
       getForwardedSignal: () => undefined,
     }));
-
+    const files = ["test/scripts/run-with-env.test.ts", "test/scripts/run-node.test.ts"];
+    for (const file of files) {
+      const includeFile = patternFiles.writePatternFile("timing-include.json", [file]);
+      vi.stubEnv("OPENCLAW_VITEST_INCLUDE_FILE", includeFile);
+      await runTestProjects(async () => {}, [config]);
+      expect(fs.existsSync(includeFile)).toBe(true);
+      expect(commands.reader.mock.lastCall?.[0].env.OPENCLAW_VITEST_INCLUDE_FILE).toBe(includeFile);
+    }
+    const inheritedFile = process.env.OPENCLAW_VITEST_INCLUDE_FILE;
+    fs.writeFileSync(inheritedFile!, "{}");
+    await runTestProjects(async () => {}, [files[0]!]);
+    const inlineFile = commands.reader.mock.lastCall?.[0].env.OPENCLAW_VITEST_INCLUDE_FILE;
+    expect(inlineFile).not.toBe(inheritedFile);
+    expect(fs.existsSync(inheritedFile!)).toBe(true);
+    expect(fs.existsSync(inlineFile)).toBe(false);
+    const planner = await import("../../scripts/test-projects.test-support.mts");
+    const empty = vi.spyOn(planner, "buildFullSuiteVitestRunPlans").mockReturnValue([]);
     await runTestProjects(async () => {}, []);
-
-    expect(commands.reader).toHaveBeenCalledTimes(2);
-    const launches = commands.reader.mock.calls.map(([input]) => input);
-    expect(launches.map((input) => input.pnpmArgs)).toEqual(
-      files.map((file) => [
-        "exec",
-        "node",
-        "--no-maglev",
-        resolveVitestCliEntry(),
-        "run",
-        "--config",
-        config,
-        file,
-      ]),
-    );
-    for (const input of launches) {
-      expect(input.env.OPENCLAW_VITEST_INCLUDE_FILE).toBeFalsy();
-      expect(input.env.OPENCLAW_VITEST_MAX_WORKERS).toBe("1");
-    }
-    expect(writeTimings).toHaveBeenCalledTimes(1);
-    const samples = writeTimings.mock.calls[0]?.[0] ?? [];
-    expect(samples).toHaveLength(2);
-    expect(new Set(samples.map((sample) => sample?.config)).size).toBe(2);
-    for (const sample of samples) {
-      expect(sample).toMatchObject({ baseConfig: config, includePatternCount: 1 });
-    }
+    empty.mockRestore();
+    expect(commands.reader).toHaveBeenCalledTimes(3);
+    const samples = writeTimings.mock.calls.flatMap(([entries]) => entries);
+    expect(samples).toHaveLength(3);
+    expect(new Set(samples.map((sample) => sample?.config)).size).toBe(3);
+    expect(samples.every((sample) => sample?.includePatternCount === 1)).toBe(true);
+    const stored = JSON.parse(fs.readFileSync(timingFile, "utf8")).configs;
+    expect(stored[config].averageMs).toBe(999_999);
+    expect(Object.keys(stored)).toHaveLength(4);
+    vi.stubEnv("OPENCLAW_VITEST_INCLUDE_FILE", "");
+    const cliConfig = "test/vitest/vitest.cli.config.ts";
+    await runTestProjects(async () => {}, [cliConfig]);
+    expect(writeTimings.mock.lastCall?.[0]).toEqual([
+      expect.objectContaining({ config: cliConfig, includePatternCount: 0 }),
+    ]);
   });
+
+  it.each([false, true])(
+    "carries chunk targets without changing launch selection (inherited=%s)",
+    async (inherited) => {
+      vi.stubEnv("OPENCLAW_TEST_PROJECTS_PARALLEL", "2");
+      vi.stubEnv("OPENCLAW_VITEST_MAX_WORKERS", "1");
+      vi.stubEnv("OPENCLAW_VITEST_SHARD_NAME", "same-parent");
+      vi.stubEnv("OPENCLAW_VITEST_ENABLE_MAGLEV", "0");
+      const planner = await import("../../scripts/test-projects.test-support.mts");
+      const timings = await import("../../scripts/lib/vitest-shard-timings.mts");
+      const { runTestProjects } = await import("../../scripts/test-projects-run.mts");
+      const files = ["test/scripts/run-with-env.test.ts", "test/scripts/run-node.test.ts"];
+      const includeFile = inherited
+        ? patternFiles.writePatternFile("chunk-include.json", [files[0]!])
+        : undefined;
+      if (includeFile) {
+        vi.stubEnv("OPENCLAW_VITEST_INCLUDE_FILE", includeFile);
+      }
+      const config = "test/vitest/vitest.tooling.config.ts";
+      vi.spyOn(planner, "buildFullSuiteVitestRunPlans").mockReturnValue(
+        files.map((file) => ({
+          config,
+          forwardedArgs: [file],
+          timingTargets: [file],
+          includePatterns: null,
+          watchMode: false,
+        })),
+      );
+      const writeTimings = vi.spyOn(timings, "writeShardTimings");
+      commands.prepare.mockResolvedValue(0);
+      commands.reader.mockImplementation(() => ({
+        completion: Promise.resolve({ code: 0, signal: null, groupJoined: true }),
+        getForwardedSignal: () => undefined,
+      }));
+
+      await runTestProjects(async () => {}, []);
+
+      expect(commands.reader).toHaveBeenCalledTimes(2);
+      const launches = commands.reader.mock.calls.map(([input]) => input);
+      expect(launches.map((input) => input.pnpmArgs)).toEqual(
+        files.map((file) => [
+          "exec",
+          "node",
+          "--no-maglev",
+          "--no-concurrent-sparkplug",
+          resolveVitestCliEntry(),
+          "run",
+          "--config",
+          config,
+          file,
+        ]),
+      );
+      for (const input of launches) {
+        if (includeFile) {
+          expect(input.env.OPENCLAW_VITEST_INCLUDE_FILE).toBe(includeFile);
+        } else {
+          expect(input.env.OPENCLAW_VITEST_INCLUDE_FILE).toBeFalsy();
+        }
+        expect(input.env.OPENCLAW_VITEST_MAX_WORKERS).toBe("1");
+      }
+      expect(writeTimings).toHaveBeenCalledTimes(1);
+      const samples = writeTimings.mock.calls[0]?.[0] ?? [];
+      expect(samples).toHaveLength(2);
+      expect(new Set(samples.map((sample) => sample?.config)).size).toBe(2);
+      for (const sample of samples) {
+        expect(sample).toMatchObject({ baseConfig: config, includePatternCount: 1 });
+      }
+    },
+  );
 });
 
 describe("parallel cache lease completion", () => {
@@ -1002,6 +1073,10 @@ describe("test-projects build admission", () => {
 });
 
 describe("plugin batch build admission", () => {
+  const qaConfig = "test/vitest/vitest.extension-qa.config.ts";
+  const databaseConfig = "test/vitest/vitest.extension-database-workers.config.ts";
+  const combinedConfig = "test/vitest/vitest.database-worker-watch.config.ts";
+
   it.each(["1", "2"])(
     "holds all groups and chunks behind one build (parallel=%s)",
     async (parallel) => {
@@ -1067,46 +1142,96 @@ describe("plugin batch build admission", () => {
   });
 
   it.each([
-    { name: "full QA", ids: ["qa-lab"], build: true },
-    { name: "shared config, channel only", ids: ["qa-channel"], build: false },
-    { name: "unrelated plugin", ids: ["firecrawl"], build: false },
-    { name: "ordinary QA file", args: [ordinaryQa], build: false },
-    { name: "lifecycle file", args: [lifecycle], build: true },
-    { name: "absolute lifecycle", args: [path.resolve(lifecycle)], build: true },
-    { name: "exact exclusion", args: ["--exclude", lifecycle], build: false },
-    { name: "equals exclusion", args: [`--exclude=${lifecycle}`], build: false },
+    { name: "full QA", ids: ["qa-lab"], build: true, configs: [databaseConfig, qaConfig] },
+    { name: "shared config, channel only", ids: ["qa-channel"], build: false, configs: [qaConfig] },
+    {
+      name: "unrelated plugin",
+      ids: ["firecrawl"],
+      build: false,
+      configs: ["test/vitest/vitest.extension-misc.config.ts"],
+    },
+    { name: "ordinary QA file", args: [ordinaryQa], build: false, configs: [combinedConfig] },
+    { name: "lifecycle file", args: [lifecycle], build: true, configs: [combinedConfig] },
+    {
+      name: "absolute lifecycle",
+      args: [path.resolve(lifecycle)],
+      build: true,
+      configs: [combinedConfig],
+    },
+    {
+      name: "exact exclusion",
+      args: ["--exclude", lifecycle],
+      build: false,
+      configs: [databaseConfig, qaConfig],
+    },
+    {
+      name: "equals exclusion",
+      args: [`--exclude=${lifecycle}`],
+      build: false,
+      configs: [databaseConfig, qaConfig],
+    },
     {
       name: "scoped exclusion",
       args: ["--exclude", lifecycle.replace("extensions/", "")],
       build: false,
+      configs: [databaseConfig, qaConfig],
     },
-    { name: "absolute exclusion", args: ["--exclude", path.resolve(lifecycle)], build: false },
+    {
+      name: "absolute exclusion",
+      args: ["--exclude", path.resolve(lifecycle)],
+      build: false,
+      configs: [databaseConfig, qaConfig],
+    },
     {
       name: "glob exclusion",
       args: ["--exclude", "extensions/qa-lab/**/suite-process-*.test.ts"],
       build: false,
+      configs: [combinedConfig],
     },
-    { name: "all QA excluded", args: ["--exclude=extensions/qa-lab/**"], build: false },
-    { name: "empty include", include: [], build: false },
-    { name: "unrelated include", include: [ordinaryQa], build: false },
-    { name: "lifecycle include", include: [lifecycle], build: true },
-    { name: "absolute lifecycle include", include: [path.resolve(lifecycle)], build: true },
+    {
+      name: "all QA excluded",
+      args: ["--exclude=extensions/qa-lab/**"],
+      build: false,
+      configs: [combinedConfig],
+    },
+    { name: "empty include", include: [], build: false, configs: [databaseConfig, qaConfig] },
+    {
+      name: "unrelated include",
+      include: [ordinaryQa],
+      build: false,
+      configs: [databaseConfig, qaConfig],
+    },
+    {
+      name: "lifecycle include",
+      include: [lifecycle],
+      build: true,
+      configs: [databaseConfig, qaConfig],
+    },
+    {
+      name: "absolute lifecycle include",
+      include: [path.resolve(lifecycle)],
+      build: true,
+      configs: [databaseConfig, qaConfig],
+    },
     {
       name: "scoped lifecycle include",
       include: [lifecycle.replace("extensions/", "")],
       build: true,
+      configs: [databaseConfig, qaConfig],
     },
     {
       name: "runtime include outside config directory",
       include: ["test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts"],
       args: ["test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts"],
       build: false,
+      configs: [combinedConfig],
     },
     {
       name: "include outside emitted roots",
       ids: ["qa-channel"],
       include: [lifecycle],
       build: false,
+      configs: [qaConfig],
     },
     {
       name: "cross-root CLI with include",
@@ -1114,22 +1239,25 @@ describe("plugin batch build admission", () => {
       args: [lifecycle],
       include: [lifecycle],
       build: true,
+      configs: [qaConfig],
     },
     {
       name: "include outside explicit target",
       args: [ordinaryQa],
       include: [lifecycle],
       build: true,
+      configs: [combinedConfig],
     },
     {
       name: "existing exact-exclude expansion",
       args: [ordinaryQa, "--exclude", "extensions/codex/src/app-server/run-attempt.test.ts"],
       build: true,
+      configs: [combinedConfig],
     },
-    { name: "no groups", ids: [], build: false },
+    { name: "no groups", ids: [], build: false, configs: [] },
   ])(
     "prepares the actual invocation selection: $name",
-    async ({ ids = ["qa-lab"], args = [], include, build }) => {
+    async ({ ids = ["qa-lab"], args = [], include, build, configs }) => {
       const { resolveExtensionBatchPlan } =
         await import("../../scripts/lib/extension-test-plan.mts");
       const { runExtensionBatchPlan } = await import("../../scripts/test-extension-batch.mts");
@@ -1137,7 +1265,9 @@ describe("plugin batch build admission", () => {
         ? { OPENCLAW_VITEST_INCLUDE_FILE: patternFiles.writePatternFile("include.json", include) }
         : {};
       commands.prepare.mockResolvedValue(0);
-      const reader = vi.fn().mockResolvedValue(0);
+      const reader = vi
+        .fn<(params: VitestBatchRunParams) => Promise<number>>()
+        .mockResolvedValue(0);
       await expect(
         runExtensionBatchPlan(resolveExtensionBatchPlan({ extensionIds: ids }), {
           runGroup: reader,
@@ -1146,7 +1276,7 @@ describe("plugin batch build admission", () => {
         }),
       ).resolves.toBe(0);
       expect(commands.prepare).toHaveBeenCalledTimes(build ? 1 : 0);
-      expect(reader).toHaveBeenCalledTimes(ids.length ? 1 : 0);
+      expect(reader.mock.calls.map(([invocation]) => invocation.config)).toEqual(configs);
     },
   );
 });

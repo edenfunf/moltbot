@@ -33,7 +33,9 @@ const skillCommandMocks = vi.hoisted(() => ({
 }));
 
 const deliveryMocks = vi.hoisted(() => ({
-  deliverReplies: vi.fn(async () => ({ delivered: true })),
+  deliverReplies: vi.fn<typeof import("./bot/delivery.replies.js").deliverReplies>(async () => ({
+    delivered: true,
+  })),
   editMessageTelegram: vi.fn(async () => ({ ok: true as const, messageId: "999", chatId: "100" })),
   emitTelegramMessageSentHooks: vi.fn(),
 }));
@@ -99,16 +101,6 @@ export function createNativeCommandTestParams(
     readChannelAllowFromStore: vi.fn(
       async () => [],
     ) as TelegramNativeCommandDeps["readChannelAllowFromStore"],
-    dispatchChannelInboundTurn: vi.fn(async (plan) => ({
-      admission: { kind: "dispatch" },
-      dispatched: true,
-      ctxPayload: plan.ctxPayload,
-      routeSessionKey: plan.route.sessionKey,
-      dispatchResult: {
-        queuedFinal: false,
-        counts: { block: 0, final: 0, tool: 0 },
-      },
-    })) as TelegramNativeCommandDeps["dispatchChannelInboundTurn"],
     listSkillCommandsForAgents,
     syncTelegramMenuCommands: vi.fn(({ bot, commandsToRegister }) => {
       if (commandsToRegister.length === 0) {

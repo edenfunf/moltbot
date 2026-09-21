@@ -890,6 +890,7 @@ class GatewaySessionReconnectTest {
         withTimeout(LIFECYCLE_TEST_TIMEOUT_MS) { connected.await() }
         val initialLease = requireNotNull(captureLease(gatewayId))
         assertEquals(initialMethods, publishedMethods.get())
+        assertTrue(initialLease.supportsMethod("users.prefs.set"))
 
         harness.session.reconnect()
         assertTrue(replacementHelloStarted.await(LIFECYCLE_TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS))
@@ -922,10 +923,14 @@ class GatewaySessionReconnectTest {
         if (observedLease != null) {
           assertEquals("A ready replacement must expose its own hello metadata", replacementMethods, observedMethods)
           assertTrue(observedLease.isCurrent())
+          assertTrue(observedLease.supportsMethod("users.prefs.get"))
+          assertFalse(observedLease.supportsMethod("users.prefs.set"))
         }
         withTimeout(LIFECYCLE_TEST_TIMEOUT_MS) { replacementPublished.await() }
         val currentLease = requireNotNull(captureLease(gatewayId))
         assertEquals(replacementMethods, publishedMethods.get())
+        assertTrue(initialLease.supportsMethod("users.prefs.set"))
+        assertFalse(currentLease.supportsMethod("users.prefs.set"))
         assertEquals("{}", currentLease.request("health", null))
       } finally {
         allowReplacementHello.countDown()
@@ -962,6 +967,35 @@ class GatewaySessionReconnectTest {
         } finally {
           shutdownReconnectHarness(harness, server)
         }
+      }
+    }
+
+  @Test
+  fun unknownChallengeCapabilitiesPreserveNativeConnectWithoutCatalogOptIn() =
+    runBlocking {
+      val hello = CompletableDeferred<GatewayHelloSummary>()
+      val server =
+        startGatewayServer(
+          json = Json { ignoreUnknownKeys = true },
+          challengeFrame =
+            """{"type":"event","event":"connect.challenge","payload":{"nonce":"android-test-nonce","ts":1700000000123,"capabilities":["model-catalog-snapshot","future-capability"]}}""",
+        ) { webSocket, id, method ->
+          if (method == "connect") webSocket.send(connectResponseFrame(id))
+        }
+      val harness = createReconnectHarness(onHello = hello::complete)
+
+      try {
+        connectNodeSession(harness.session, server.port)
+        withTimeout(LIFECYCLE_TEST_TIMEOUT_MS) { hello.await() }
+        val params =
+          server.requestFrames
+            .single { it["method"]?.jsonPrimitive?.content == "connect" }
+            .getValue("params")
+            .jsonObject
+        assertNull(params["modelCatalog"])
+        assertNull(params["caps"])
+      } finally {
+        shutdownReconnectHarness(harness, server)
       }
     }
 
@@ -2270,6 +2304,7 @@ class GatewaySessionReconnectTest {
   private fun startGatewayServer(
     json: Json,
     onClosed: () -> Unit = {},
+    challengeFrame: String = LIFECYCLE_CONNECT_CHALLENGE_FRAME,
     onRequestFrame: (webSocket: WebSocket, id: String, method: String) -> Unit,
   ): ReconnectServer {
     val sockets = ConcurrentLinkedQueue<WebSocket>()
@@ -2286,7 +2321,7 @@ class GatewaySessionReconnectTest {
                     response: Response,
                   ) {
                     sockets += webSocket
-                    webSocket.send(LIFECYCLE_CONNECT_CHALLENGE_FRAME)
+                    webSocket.send(challengeFrame)
                   }
 
                   override fun onMessage(

@@ -468,7 +468,10 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
         }
         const engine = new SystemAgentChatEngine({
           surface: "gateway",
-          deps: { gatewayHostLifecycle: context.hostLifecycle },
+          deps: {
+            gatewayHostLifecycle: context.hostLifecycle,
+            applyPluginRuntime: context.applyPluginLifecycleChange,
+          },
           verifiedInference: inference.binding,
           operatorApprovalOnly: params.delegation !== undefined,
           ...(params.delegation?.agentId ? { requesterAgentId: params.delegation.agentId } : {}),
@@ -492,7 +495,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
             welcome = onboardingWelcome.text;
             welcomeQuestion = onboardingWelcome.question;
           } else if (params.welcomeVariant === "new-agent") {
-            welcome = buildNewAgentWelcome({ engine });
+            welcome = await buildNewAgentWelcome({ engine });
           } else {
             const overview = await engine.loadOverview();
             const facts = loadSystemAgentGreetingFacts();
@@ -526,6 +529,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
         session = {
           engine,
           welcome,
+          ...(params.welcomeVariant === "new-agent" ? { newAgentWelcome: welcome } : {}),
           ...(welcomeQuestion ? { welcomeQuestion } : {}),
           ...(greetingAuditSequence !== undefined
             ? { welcomeAuditSequence: greetingAuditSequence }
@@ -556,6 +560,22 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
         params.wizardCancel === undefined &&
         (params.message === undefined || !params.message.trim())
       ) {
+        if (params.welcomeVariant === "new-agent") {
+          const interaction = session.engine.decorateRejoinReply({ text: "", action: "none" });
+          if (
+            !interaction.wizardInputPending &&
+            !interaction.sensitive &&
+            !interaction.step &&
+            !interaction.question &&
+            !session.pendingApproval &&
+            !session.engine.getPendingOperatorProposal()
+          ) {
+            session.newAgentWelcome ??= await buildNewAgentWelcome({ engine: session.engine });
+            respond(true, { sessionId, reply: session.newAgentWelcome, action: "none" }, undefined);
+            // The caretaker warning was not displayed; its delivery cursor stays pending.
+            return undefined;
+          }
+        }
         respond(
           true,
           buildSystemAgentRejoinResult({

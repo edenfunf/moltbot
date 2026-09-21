@@ -1,4 +1,3 @@
-// Slack plugin module implements dispatch behavior.
 import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import {
   dispatchChannelInboundTurn,
@@ -19,7 +18,7 @@ import {
   isReplyPayloadNonTerminalToolErrorWarning,
   resolveSendableOutboundReplyParts,
 } from "openclaw/plugin-sdk/reply-payload";
-import type { ReplyPayload, ReplyDispatchKind } from "openclaw/plugin-sdk/reply-runtime";
+import type { ReplyPayload, ReplyDispatchRuntimeInfo } from "openclaw/plugin-sdk/reply-runtime";
 import { danger, logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { formatSlackError } from "../../errors.js";
 import { normalizeSlackOutboundText } from "../../format.js";
@@ -41,6 +40,11 @@ import { createSlackDispatchSetup, type SlackDispatchSetup } from "./dispatch-se
 import { createSlackStreamingDeliveryRuntime } from "./dispatch-streaming.js";
 import { finalizeSlackPreviewEdit } from "./preview-finalize.js";
 import type { PreparedSlackMessage } from "./types.js";
+
+function formatSlackGroupThreadReply(text: string, participant: { name: string }): string {
+  const name = participant.name.replace(/[\\`*_{}[\]()<>#!|]/g, "\\$&").replace(/\s+/g, " ");
+  return `**${name}**\n${text}`;
+}
 
 export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessage) {
   const setup = await createSlackDispatchSetup(prepared);
@@ -208,9 +212,16 @@ async function dispatchSlackMessageWithSetup(
     }
   };
   const deliverSlackPayload = async (
-    payload: ReplyPayload,
-    info: { kind: ReplyDispatchKind },
+    incomingPayload: ReplyPayload,
+    info: ReplyDispatchRuntimeInfo,
   ): Promise<{ visibleReplySent: false } | void> => {
+    let payload = incomingPayload;
+    if (info.participant && (payload.text || payload.mediaUrl || payload.mediaUrls?.length)) {
+      payload = {
+        ...payload,
+        text: formatSlackGroupThreadReply(payload.text ?? "", info.participant),
+      };
+    }
     if (info.kind === "final" && slackStreaming.mode === "progress" && progress.isProgressMode) {
       if (progress.useNativeProgressStreaming) {
         await progress.deliverNativeFinal(payload, info.kind);
@@ -328,7 +339,7 @@ async function dispatchSlackMessageWithSetup(
           draftStream && !draftPreviewCommitted.value && !delivery.observedFinalReplyDelivery
             ? {
                 flush: draftStream.flush,
-                clear: draftStream.clear,
+                clear: () => draftStream.clear({ preserveHumanReplies: true }),
                 discardPending: draftStream.discardPending,
                 seal: draftStream.seal,
                 id: () => {
@@ -482,9 +493,9 @@ async function dispatchSlackMessageWithSetup(
         },
       },
       record: prepared.turn.record as InboundReplyRecordOptions,
-      history: prepared.turn.history,
       botLoopProtection: resolveSlackBotLoopProtection(prepared),
       replyOptions: {
+        groupThreadReplyFormatter: formatSlackGroupThreadReply,
         // Followups can outlive this dispatch and retain their own source address.
         queuedDeliveryCorrelations: [{ begin: beginSessionRun }],
         ...(turnAdoptionLifecycle ? { turnAdoptionLifecycle } : {}),
@@ -546,61 +557,33 @@ async function dispatchSlackMessageWithSetup(
           if (statusReactionsEnabled) {
             await statusReactions.setTool(payload.name);
           }
-          if (payload.phase === "start") {
-            progress.progressWorkCounter.noteToolCall(payload.name);
-          }
           return await progress.progressDraft.pushToolEvent(payload);
         },
         onItemEvent: async (payload) => {
-          // Slack freezes notification text on the first post. Keep incomplete
-          // preambles out of the compositor until a message actually exists;
-          // later edits may stream. A timer or tool event must not flush "I".
-          if (
-            payload.kind === "preamble" &&
-            (payload.phase === "start" || payload.phase === "update") &&
-            !draftStream?.messageId() &&
-            !delivery.streamSession?.delivered
-          ) {
+          if (payload.hideFromChannelProgress || payload.suppressChannelProgress) {
+            return progress.preambleOnlyProgress
+              ? false
+              : progress.progressDraft.pushItemEvent(payload);
+          }
+          if (payload.kind === "preamble" && progress.shouldYieldDraftProgress()) {
             return false;
           }
-          if (progress.isProgressMode && payload.kind === "preamble") {
-            if (progress.shouldYieldDraftProgress()) {
-              return false;
-            }
-            const headlineVisible = await progress.progressDraft.pushPreambleHeadline(
-              payload.progressText,
-              {
-                itemId: payload.itemId,
-              },
-            );
-            if (progress.commentaryProgressEnabled) {
-              const accepted = await progress.progressDraft.pushCommentaryProgress(
-                payload.progressText,
-                {
-                  itemId: payload.itemId,
-                },
-              );
-              return accepted || headlineVisible;
-            }
-            return headlineVisible;
-          }
-          return await progress.progressDraft.pushItemEvent(payload);
+          progress.progressWorkCounter.noteItem(payload);
+          return progress.preambleOnlyProgress && payload.kind !== "preamble"
+            ? await progress.progressDraft.noteActivity()
+            : await progress.progressDraft.pushItemEvent(payload);
         },
         onPlanUpdate: async (payload) => {
           if (payload.phase !== "update") {
             return false;
           }
-          return await progress.pushPlanProgress(payload.steps, payload.explanation);
+          return await progress.pushPlanProgress(
+            payload.steps,
+            payload.explanation,
+            payload.explanationFormat,
+          );
         },
-        onApprovalEvent: async (payload) => {
-          return await progress.progressDraft.pushApprovalEvent(payload);
-        },
-        onCommandOutput: async (payload) => {
-          return await progress.progressDraft.pushCommandOutputEvent(payload);
-        },
-        onPatchSummary: async (payload) => {
-          return await progress.progressDraft.pushPatchEvent(payload);
-        },
+        onApprovalEvent: (payload) => progress.progressDraft.pushApprovalEvent(payload),
       },
     });
     if (turnResult.dispatched) {
@@ -644,6 +627,16 @@ async function dispatchSlackMessageWithSetup(
   const anyReplyDelivered = hasVisibleInboundReplyDispatch(settledDispatchResult, {
     observedReplyDelivery: delivery.observedReplyDelivery,
   });
+
+  if (
+    !progress.isProgressMode &&
+    anyReplyDelivered &&
+    !delivery.observedFinalReplyDelivery &&
+    !dispatchError &&
+    !agentRunFailed
+  ) {
+    await draftStream?.clear({ preserveHumanReplies: true });
+  }
 
   if (
     progress.isProgressMode &&

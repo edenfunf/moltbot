@@ -18,11 +18,13 @@ import {
   materializePreparedModelCatalog,
   prepareFullCatalogFacts,
 } from "./prepared-model-runtime.full-catalog.js";
+import { discardPreparedPluginGeneration } from "./prepared-model-runtime.plugin-lifetime.js";
 import type {
   PreparedModelRuntimeCatalogMode,
   PreparedModelRuntimeInput,
   PreparedModelRuntimePluginGeneration,
 } from "./prepared-model-runtime.types.js";
+import type { ProviderCatalogInventoryCapture } from "./provider-model-membership.js";
 
 const MODEL_RUNTIME_PROVIDER_DISCOVERY_TIMEOUT_MS = 5_000;
 
@@ -37,6 +39,9 @@ async function prepareScopedReadOnlyModelCatalogWithMode(
     catalogMode,
     { providerDiscoveryProviderIds },
   );
+  await using _ = {
+    [Symbol.asyncDispose]: () => discardPreparedPluginGeneration(pluginGeneration),
+  };
   const agentFactsForInput = agentFacts[0];
   if (!agentFactsForInput) {
     throw new Error("scoped prepared model catalog facts are missing");
@@ -87,6 +92,8 @@ export async function prepareAgentCatalogSource(
   sourceOptions: {
     authStore?: AuthProfileStore;
     providerDiscoveryProviderIds?: readonly string[];
+    providerDiscoveryTimeoutMs?: number;
+    providerCatalogInventory?: ProviderCatalogInventoryCapture;
   } = {},
 ): Promise<PreparedModelRuntimeCatalogSource> {
   const { env, input, providerIds } = agentFacts;
@@ -121,13 +128,15 @@ export async function prepareAgentCatalogSource(
           providerDiscoveryEntriesOnly: true as const,
         }
       : {
-          providerDiscoveryTimeoutMs: MODEL_RUNTIME_PROVIDER_DISCOVERY_TIMEOUT_MS,
+          providerDiscoveryTimeoutMs:
+            sourceOptions.providerDiscoveryTimeoutMs ?? MODEL_RUNTIME_PROVIDER_DISCOVERY_TIMEOUT_MS,
         }),
   };
   const prepareSource = async () => {
     if (!persist) {
       const source = await planOpenClawModelsJsonSource(input.config, input.agentDir, {
         ...options,
+        providerCatalogInventory: sourceOptions.providerCatalogInventory,
         ...(sourceOptions.authStore ? { authStore: sourceOptions.authStore } : {}),
         ...(catalogMode === "live" ? { onProviderCatalogOutcome: recordProviderOutcome } : {}),
       });

@@ -7,6 +7,10 @@ import { isActiveMemoryExtensionRoot } from "../../test/vitest/vitest.extension-
 import { isBrowserExtensionRoot } from "../../test/vitest/vitest.extension-browser-paths.mjs";
 import { resolveSplitChannelExtensionShard } from "../../test/vitest/vitest.extension-channel-split-paths.mjs";
 import { isCodexExtensionRoot } from "../../test/vitest/vitest.extension-codex-paths.mjs";
+import {
+  databaseWorkerExtensionTestFiles,
+  isDatabaseWorkerExtensionRoot,
+} from "../../test/vitest/vitest.extension-database-workers-paths.mjs";
 import { isDiffsExtensionRoot } from "../../test/vitest/vitest.extension-diffs-paths.mjs";
 import { isFeishuExtensionRoot } from "../../test/vitest/vitest.extension-feishu-paths.mjs";
 import { isIrcExtensionRoot } from "../../test/vitest/vitest.extension-irc-paths.mjs";
@@ -22,7 +26,6 @@ import {
   isProviderOpenAiExtensionRoot,
 } from "../../test/vitest/vitest.extension-provider-paths.mjs";
 import { isQaExtensionRoot } from "../../test/vitest/vitest.extension-qa-paths.mjs";
-import { isTeamReportsExtensionRoot } from "../../test/vitest/vitest.extension-team-reports-paths.mjs";
 import { isTelegramExtensionRoot } from "../../test/vitest/vitest.extension-telegram-paths.mjs";
 import { isVoiceCallExtensionRoot } from "../../test/vitest/vitest.extension-voice-call-paths.mjs";
 import { isWhatsAppExtensionRoot } from "../../test/vitest/vitest.extension-whatsapp-paths.mjs";
@@ -60,51 +63,51 @@ export type ExtensionBatchPlan = {
 type ExtensionTestShard = ExtensionBatchPlan & { checkName: string };
 
 const EXTENSION_TEST_COST_MULTIPLIERS: Record<string, number> = {
-  // Use the larger complete-family seconds/file from runs 33676780376/33747183683.
-  // Round up to 0.01s and retain prior floors; both used two CPUs and two workers.
-  // Runner setup and runtime preparation are charged separately.
-  "test/vitest/vitest.extension-acpx.config.ts": 2.3,
-  "test/vitest/vitest.extension-browser.config.ts": 0.71,
-  "test/vitest/vitest.extension-codex.config.ts": 5.28,
-  "test/vitest/vitest.extension-diffs.config.ts": 1.97,
-  "test/vitest/vitest.extension-discord.config.ts": 0.76,
-  "test/vitest/vitest.extension-feishu.config.ts": 0.72,
-  "test/vitest/vitest.extension-imessage.config.ts": 1.7,
-  "test/vitest/vitest.extension-irc.config.ts": 2.06,
-  "test/vitest/vitest.extension-line.config.ts": 1.1,
-  "test/vitest/vitest.extension-matrix.config.ts": 1.37,
-  "test/vitest/vitest.extension-mattermost.config.ts": 1.48,
-  "test/vitest/vitest.extension-media.config.ts": 1.38,
-  "test/vitest/vitest.extension-memory.config.ts": 1.57,
-  "test/vitest/vitest.extension-messaging.config.ts": 0.72,
-  "test/vitest/vitest.extension-misc.config.ts": 1.16,
-  "test/vitest/vitest.extension-msteams.config.ts": 0.62,
-  "test/vitest/vitest.extension-provider-openai.config.ts": 1.48,
-  "test/vitest/vitest.extension-providers.config.ts": 1.92,
-  "test/vitest/vitest.extension-qa.config.ts": 1.3,
-  "test/vitest/vitest.extension-signal.config.ts": 1.1,
-  "test/vitest/vitest.extension-slack.config.ts": 0.96,
-  "test/vitest/vitest.extension-telegram.config.ts": 8.98,
-  "test/vitest/vitest.extension-voice-call.config.ts": 1.38,
-  "test/vitest/vitest.extension-whatsapp.config.ts": 0.8,
-  "test/vitest/vitest.extension-zalo.config.ts": 0.94,
-  // This shared config is comparatively cheap per file, so raw file count
-  // overstates its real wall-clock cost during CI shard planning.
-  "test/vitest/vitest.extensions.config.ts": 1.1,
+  // Median wrapper seconds per counting file from PR runs 35490342736,
+  // 35490482496, 35490609684 and 35491344005 (two CPUs, two workers).
+  // oxlint-disable-next-line oxc/approx-constant -- measured seconds per file, not Euler's constant.
+  "test/vitest/vitest.extension-acpx.config.ts": 2.718,
+  "test/vitest/vitest.extension-browser.config.ts": 0.478,
+  // Refreshed after #153539: median wrapper seconds/file in successful PR runs
+  // 35537834254, 35537743091 and 35537672782 (two CPUs, two-worker budget).
+  "test/vitest/vitest.extension-codex.config.ts": 2.49,
+  // Same refreshed cohort: 114 envelopes, including the Codex native fixtures.
+  "test/vitest/vitest.extension-database-workers.config.ts": 7.599,
+  "test/vitest/vitest.extension-diffs.config.ts": 0.734,
+  "test/vitest/vitest.extension-discord.config.ts": 0.55,
+  "test/vitest/vitest.extension-feishu.config.ts": 0.411,
+  "test/vitest/vitest.extension-imessage.config.ts": 0.874,
+  "test/vitest/vitest.extension-irc.config.ts": 1.117,
+  "test/vitest/vitest.extension-line.config.ts": 0.625,
+  "test/vitest/vitest.extension-matrix.config.ts": 0.788,
+  "test/vitest/vitest.extension-mattermost.config.ts": 0.997,
+  "test/vitest/vitest.extension-media.config.ts": 0.806,
+  "test/vitest/vitest.extension-memory.config.ts": 1.232,
+  "test/vitest/vitest.extension-messaging.config.ts": 0.379,
+  "test/vitest/vitest.extension-misc.config.ts": 0.73,
+  "test/vitest/vitest.extension-msteams.config.ts": 0.373,
+  "test/vitest/vitest.extension-provider-openai.config.ts": 0.912,
+  "test/vitest/vitest.extension-providers.config.ts": 1.675,
+  "test/vitest/vitest.extension-qa.config.ts": 1.125,
+  "test/vitest/vitest.extension-signal.config.ts": 1.307,
+  "test/vitest/vitest.extension-slack.config.ts": 1.375,
+  "test/vitest/vitest.extension-telegram.config.ts": 5.061,
+  "test/vitest/vitest.extension-voice-call.config.ts": 0.486,
+  "test/vitest/vitest.extension-whatsapp.config.ts": 0.511,
+  "test/vitest/vitest.extension-zalo.config.ts": 0.523,
+  "test/vitest/vitest.extensions.config.ts": 0.642,
 };
-// A 34-file changed shard starved real-time watches and the no-output watchdog.
-// Keep serial, non-isolated Codex processes small enough for prompt output (#125768, #125839).
-const CODEX_EXTENSION_TEST_PROCESS_FILE_LIMIT = 12;
+// Isolated Codex workers retire each mocked graph instead of accumulating it (#125839).
+// Bound cold imports per envelope while sharing startup across parallel files.
+const CODEX_EXTENSION_TEST_PROCESS_FILE_LIMIT = 24;
+// Native app-server files already run in isolated forks. Preserve their measured
+// 12-file envelope boundary independently of the ordinary Codex lane.
+const CODEX_DATABASE_WORKER_TEST_PROCESS_FILE_LIMIT = 12;
 const MATRIX_EXTENSION_TEST_PROCESS_FILE_LIMIT = 40;
 const TELEGRAM_EXTENSION_TEST_PROCESS_FILE_LIMIT = 1;
 const TELEGRAM_EXTENSION_TEST_JOB_FILE_LIMIT = 10;
 const EXTENSION_TEST_PROCESS_FILE_LIMITS = new Map<string, number>([
-  [
-    "test/vitest/vitest.extension-codex.config.ts",
-    // This non-isolated fileParallelism:false lane accumulates every mocked module graph.
-    // At ~166 files, one worker exhausted its heap during teardown (#124413).
-    CODEX_EXTENSION_TEST_PROCESS_FILE_LIMIT,
-  ],
+  ["test/vitest/vitest.extension-codex.config.ts", CODEX_EXTENSION_TEST_PROCESS_FILE_LIMIT],
   // The non-isolated Matrix suite intentionally shares module state within a process.
   // Bound its lifetime so Vite's transformed module graph cannot grow across the whole suite.
   ["test/vitest/vitest.extension-matrix.config.ts", MATRIX_EXTENSION_TEST_PROCESS_FILE_LIMIT],
@@ -146,7 +149,7 @@ const EXTENSION_TEST_CONFIG_ROUTES: Array<[(root: string) => boolean, string]> =
   [isMiscExtensionRoot, "test/vitest/vitest.extension-misc.config.ts"],
   [isMsTeamsExtensionRoot, "test/vitest/vitest.extension-msteams.config.ts"],
   [isQaExtensionRoot, "test/vitest/vitest.extension-qa.config.ts"],
-  [isTeamReportsExtensionRoot, "test/vitest/vitest.extension-team-reports.config.ts"],
+  [isDatabaseWorkerExtensionRoot, "test/vitest/vitest.extension-database-workers.config.ts"],
   [isTelegramExtensionRoot, "test/vitest/vitest.extension-telegram.config.ts"],
   [isVoiceCallExtensionRoot, "test/vitest/vitest.extension-voice-call.config.ts"],
   [isWhatsAppExtensionRoot, "test/vitest/vitest.extension-whatsapp.config.ts"],
@@ -254,7 +257,12 @@ function listFilesystemTestFiles(rootPath: string) {
 
 /** List working-tree test files for extension roots, including new untracked tests. */
 export function listExtensionTestFilesForRoots(roots: string[]) {
-  const files = roots.flatMap((root) => listFilesystemTestFiles(path.join(repoRoot, root)));
+  const files = roots.flatMap((root) => {
+    const rootPath = path.join(repoRoot, root);
+    return fs.existsSync(rootPath) && fs.statSync(rootPath).isFile()
+      ? [root]
+      : listFilesystemTestFiles(rootPath);
+  });
   return [...new Set(files)].toSorted((left, right) => left.localeCompare(right));
 }
 
@@ -281,6 +289,31 @@ function splitTargetsByFileLimit(targets: string[], maxFilesPerChunk: number) {
   return chunks;
 }
 
+export const DATABASE_WORKER_CONFIG = "test/vitest/vitest.extension-database-workers.config.ts";
+// The 185-file native worker envelope was still running after 58 minutes in
+// run 35176277297. Include migrated files too: run 35477485803 packed 149
+// database-worker files into one serial job that took 27 minutes.
+export const DATABASE_WORKER_TEST_JOB_FILE_LIMIT = 20;
+
+function splitWorkerTargetsByOriginalConfig(
+  targets: string[],
+  split: (config: string, files: string[]) => string[][],
+) {
+  const groups = new Map<string, string[]>();
+  for (const target of uniqueSortedTargets(targets)) {
+    const config = resolveExtensionTestConfig(target.split("/").slice(0, 2).join("/"));
+    const group = groups.get(config) ?? [];
+    group.push(target);
+    groups.set(config, group);
+  }
+  return [...groups].flatMap(([config, files]) => {
+    if (config === "test/vitest/vitest.extension-codex.config.ts") {
+      return splitTargetsByFileLimit(files, CODEX_DATABASE_WORKER_TEST_PROCESS_FILE_LIMIT);
+    }
+    return config === DATABASE_WORKER_CONFIG ? [files] : split(config, files);
+  });
+}
+
 function resolveExtensionTestJobFileLimit(config: string) {
   return (
     EXTENSION_TEST_JOB_FILE_LIMITS.get(config) ?? EXTENSION_TEST_PROCESS_FILE_LIMITS.get(config)
@@ -289,6 +322,9 @@ function resolveExtensionTestJobFileLimit(config: string) {
 
 /** Split an extension config's test files across bounded process lifetimes when required. */
 export function splitExtensionTestProcessTargets(config: string, targets: string[]) {
+  if (config === DATABASE_WORKER_CONFIG) {
+    return splitWorkerTargetsByOriginalConfig(targets, splitExtensionTestProcessTargets);
+  }
   const maxFilesPerProcess = EXTENSION_TEST_PROCESS_FILE_LIMITS.get(config);
   return maxFilesPerProcess
     ? splitTargetsByFileLimit(targets, maxFilesPerProcess)
@@ -297,6 +333,11 @@ export function splitExtensionTestProcessTargets(config: string, targets: string
 
 /** Split an extension config's test files into CI envelopes without changing process lifetime. */
 export function splitExtensionTestJobTargets(config: string, targets: string[]) {
+  if (config === DATABASE_WORKER_CONFIG) {
+    return splitWorkerTargetsByOriginalConfig(targets, splitExtensionTestJobTargets).flatMap(
+      (files) => splitTargetsByFileLimit(files, DATABASE_WORKER_TEST_JOB_FILE_LIMIT),
+    );
+  }
   const maxFilesPerJob = resolveExtensionTestJobFileLimit(config);
   return maxFilesPerJob
     ? splitTargetsByFileLimit(targets, maxFilesPerJob)
@@ -305,7 +346,7 @@ export function splitExtensionTestJobTargets(config: string, targets: string[]) 
 
 /** Whether a Vitest invocation can safely be split into independent one-shot processes. */
 export function shouldSplitExtensionTestProcesses(config: string, vitestArgs: string[] = []) {
-  if (!EXTENSION_TEST_PROCESS_FILE_LIMITS.has(config)) {
+  if (config !== DATABASE_WORKER_CONFIG && !EXTENSION_TEST_PROCESS_FILE_LIMITS.has(config)) {
     return false;
   }
   // Per-test retries and exact file exclusions preserve independent process scopes.
@@ -337,7 +378,9 @@ export function createExtensionTestProcessTargetChunks(
   }
   // Explicit file targets replace Vitest's root discovery, so inventory the working tree.
   // Otherwise a newly authored untracked test would silently disappear from a broad run.
-  const testFiles = listExtensionTestFilesForRoots(roots);
+  const testFiles = listExtensionTestFilesForRoots(roots).filter(
+    (file) => config === DATABASE_WORKER_CONFIG || !databaseWorkerExtensionTestFiles.includes(file),
+  );
   return testFiles.length > 0 ? splitExtensionTestProcessTargets(config, testFiles) : [roots];
 }
 
@@ -350,13 +393,28 @@ function countTestFiles(rootPath: string) {
   return listFilesystemTestFiles(rootPath).length;
 }
 
-export function estimateExtensionTestCost(config: string, testFileCount: number) {
+export function estimateExtensionTestCost(
+  config: string,
+  testFileCount: number,
+  files: readonly string[] = [],
+) {
   const multiplier = EXTENSION_TEST_COST_MULTIPLIERS[config] ?? 1;
-  return Math.max(1, Math.ceil(testFileCount * multiplier));
+  // After #153539, the slowest pure app-server envelope in PR runs 35537834254,
+  // 35537743091 and 35537672782 took 190.394s / 11 files on two workers.
+  // Preserve its rounded-up wrapper wall/file floor over the mixed config median.
+  const appServerFiles =
+    config === DATABASE_WORKER_CONFIG
+      ? files.filter((file) => file.startsWith("extensions/codex/src/app-server/")).length
+      : 0;
+  return Math.max(1, Math.ceil(testFileCount * multiplier + appServerFiles * (17.31 - multiplier)));
 }
 
-/** Resolve the dedicated Vitest config for an extension root. */
-export function resolveExtensionTestConfig(root: string) {
+/** Resolve the dedicated Vitest config for an extension root or test file. */
+export function resolveExtensionTestConfig(target: string) {
+  if (databaseWorkerExtensionTestFiles.includes(target)) {
+    return "test/vitest/vitest.extension-database-workers.config.ts";
+  }
+  const root = target.split("/").slice(0, 2).join("/");
   const splitChannelShard = resolveSplitChannelExtensionShard(root);
   if (splitChannelShard) {
     return splitChannelShard.config;
@@ -419,7 +477,27 @@ export function resolveExtensionTestPlan(params: { cwd?: string; targetArg?: str
     (sum, root) => sum + countTestFiles(path.join(repoRoot, root)),
     0,
   );
-  const estimatedCost = estimateExtensionTestCost(config, testFileCount);
+  const workerFiles = databaseWorkerExtensionTestFiles.filter(
+    (file) =>
+      file.startsWith(`${relativeExtensionDir}/`) && fs.existsSync(path.join(repoRoot, file)),
+  );
+  const groups = [{ config, roots, testFileCount: testFileCount - workerFiles.length }];
+  if (workerFiles.length > 0) {
+    groups.push({
+      config: resolveExtensionTestConfig(workerFiles[0]!),
+      roots: workerFiles,
+      testFileCount: workerFiles.length,
+    });
+  }
+  const planGroups = groups
+    .filter((group) => group.testFileCount > 0)
+    .map((group) =>
+      Object.assign({}, group, {
+        extensionIds: [extensionId],
+        estimatedCost: estimateExtensionTestCost(group.config, group.testFileCount, group.roots),
+      }),
+    );
+  const estimatedCost = planGroups.reduce((sum, group) => sum + group.estimatedCost, 0);
 
   return {
     config,
@@ -427,6 +505,7 @@ export function resolveExtensionTestPlan(params: { cwd?: string; targetArg?: str
     extensionDir: relativeExtensionDir,
     extensionId,
     hasTests: testFileCount > 0,
+    planGroups,
     roots,
     testFileCount,
   };
@@ -443,7 +522,7 @@ export function mergeExtensionTestPlans(plans: ResolvedExtensionTestPlan[]): Ext
     .map((plan) => plan.extensionId)
     .toSorted((left, right) => left.localeCompare(right));
 
-  for (const plan of testPlans) {
+  for (const plan of testPlans.flatMap((entry) => entry.planGroups)) {
     const current = groupsByConfig.get(plan.config) ?? {
       config: plan.config,
       extensionIds: [],
@@ -452,7 +531,7 @@ export function mergeExtensionTestPlans(plans: ResolvedExtensionTestPlan[]): Ext
       testFileCount: 0,
     };
 
-    current.extensionIds.push(plan.extensionId);
+    current.extensionIds.push(...plan.extensionIds);
     current.roots.push(...plan.roots);
     current.estimatedCost += plan.estimatedCost;
     current.testFileCount += plan.testFileCount;

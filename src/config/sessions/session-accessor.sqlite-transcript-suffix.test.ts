@@ -851,20 +851,73 @@ describe("SQLite exact transcript suffix replacement", () => {
     }, events);
   });
 
-  it("rotates generation while updating raw, identity, active, and FTS rows", async () => {
-    await withRewriteFixture(({ db, snapshot, scope }) => {
-      const before = snapshot();
-      replaceTranscriptSuffixForTest(scope, rewriteEvents, rewriteEvents.slice(0, 2));
+  it.each([1, 405])(
+    "removes %i searchable suffix rows by rowid lookup while preserving other sessions",
+    async (count) => {
+      const specialIds = ["suffix-\0-end", "suffix-\\u0000-end", "suffix-🦀", 'suffix-"quote'];
+      const ids = Array.from(
+        { length: count },
+        (_, index) => specialIds[index] ?? `suffix-${index}`,
+      );
+      const events = [
+        ...rewriteEvents.slice(0, 2),
+        ...ids.map((id, index) => ({
+          type: "message",
+          id,
+          parentId: index === 0 ? "user" : ids[index - 1],
+          message: { role: "assistant", content: `removed ${index}` },
+        })),
+      ];
+      await withRewriteFixture(({ db, snapshot, scope }) => {
+        const sibling = { ...scope, sessionId: "sibling", sessionKey: "agent:main:sibling" };
+        runOpenClawAgentWriteTransaction((database) => {
+          appendTranscriptEventsInTransaction(database, sibling, events);
+        }, scope);
+        const readSiblingSearch = () =>
+          db
+            .prepare(
+              "SELECT * FROM session_transcript_fts WHERE session_id = ? ORDER BY message_id",
+            )
+            .all(sibling.sessionId);
+        const siblingSearch = readSiblingSearch();
+        const before = snapshot();
+        const deletePlans: string[] = [];
+        const work = trackSqliteStatementExecutions(db, ["ftsDeletes"], (sql) => {
+          if (!/^delete from "session_transcript_fts"/i.test(sql)) {
+            return null;
+          }
+          const placeholders = sql.match(/\?/g)?.length ?? 0;
+          deletePlans.push(
+            ...db
+              .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+              .all(...Array.from({ length: placeholders }, () => 0))
+              .map((row) => String(row.detail))
+              .filter((detail) => detail.includes("VIRTUAL TABLE INDEX")),
+          );
+          return "ftsDeletes";
+        });
+        try {
+          replaceTranscriptSuffixForTest(scope, events, events.slice(0, 2), 2);
+        } finally {
+          work.restore();
+        }
 
-      const after = snapshot();
-      expect(after.generation).not.toBe(before.generation);
-      expect(after.raw).toHaveLength(2);
-      expect(after.identities).toHaveLength(2);
-      expect(after.active).toHaveLength(2);
-      expect(after.search).toMatchObject([{ message_id: "user", text: "question" }]);
-      expect(sessionTranscriptIndexNeedsReconcile(db, scope.sessionId)).toBe(false);
-    });
-  });
+        const after = snapshot();
+        expect(after.generation).not.toBe(before.generation);
+        expect(after.raw).toHaveLength(2);
+        expect(after.identities).toHaveLength(2);
+        expect(after.active).toHaveLength(2);
+        expect(after.search).toMatchObject([{ message_id: "user", text: "question" }]);
+        expect(readSiblingSearch()).toEqual(siblingSearch);
+        expect(work.counts.ftsDeletes).toBeGreaterThan(0);
+        expect(deletePlans.length).toBeGreaterThan(0);
+        for (const plan of deletePlans) {
+          expect(plan).toMatch(/VIRTUAL TABLE INDEX .*:=/);
+        }
+        expect(sessionTranscriptIndexNeedsReconcile(db, scope.sessionId)).toBe(false);
+      }, events);
+    },
+  );
 
   it("rotates generation when an already-dirty projection needs reconciliation", async () => {
     await withRewriteFixture(async ({ db, snapshot, scope }) => {

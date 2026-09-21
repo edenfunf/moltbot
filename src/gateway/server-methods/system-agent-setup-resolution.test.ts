@@ -7,7 +7,6 @@ import type {
   WizardNextResult,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { WizardNextResultSchema } from "../../../packages/gateway-protocol/src/schema/wizard.js";
-import { createRuntimeConfigWriteApplication } from "../../config/runtime-write-application.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { buildPluginCapabilityConsentReview } from "../../plugins/capability-summary.js";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
@@ -237,14 +236,8 @@ describe("openclaw.setup provider resolution", () => {
   it("locks cancellation before an accepted runtime install can start", async () => {
     const { wizardSessions, context } = makeContext();
     const sessionId = "runtime-install-lock";
-    let reportLocked = () => {};
-    const locked = new Promise<void>((resolve) => {
-      reportLocked = resolve;
-    });
-    let releaseInstall = () => {};
-    const installReleased = new Promise<void>((resolve) => {
-      releaseInstall = resolve;
-    });
+    const { promise: locked, resolve: reportLocked } = createDeferredCore();
+    const { promise: installReleased, resolve: releaseInstall } = createDeferredCore();
     setupInferenceMocks.activateSetupInference.mockImplementationOnce(async (params) => {
       const accepted = await params.prompter.confirm({
         message: "Install the reviewed runtime?",
@@ -521,20 +514,25 @@ describe("openclaw.setup provider resolution", () => {
       done: true,
       status: "error",
       error:
-        'Error: Provider setup resolution failed for "ollama". Run `openclaw doctor --fix`, restart the Gateway, and try again.',
+        'Provider setup resolution failed for "ollama". Run `openclaw doctor --fix`, restart the Gateway, and try again.',
     });
     await whenAdmittedWizardSessionSettled(session);
     expect(authConfigMocks.writeProviderAuthConfig).not.toHaveBeenCalled();
   });
-  it.each([false, true])(
-    "returns verified provider auth through wizard transport (restart %s)",
-    async (restart) => {
+  it.each([
+    { restart: false, modelTarget: undefined },
+    { restart: true, modelTarget: undefined },
+    { restart: true, modelTarget: "utility" as const },
+  ])(
+    "returns verified provider auth through wizard transport (restart $restart, target $modelTarget)",
+    async ({ restart, modelTarget }) => {
       const { wizardSessions, context } = makeContext();
       setupInferenceMocks.activateSetupInference.mockImplementationOnce(async (params) => {
         await params.prompter.note("Open the browser and enter ABCD", "Pair GitHub");
         return {
           ok: true,
           modelRef: "github-copilot/test",
+          ...(modelTarget ? { modelTarget } : {}),
           latencyMs: 10,
           lines: ["ready"],
           ...(restart ? { gatewayRestartRequired: true } : {}),
@@ -543,7 +541,12 @@ describe("openclaw.setup provider resolution", () => {
       const { calls, respond } = makeRespond();
 
       await systemAgentHandler("openclaw.setup.auth.start")({
-        params: { sessionId: "auth-session-1", agentId: "research", authChoice: "github-copilot" },
+        params: {
+          sessionId: "auth-session-1",
+          agentId: "research",
+          authChoice: "github-copilot",
+          ...(modelTarget ? { modelTarget } : {}),
+        },
         respond,
         context,
       } as never);
@@ -556,7 +559,11 @@ describe("openclaw.setup provider resolution", () => {
       const session = expectDefined(wizardSessions.get("auth-session-1"), "auth wizard session");
       const first = await callWizardNext(context, { sessionId: "auth-session-1" });
       expect(setupInferenceMocks.activateSetupInference).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: "provider-auth", authChoice: "github-copilot" }),
+        expect.objectContaining({
+          kind: "provider-auth",
+          authChoice: "github-copilot",
+          ...(modelTarget ? { modelTarget } : {}),
+        }),
       );
       expect(setupInferenceMocks.activateSetupInference.mock.calls[0]?.[0].agentId).toBe(
         "research",
@@ -579,6 +586,7 @@ describe("openclaw.setup provider resolution", () => {
         status: "done",
         modelActivation: {
           modelRef: "github-copilot/test",
+          ...(modelTarget ? { modelTarget } : {}),
           ...(restart ? { gatewayRestartRequired: true } : {}),
         },
       });
@@ -679,7 +687,7 @@ describe("openclaw.setup provider resolution", () => {
         expect(done).toEqual({
           done: true,
           status: "error",
-          error: "Error: Probe rejected [redacted]",
+          error: "Probe rejected [redacted]",
           activationRejection: { disposition: "rejected-before-promotion", status },
         });
         expect(done).not.toHaveProperty("modelActivation");
@@ -737,7 +745,7 @@ describe("openclaw.setup provider resolution", () => {
           expect(done).toMatchObject({
             done: true,
             status: "error",
-            error: `Error: ${shutdownMessage}`,
+            error: shutdownMessage,
           });
           expect(done).not.toHaveProperty("modelActivation");
         }
@@ -779,7 +787,7 @@ describe("openclaw.setup provider resolution", () => {
     expect(done).toEqual({
       done: true,
       status: "error",
-      error: "Error: Provider rejected sign-in",
+      error: "Provider rejected sign-in",
       activationRejection: { disposition: "rejected-before-promotion", status: "auth" },
     });
     expect(done).not.toHaveProperty("step");
@@ -813,9 +821,9 @@ describe("openclaw.setup provider resolution", () => {
           }
           if (outcome === "application-error") {
             params.onCommitStarted?.(config);
-            const application = createRuntimeConfigWriteApplication();
-            expectDefined(application.claim(), "application claim").settle("failed");
-            params.onRuntimeApplication?.(application);
+            params.onActivationCompletion?.(async () => {
+              throw new Error("The Gateway did not complete activation (failed).");
+            });
             return { ok: true, modelRef: "example/model", latencyMs: 1, lines: [] };
           }
           return {
@@ -862,12 +870,12 @@ describe("openclaw.setup provider resolution", () => {
           status: "error",
           error:
             outcome === "application-error"
-              ? expect.stringContaining("AI access was saved, but the Gateway could not apply it")
+              ? "The Gateway did not complete activation (failed)."
               : outcome === "retention-indeterminate"
-                ? "SetupInferenceActivationIndeterminateError: Could not retain Codex safely"
+                ? "Could not retain Codex safely"
                 : outcome === "thrown"
-                  ? "Error: 401 Provider rejected sign-in"
-                  : "Error: Provider rejected sign-in",
+                  ? "401 Provider rejected sign-in"
+                  : "Provider rejected sign-in",
           ...(outcome === "rejected"
             ? { activationRejection: { disposition: "rejected-before-promotion", status: "auth" } }
             : {}),

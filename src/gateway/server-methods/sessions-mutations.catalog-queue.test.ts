@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { afterEach, expect, test, vi } from "vitest";
+import { loadPublishedPreparedModelCatalogOwnerSnapshot } from "../../agents/prepared-model-catalog.js";
 import {
   markPreparedModelRuntimeSnapshotsStale,
   rejectPendingPreparedModelRuntimeReplacement,
@@ -42,7 +43,12 @@ function patchContext(
 ) {
   return {
     getRuntimeConfig: () => cfg,
-    loadGatewayModelCatalog,
+    loadGatewayModelCatalogSnapshot: async (
+      params: Parameters<GatewayRequestContext["loadGatewayModelCatalogSnapshot"]>[0],
+    ) => {
+      const entries = await loadGatewayModelCatalog(params);
+      return { entries, routeVariants: entries };
+    },
     getSessionEventSubscriberConnIds: () => new Set(),
     broadcastToConnIds: vi.fn(),
     chatAbortControllers: new Map(),
@@ -71,14 +77,23 @@ test("catalog reload releases the agent writer while preserving same-session ord
         { sessionId: sessionKey, updatedAt: 1 },
       );
     }
+    await import("../../agents/prepared-model-catalog.js");
     const entered = createDeferredCore();
     const replacement = markPreparedModelRuntimeSnapshotsStale("catalog reload", {
       waitForReplacement: true,
     });
     expect(replacement).toBeDefined();
     const loadGatewayModelCatalog = vi.fn(async () => {
-      entered.resolve();
-      return await loadActualGatewayModelCatalog({ agentId: "main", getConfig: () => ({}) });
+      return await loadActualGatewayModelCatalog({
+        agentId: "main",
+        getConfig: () => ({}),
+        loadPublishedPreparedModelCatalogOwnerSnapshot: (params) => {
+          const pending = loadPublishedPreparedModelCatalogOwnerSnapshot(params);
+          // The real owner captures the replacement gate synchronously before returning.
+          entered.resolve();
+          return pending;
+        },
+      });
     });
     const context = patchContext(loadGatewayModelCatalog);
     const catalogResponse = vi.fn();
@@ -406,7 +421,7 @@ test("a multi-target agent group retains ordered label claims around catalog loa
     const loadGatewayModelCatalog = vi.fn(async () => []);
     const respond = vi.fn();
     await sessionMutationHandlers["sessions.patchMany"]!({
-      params: { targets, patch: { label: "Winner", thinkingLevel: "off" } },
+      params: { targets, patch: { label: "Winner", thinkingLevel: "low" } },
       respond,
       context: patchContext(loadGatewayModelCatalog),
       client: null,
@@ -428,7 +443,7 @@ test("a multi-target agent group retains ordered label claims around catalog loa
     expect(loadGatewayModelCatalog).toHaveBeenCalledOnce();
     expect(loadSessionEntry({ agentId: "main", sessionKey: targets[0]!.key })).toMatchObject({
       label: "Winner",
-      thinkingLevel: "off",
+      thinkingLevel: "low",
     });
     expect(
       loadSessionEntry({ agentId: "main", sessionKey: targets[1]!.key })?.label,

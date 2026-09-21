@@ -9,6 +9,15 @@ type WorkerLifecycleLease = support.WorkerLifecycleLease;
 describe("worker environment service", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
+  it("exposes the catalog display identity without allocating a worker", () => {
+    const provider = support.createProvider({ resolveDisplayId: () => "aws" });
+    const provision = vi.spyOn(provider, "provision");
+    const service = support.createService(provider);
+    expect(service.readProviderDisplayId("development")).toBe("aws");
+    expect(provision).not.toHaveBeenCalled();
+    expect(support.testState.store.list()).toEqual([]);
+  });
+
   it("warms machine catalogs at startup only for nonterminal environment profiles", async () => {
     const { store } = support.testState;
     const active = store.createIntent({
@@ -58,6 +67,8 @@ describe("worker environment service", () => {
 
   it("maintains configured providers on the existing timer with no environments", async () => {
     vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
     const maintain = vi.fn(async () => {});
     const workerService = support.createService(support.createProvider(), {
       maintainProviders: maintain,
@@ -69,9 +80,11 @@ describe("worker environment service", () => {
     expect(maintain).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(25);
     expect(maintain).toHaveBeenCalledTimes(2);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(setIntervalSpy).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 25);
     await workerService.stop();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(clearIntervalSpy).toHaveBeenCalledWith(setIntervalSpy.mock.results[0]?.value);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(maintain).toHaveBeenCalledTimes(2);
   });
 
   it("keeps maintenance off reconciliation and allocation while shutdown aborts and drains it", async () => {
@@ -85,7 +98,10 @@ describe("worker environment service", () => {
       await workerService.reconcileOnce();
       expect(maintainProviders).toHaveBeenCalledOnce();
       await expect(
-        workerService.create("development", "during-maintenance"),
+        workerService.createWithRequest({
+          profileId: "development",
+          idempotencyKey: "during-maintenance",
+        }),
       ).resolves.toMatchObject({ state: "ready" });
       stopping = workerService.stop().then(() => {
         stopped = true;
@@ -245,7 +261,10 @@ describe("worker environment service", () => {
       providerCallTimeoutMs: 5,
       tunnelManager,
     });
-    const creation = workerService.create("development", "request-stop-provider-timeout");
+    const creation = workerService.createWithRequest({
+      profileId: "development",
+      idempotencyKey: "request-stop-provider-timeout",
+    });
     const creationResult = expect(creation).rejects.toMatchObject({
       code: "provider_failure",
     } satisfies Partial<WorkerEnvironmentServiceError>);
@@ -271,6 +290,8 @@ describe("worker environment service", () => {
 
   it("owns and clears one periodic reconciliation timer", async () => {
     vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
     const environmentId = "worker-guarded-reconcile";
     support.seedReady(environmentId);
     const inspect = vi.fn(async () => ({ status: "active" as const }));
@@ -306,7 +327,7 @@ describe("worker environment service", () => {
     workerService.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(liveEvents.start).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(setIntervalSpy).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 25);
     await vi.advanceTimersByTimeAsync(25);
     expect(guardedEnvironmentIds).toEqual([environmentId, environmentId, environmentId]);
     expect(inspect).toHaveBeenCalledTimes(3);
@@ -318,7 +339,9 @@ describe("worker environment service", () => {
 
     expect(liveEvents.clear).toHaveBeenCalledTimes(2);
     expect(unsubscribeTurnClaimClosed).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(clearIntervalSpy).toHaveBeenCalledWith(setIntervalSpy.mock.results[0]?.value);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(inspect).toHaveBeenCalledTimes(4);
   });
 
   it("closes new guarded reconciliation and drains the admitted operation on uninstall", async () => {
@@ -400,11 +423,17 @@ describe("worker environment service", () => {
     });
     const provision = vi.fn(support.createProvider().provision);
     const workerService = support.createService(support.createProvider({ provision }));
-    const first = workerService.create("development", "request-queued-before-stop");
+    const first = workerService.createWithRequest({
+      profileId: "development",
+      idempotencyKey: "request-queued-before-stop",
+    });
     await support.waitForFast(() =>
       expect(support.testState.bootstrapWorker).toHaveBeenCalledTimes(1),
     );
-    const queued = workerService.create("development", "request-queued-before-stop");
+    const queued = workerService.createWithRequest({
+      profileId: "development",
+      idempotencyKey: "request-queued-before-stop",
+    });
     const queuedResult = expect(queued).rejects.toMatchObject({
       code: "invalid_state",
     } satisfies Partial<WorkerEnvironmentServiceError>);
@@ -426,7 +455,10 @@ describe("worker environment service", () => {
     });
     const destroy = vi.fn(async () => {});
     const workerService = support.createService(support.createProvider({ destroy }));
-    const creation = workerService.create("development", "request-destroy-before-stop");
+    const creation = workerService.createWithRequest({
+      profileId: "development",
+      idempotencyKey: "request-destroy-before-stop",
+    });
     await support.waitForFast(() =>
       expect(support.testState.bootstrapWorker).toHaveBeenCalledTimes(1),
     );
@@ -458,7 +490,10 @@ describe("worker environment service", () => {
       return support.BOOTSTRAP_RECEIPT;
     });
     const workerService = support.createService(support.createProvider());
-    const creation = workerService.create("development", "request-stop-after-reconcile-failure");
+    const creation = workerService.createWithRequest({
+      profileId: "development",
+      idempotencyKey: "request-stop-after-reconcile-failure",
+    });
     await support.waitForFast(() =>
       expect(support.testState.bootstrapWorker).toHaveBeenCalledTimes(1),
     );
@@ -503,7 +538,12 @@ describe("worker environment service", () => {
     finishInspection?.();
     await stopping;
     expect(stopped).toBe(true);
-    await expect(workerService.create("development", "request-after-stop")).rejects.toMatchObject({
+    await expect(
+      workerService.createWithRequest({
+        profileId: "development",
+        idempotencyKey: "request-after-stop",
+      }),
+    ).rejects.toMatchObject({
       code: "invalid_state",
     } satisfies Partial<WorkerEnvironmentServiceError>);
     await expect(workerService.destroy("worker-slow-inspection")).rejects.toMatchObject({

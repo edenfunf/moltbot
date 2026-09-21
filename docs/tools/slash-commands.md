@@ -133,7 +133,7 @@ command handling is enabled for the surface.
 </ParamField>
 
 <ParamField path="commands.restart" type="boolean" default="true">
-  Enables `/restart`, `/update`, and external `SIGUSR1` restart requests.
+  Enables `/restart`, `/update`, and external `SIGUSR2` restart requests.
 </ParamField>
 
 <ParamField path="commands.ownerAllowFrom" type="string[]">
@@ -248,6 +248,8 @@ plugins, and installed skills.
     | `/elevated [on\|off\|ask\|full]` | Toggle elevated mode. Alias: `/elev` |
     | `/exec host=<auto\|sandbox\|gateway\|node> security=<deny\|allowlist\|full> ask=<off\|on-miss\|always> node=<id>` | Show resolved exec defaults; persist host/node placement, apply security/ask to this message only. See [Session permission modes](/gateway/permission-modes) |
     | `/login [provider]` | Show sign-in providers, then choose a connection method when several are available. Owner/admin only |
+    | `/login refresh` | Refresh saved sign-in status without signing in again. Owner/admin only |
+    | `/login access <provider>` | Reopen model-access choices for a provider without signing in again. Owner/admin only |
     | `/model [name\|default\|list\|status] [-s\|--session\|-a\|--agent\|-g\|--global]` | Show or select a model. `-s` changes only this session; owner/admin `-a` and `-g` also update configured defaults |
     | `/models [provider] [page] [limit=<n>\|all]` | List configured/auth-available providers or models |
     | `/queue <mode>` | Manage active-run queue behavior. See [Queue](/concepts/queue) and [Queue steering](/concepts/queue-steering) |
@@ -339,8 +341,16 @@ user skill directly.
     | `/plugins list\|inspect\|show\|get\|install\|enable\|disable` | `commands.plugins: true` | Inspect or mutate plugin state. Owner-only for writes. Alias: `/plugin` |
     | `/debug show\|set\|unset\|reset` | `commands.debug: true` | Runtime-only config overrides. Owner-only |
     | `/restart` | `commands.restart: true` (default) | Restart OpenClaw |
-    | `/update` | `commands.restart: true` (default), owner | Update OpenClaw and restart; receive a completion or failure notice in the same chat |
+    | `/update` | `commands.restart: true` (default), owner | Update OpenClaw using its configured update channel; works with default tool profiles and sends a completion or failure notice in the same chat |
     | `/send on\|off\|inherit` | owner | Set send policy |
+
+    Natural-language update requests use the `gateway` tool's `update.run`
+    action. `/update` provides the same update operation without requiring a
+    functioning model or access to that tool. Both use the Gateway update
+    handler, also used by the Control UI. Chat access alone does not grant
+    permission to update. See
+    [Updating from chat](/install/updating#from-chat).
+
   </Accordion>
 
   <Accordion title="Voice, TTS, channel control">
@@ -430,6 +440,7 @@ Numeric selections such as `/model 3` are not supported.
 /model openai/gpt-5.4 -g # session + global default update request
 /model default -s        # clear this session's model selection; use configured default
 /model opus@anthropic:default -s # pin this profile for the current session
+/model "openai/gpt-5.4"@"openai:owner+work@example.com" -s # quote account names with special characters
 /model default     # use configured default, following the selected scope
 /model status      # detailed view with endpoint and API mode
 ```
@@ -523,10 +534,12 @@ the command asks the owner to retry from a direct chat.
 /plugins install git:<repository>@<ref> --force
 ```
 
-`/plugins enable|disable` updates plugin config and hot-reloads the Gateway
-plugin runtime for new agent turns. `/plugins install` restarts managed
-Gateways automatically because plugin source modules changed. Trusted ClawHub
-and official-catalog installs do not need a provenance acknowledgement. Arbitrary npm,
+`/plugins enable|disable` and `/plugins install` apply through the running Gateway's
+plugin lifecycle and report the runtime application result without restarting it.
+New agent turns use the updated plugin runtime. See
+[Apply changes and inspect](/plugins/manage-plugins#apply-changes-and-inspect).
+
+Trusted ClawHub and official-catalog installs do not need a provenance acknowledgement. Arbitrary npm,
 git, archive, `npm-pack:`, and local path sources show a provenance warning and
 require a trailing `--force` after you review the source. This flag acknowledges
 the source and permits replacement of an existing install. It does not bypass
@@ -545,8 +558,9 @@ that reply, then rerun with `--accept-capabilities`:
 /plugins enable <plugin-id> --accept-capabilities
 ```
 
-Capability consent also applies to official external plugins and is separate
-from the source acknowledgement provided by `--force`.
+Bundled plugins and verified plugins from OpenClaw's official catalog are exempt
+from capability consent. Third-party capability consent is separate from the
+source acknowledgement provided by `--force`.
 
 ## `/trace`: plugin trace output
 
@@ -589,10 +603,11 @@ See [BTW side questions](/tools/btw) for the full behavior.
     - **Text commands:** run in the normal chat session (DMs share `main`, groups have their own session).
     - **Native Discord commands:** `agent:<agentId>:discord:slash:<userId>`
     - **Native Slack commands:** `agent:<agentId>:slack:slash:<userId>` (prefix configurable via `channels.slack.slashCommand.sessionPrefix`)
-    - **Native Telegram commands:** `telegram:slash:<userId>` (targets the chat session via `CommandTargetSessionKey`)
+    - **Native Telegram commands:** run in the chat session like text commands.
     - **`/login`** requires a private chat or Control UI session. It shows provider buttons without starting sign-in. API keys and local setup use the Control UI handoff. `/login codex` still selects OpenAI device pairing. Retry messages name the exact connection command.
     - **`/login openrouter`** sends a browser sign-in action through the Gateway's managed HTTPS address. Approve access in your browser, then return to chat for the saved result. See [OpenRouter](/providers/openrouter#getting-started) for address requirements. Use `/login cancel` to cancel a pending sign-in.
-    - After login, model restrictions can prompt **Show all provider models** or **Keep current restrictions**. Credentials stay saved either way. A catalog refresh failure is reported separately from saving the credential.
+    - After login, model restrictions can prompt **Show all provider models** or **Keep current restrictions**. Credentials stay saved either way, and the question does not block another sign-in. An expired question or changed restrictions opens a fresh choice without signing in again. `/login cancel` can cancel the pending question without removing saved credentials.
+    - Chat login applies saved credentials directly to the running Gateway. If sign-in status cannot be confirmed, use `/login refresh`, then `/models`; you do not need to repeat authentication.
     - **`/stop`** targets the active chat session to abort the current run.
 
   </Accordion>

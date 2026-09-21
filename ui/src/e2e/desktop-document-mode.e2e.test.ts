@@ -46,7 +46,7 @@ async function installDesktopClientFake(panel: import("playwright").Locator) {
     ).desktopClientFactory = () => ({
       async connect(options) {
         element.dataset.viewOnly = String(options.viewOnly);
-        element.dataset.scaleViewport = String(options.scaleViewport ?? true);
+        element.dataset.scaleViewport = String(options.sizingMode !== "actual");
         const remote = document.createElement("div");
         remote.dataset.testRemoteDesktop = "true";
         remote.textContent = "Remote desktop";
@@ -55,6 +55,9 @@ async function installDesktopClientFake(panel: import("playwright").Locator) {
         options.target.replaceChildren(remote);
         options.onConnect?.();
         return {
+          setPresented() {
+            return true;
+          },
           disableInput() {
             element.dataset.viewOnly = "true";
           },
@@ -70,8 +73,8 @@ async function installDesktopClientFake(panel: import("playwright").Locator) {
           sendBackspace() {
             element.dataset.lastKeyboardText = "Backspace";
           },
-          setScaleViewport(enabled) {
-            element.dataset.scaleViewport = String(enabled);
+          setSizingMode(mode) {
+            element.dataset.scaleViewport = String(mode !== "actual");
           },
         };
       },
@@ -222,6 +225,39 @@ suite.define(() => {
       await page.screenshot({
         path: path.join(artifactDirectory, "session-first-frame-without-global-inventory.png"),
       });
+
+      for (let index = 0; index < 32; index += 1) {
+        await gateway.emitGatewayEvent("sessions.changed", { sessionKey, phase: "message" });
+      }
+      expect(await gateway.getRequests("sessions.describe")).toHaveLength(1);
+      expect(await gateway.getRequests("desktop.observe")).toHaveLength(1);
+      expect(await rfb.events()).toEqual(["authenticated:1"]);
+
+      const replacement = { ...environment, id: "worker-replacement" };
+      await gateway.setMethodResponse("environments.status", replacement);
+      await gateway.deferNext("sessions.describe");
+      await gateway.emitGatewayEvent("sessions.changed", { sessionKey, reason: "placement" });
+      await gateway.waitForRequest("sessions.describe", { after: 1 });
+      for (let index = 0; index < 32; index += 1) {
+        await gateway.emitGatewayEvent("sessions.changed", { sessionKey, phase: "message" });
+      }
+      expect(await gateway.getRequests("sessions.describe")).toHaveLength(2);
+      expect(await gateway.getRequests("desktop.observe")).toHaveLength(1);
+      await gateway.resolveDeferred("sessions.describe", {
+        session: { key: sessionKey, placement: { state: "active", environmentId: replacement.id } },
+      });
+      expect((await gateway.waitForRequest("desktop.observe", { after: 1 })).params).toEqual({
+        source: { kind: "environment", environmentId: replacement.id },
+        control: false,
+      });
+      await expect.poll(async () => (await rfb.events()).includes("authenticated:2")).toBe(true);
+      await gateway.setMethodResponse("environments.status", environment);
+      await gateway.emitGatewayEvent("sessions.changed", { sessionKey, phase: "start" });
+      expect((await gateway.waitForRequest("desktop.observe", { after: 2 })).params).toEqual({
+        source: { kind: "environment", environmentId: environment.id },
+        control: false,
+      });
+      expect(await gateway.getRequests("environments.list")).toHaveLength(0);
     });
   });
 
@@ -232,6 +268,7 @@ suite.define(() => {
         const sessionKey = "agent:main:cloud-desktop";
         const session = {
           key: sessionKey,
+          sessionId: "cloud-desktop-session",
           kind: "direct",
           label: "Cloud desktop session",
           updatedAt: 1,
@@ -725,7 +762,7 @@ suite.define(() => {
     });
   });
 
-  it("auto-connects view-only and provides four working touch actions", async () => {
+  it("auto-connects view-only and keeps touch actions beside Picture-in-Picture", async () => {
     await suite.withPage({ serviceWorkers: "block" }, async ({ page }) => {
       const { gateway, panel } = await openDesktopDocument(
         page,
@@ -752,8 +789,11 @@ suite.define(() => {
       const viewRequest = await gateway.waitForRequest("desktop.observe");
       expect(viewRequest.params).toEqual({ source: { kind: "host" }, control: false });
       await expect.poll(() => panel.getAttribute("data-view-only")).toBe("true");
-      const touchActions = panel.locator(".desktop-touch-action");
-      await expect.poll(() => touchActions.count()).toBe(4);
+      const touchActions = panel.locator(".desktop-touch-action, .desktop-sizing");
+      await expect.poll(() => touchActions.count()).toBe(5);
+      await panel
+        .getByRole("button", { name: "Open desktop in Picture-in-Picture", exact: true })
+        .waitFor();
       await panel.getByRole("button", { name: "Back", exact: true }).waitFor();
 
       await panel.getByRole("button", { name: "Take control", exact: true }).click();
@@ -764,7 +804,9 @@ suite.define(() => {
       });
       await expect.poll(() => panel.getAttribute("data-view-only")).toBe("false");
 
-      await panel.getByRole("button", { name: "Use actual size", exact: true }).click();
+      await panel
+        .getByRole("combobox", { name: "Desktop size", exact: true })
+        .selectOption("actual");
       await expect.poll(() => panel.getAttribute("data-scale-viewport")).toBe("false");
 
       await panel.getByRole("button", { name: "Keyboard", exact: true }).click();

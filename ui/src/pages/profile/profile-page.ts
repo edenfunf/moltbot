@@ -3,8 +3,6 @@ import { html, nothing } from "lit";
 import { state } from "lit/decorators.js";
 import type {
   UserProfile,
-  UsersPrefsGetResult,
-  UsersPrefsSetResult,
   UsersSelfResult,
   UsersSetAvatarResult,
   UsersSetDisplayNameResult,
@@ -21,6 +19,7 @@ import {
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
+import { invalidateUserPreferences, saveUserPreferences } from "../../app/user-prefs-cache.ts";
 import type { AuthenticatedUser } from "../../app/user-profile.ts";
 import { resolveCurrentSelfUser } from "../../app/user-profile.ts";
 import {
@@ -71,7 +70,6 @@ export class ProfilePage extends OpenClawLightDomElement {
   @state() private identityLoading = false;
   @state() private identityBusy: IdentityChange["kind"] | null = null;
   @state() private identityError: string | null = null;
-  @state() private failedHeroAvatarUrl: string | null = null;
 
   private client: GatewayBrowserClient | null = null;
   private connected = false;
@@ -168,7 +166,11 @@ export class ProfilePage extends OpenClawLightDomElement {
       this.displayName = hasUnsavedDisplayName ? displayNameDraft : (profile.displayName ?? "");
       this.gitCoauthorEnabled = true;
       if (profile.githubIdentity) {
-        const preferences = await client.request<UsersPrefsGetResult>("users.prefs.get", {
+        const { loadUserPreferences } = await import("../../app/user-prefs-request.ts");
+        if (requestId !== this.identityRequestId) {
+          return;
+        }
+        const preferences = await loadUserPreferences(client, profile.id, {
           keys: [GIT_COAUTHOR_PREFERENCE_KEY],
         });
         if (requestId !== this.identityRequestId) {
@@ -257,7 +259,7 @@ export class ProfilePage extends OpenClawLightDomElement {
           break;
         }
         case "git-coauthor": {
-          const result = await client.request<UsersPrefsSetResult>("users.prefs.set", {
+          const result = await saveUserPreferences(client, {
             entries: { [GIT_COAUTHOR_PREFERENCE_KEY]: change.enabled },
           });
           if (!isCurrent()) {
@@ -366,6 +368,9 @@ export class ProfilePage extends OpenClawLightDomElement {
 
   private refreshManually() {
     if (this.selfUser && this.canWrite && !this.identityBusy && !this.identityLoading) {
+      if (this.client) {
+        invalidateUserPreferences(this.client);
+      }
       void this.loadIdentity();
     }
   }
@@ -378,11 +383,7 @@ export class ProfilePage extends OpenClawLightDomElement {
       row,
       user: this.selfUser,
       identity: this.context.agentIdentity.get(agentId),
-      resolveImageUrl: (avatarUrl) => this.heroAvatarLoader.resolve(avatarUrl),
-      failedAvatarUrl: this.failedHeroAvatarUrl,
-      onAvatarError: (avatarUrl) => {
-        this.failedHeroAvatarUrl = avatarUrl;
-      },
+      avatarLoader: this.heroAvatarLoader,
     });
   }
 

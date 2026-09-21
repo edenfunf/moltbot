@@ -26,6 +26,8 @@ export type PickerParams<Option extends PickerOption> = {
   title?: string;
   placement?: "top" | "bottom";
   searchable?: boolean;
+  showOptionTooltips?: boolean;
+  showSelectedDescription?: boolean;
   onOpen?: () => void;
   onChange: (value: string) => void;
   onChangeTarget?: (value: string, select: HTMLElement) => void;
@@ -262,7 +264,11 @@ export class SelectPicker<
           id=${this.params.id ?? nothing}
           class="picker-select__trigger"
           type="button"
-          aria-label=${selected ? `${this.params.label}: ${selected.label}` : this.params.label}
+          aria-label=${
+            selected
+              ? `${this.params.label}: ${[selected.label, this.params.showSelectedDescription && selected.description].filter(Boolean).join(" · ")}`
+              : this.params.label
+          }
           aria-haspopup="listbox"
           aria-expanded=${String(open)}
           aria-controls=${this.listboxId}
@@ -271,7 +277,14 @@ export class SelectPicker<
           @click=${() => (open ? this.closeMenu() : this.openMenu())}
         >
           ${this.leading(selected)}
-          <span class="picker-select__label">${selected?.label ?? this.params.label}</span>
+          <span class="picker-select__copy">
+            <span class="picker-select__label">${selected?.label ?? this.params.label}</span>
+            ${
+              this.params.showSelectedDescription && selected?.description
+                ? html`<span class="picker-select__description">${selected.description}</span>`
+                : nothing
+            }
+          </span>
           <span class="picker-select__chevron" aria-hidden="true">${icons.chevronDown}</span>
         </button>
         <wa-popup ?active=${open}>
@@ -316,7 +329,7 @@ export class SelectPicker<
                     role="option"
                     id=${`${this.listboxId}-${index}`}
                     data-value=${option.value}
-                    title=${option.value}
+                    title=${this.params.showOptionTooltips === false ? nothing : option.value}
                     aria-selected=${String(option.value === this.params.value)}
                     aria-disabled=${String(Boolean(option.disabled))}
                     ?data-active=${option.value === this.activeValue}

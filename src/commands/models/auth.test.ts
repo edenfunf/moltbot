@@ -1,9 +1,11 @@
 // Model auth tests cover provider auth status, expiry, and display helpers.
 
+import { CANCEL_SYMBOL } from "@clack/prompts";
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
+import type { ConfigWriteOptions } from "../../config/io.js";
 import type { ProviderPlugin } from "../../plugins/types.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { ProviderAuthConfigApplyError } from "../../shared/provider-auth-result.js";
@@ -45,7 +47,6 @@ function readMockCallArg(mock: { mock: { calls: unknown[][] } }, index = 0): unk
 const mocks = vi.hoisted(() => ({
   clackCancel: vi.fn(),
   clackConfirm: vi.fn(),
-  clackIsCancel: vi.fn((value: unknown) => value === Symbol.for("clack:cancel")),
   clackPassword: vi.fn(),
   clackSelect: vi.fn(),
   clackText: vi.fn(),
@@ -129,10 +130,10 @@ vi.mock("../../plugins/provider-auth-helpers.js", () => ({
   }),
 }));
 
-vi.mock("@clack/prompts", () => ({
+vi.mock("@clack/prompts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@clack/prompts")>()),
   cancel: mocks.clackCancel,
   confirm: mocks.clackConfirm,
-  isCancel: mocks.clackIsCancel,
   password: mocks.clackPassword,
   select: mocks.clackSelect,
   text: mocks.clackText,
@@ -184,13 +185,14 @@ vi.mock("../../plugins/install-record-commit.js", () => ({
       current: OpenClawConfig,
       context: { snapshot: { valid: boolean } },
     ) => { nextConfig: OpenClawConfig };
-    writeOptions?: { beforeCommit?: () => void };
+    writeOptions?: ConfigWriteOptions;
   }) => {
     const next = await mocks.updateConfig(
       (current: OpenClawConfig) =>
         params.transform(current, { snapshot: { valid: true } }).nextConfig,
       undefined,
       params.writeOptions?.beforeCommit,
+      params.writeOptions,
     );
     return { nextConfig: next, result: next };
   },
@@ -406,9 +408,6 @@ describe("modelsAuthLoginCommand", () => {
     lastUpdatedConfig = null;
     mocks.clackCancel.mockReset();
     mocks.clackConfirm.mockReset();
-    mocks.clackIsCancel.mockImplementation(
-      (value: unknown) => value === Symbol.for("clack:cancel"),
-    );
     mocks.clackPassword.mockReset();
     mocks.clackSelect.mockReset();
     mocks.clackText.mockReset();
@@ -449,8 +448,16 @@ describe("modelsAuthLoginCommand", () => {
       runtimeConfig: structuredClone(currentConfig),
     }));
     mocks.updateConfig.mockImplementation(
-      async (mutator: (cfg: OpenClawConfig) => OpenClawConfig) => {
-        lastUpdatedConfig = mutator(currentConfig);
+      async (
+        mutator: (cfg: OpenClawConfig) => OpenClawConfig,
+        _selectModelRefs: unknown,
+        beforeCommit?: ConfigWriteOptions["beforeCommit"],
+        writeOptions?: ConfigWriteOptions,
+      ) => {
+        const nextConfig = mutator(currentConfig);
+        await beforeCommit?.();
+        writeOptions?.assertCurrent?.();
+        lastUpdatedConfig = nextConfig;
         currentConfig = lastUpdatedConfig;
         return lastUpdatedConfig;
       },
@@ -662,6 +669,84 @@ describe("modelsAuthLoginCommand", () => {
       expect(runtime.error).toHaveBeenCalledWith(
         `Warning: Model auth changes were saved, but the ${target} Gateway could not refresh them. Run \`openclaw gateway restart\` to apply the saved changes.`,
       );
+    },
+  );
+
+  it.each([
+    { source: "new", profileId: "openai:user@example.com" },
+    { source: "imported", profileId: "openai:imported" },
+  ])(
+    "retains the $source profile and model-access choice after direct refresh fails",
+    async ({ source, profileId }) => {
+      currentConfig = {
+        agents: {
+          defaults: { model: "other/current", modelPolicy: { allow: ["other/current"] } },
+        },
+      };
+      if (source === "imported") {
+        mocks.tryImportProviderCredential.mockResolvedValueOnce({
+          profileId,
+          provider: "openai",
+          mode: "oauth",
+          configUpdated: false,
+        });
+      }
+      const onModelAccessRequested = vi.fn();
+      const result = await runModelsAuthLoginFlowCore({
+        provider: "openai",
+        runtime: createRuntime(),
+        prompter: mocks.createClackPrompter(),
+        refreshAfterLogin: async () => {
+          throw new Error("Auth publication failed.");
+        },
+        onModelAccessRequested,
+      });
+      expect(result).toMatchObject({
+        authRefresh: "gateway-rejected",
+        profiles: [{ profileId, provider: "openai", mode: "oauth" }],
+      });
+      expect(onModelAccessRequested).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          provider: "openai",
+          policy: { path: "agents.defaults.modelPolicy.allow", refs: ["other/current"] },
+        }),
+      );
+      expect(currentConfig.agents?.defaults).toEqual({
+        model: "other/current",
+        modelPolicy: { allow: ["other/current"] },
+      });
+    },
+  );
+
+  it.each(["cancelled", "revoked"] as const)(
+    "does not complete a saved login when authority is %s during a rejected refresh",
+    async (reason) => {
+      const controller = new AbortController();
+      let current = true;
+      const onModelAccessRequested = vi.fn();
+      await expect(
+        runModelsAuthLoginFlowCore({
+          provider: "openai",
+          runtime: createRuntime(),
+          prompter: mocks.createClackPrompter(),
+          signal: controller.signal,
+          assertCurrent: () => {
+            if (!current) {
+              throw new Error("Login authority ended.");
+            }
+          },
+          refreshAfterLogin: async () => {
+            if (reason === "cancelled") {
+              controller.abort(new Error("Login authority ended."));
+            } else {
+              current = false;
+            }
+            throw new Error("Auth publication failed.");
+          },
+          onModelAccessRequested,
+        }),
+      ).rejects.toThrow("Login authority ended.");
+      expect(onModelAccessRequested).not.toHaveBeenCalled();
     },
   );
 
@@ -1536,9 +1621,7 @@ describe("modelsAuthLoginCommand", () => {
       throw new Error(`exit:${String(code ?? "")}`);
     }) as typeof process.exit);
     try {
-      const cancelSymbol = Symbol.for("clack:cancel");
-      mocks.clackPassword.mockResolvedValue(cancelSymbol);
-      mocks.clackIsCancel.mockImplementation((value: unknown) => value === cancelSymbol);
+      mocks.clackPassword.mockResolvedValue(CANCEL_SYMBOL);
 
       await expect(modelsAuthPasteTokenCommand({ provider: "openai" }, runtime)).rejects.toThrow(
         "exit:0",
@@ -1730,6 +1813,9 @@ describe("modelsAuthLoginCommand", () => {
       mode: "api_key",
     });
     expect(runtime.log).toHaveBeenCalledWith("Auth profile: openai:manual (openai/api_key)");
+    expect(runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining("Gateway has not confirmed applying the provider settings"),
+    );
     expect(mocks.callGateway).toHaveBeenCalledWith(
       expect.objectContaining({
         params: { operation: "login", agentId: "coder" },

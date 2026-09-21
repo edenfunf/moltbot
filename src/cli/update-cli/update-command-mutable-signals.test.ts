@@ -3,9 +3,20 @@ import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { resolveVitestNodeArgs } from "../../../scripts/lib/vitest-process-env.mts";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { cronOwnerHardeningEntrypoints } from "../../cron/owner-hardening-runtime.test-support.js";
+import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
+import { triageTestRuntimeEntrypoints } from "../../infra/triage-runtime.test-support.js";
 import { getUpdateRun, type createUpdateRun } from "../../infra/update-run-ledger.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
+import { updateExecutorNativeEntrypoints } from "./update-command-executor-native-runtime.test-support.js";
+
+const sourceImportArgs = resolveRuntimeWorkerUrl(
+  updateExecutorNativeEntrypoints.executor,
+).pathname.endsWith(".ts")
+  ? ["--import", path.resolve("scripts/tsx.mjs")]
+  : [];
 
 const dirs = useAutoCleanupTempDirTracker((cleanup) =>
   afterEach(() => {
@@ -33,11 +44,11 @@ it.skipIf(process.platform === "win32").each([
       script,
       `
     import fs from 'node:fs';
-    import { createUpdateRun, finishUpdateRun, getUpdateRun, recordUpdateRunPhase } from ${JSON.stringify(new URL("../../infra/update-run-ledger.ts", import.meta.url).href)};
-    import { createRetainedUpdateRecovery } from ${JSON.stringify(new URL("../../infra/update-retained-recovery.test-support.ts", import.meta.url).href)};
-    import { closeOpenClawStateDatabaseForTest } from ${JSON.stringify(new URL("../../state/openclaw-state-db.ts", import.meta.url).href)};
-    import { admitUpdateCommandRun, withUpdatePreviewSignals } from ${JSON.stringify(new URL("./update-command-run.ts", import.meta.url).href)};
-    import { withUpdateCommandExecutor } from ${JSON.stringify(new URL("./update-command-executor.ts", import.meta.url).href)};
+    import { createUpdateRun, finishUpdateRun, getUpdateRun, recordUpdateRunPhase } from ${JSON.stringify(resolveRuntimeWorkerUrl(triageTestRuntimeEntrypoints.updateRunLedger).href)};
+    import { createRetainedUpdateRecovery } from ${JSON.stringify(resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.retainedRecovery).href)};
+    import { closeOpenClawStateDatabaseForTest } from ${JSON.stringify(resolveRuntimeWorkerUrl(cronOwnerHardeningEntrypoints.stateDatabase).href)};
+    import { admitUpdateCommandRun, withUpdatePreviewSignals } from ${JSON.stringify(resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.commandRun).href)};
+    import { withUpdateCommandExecutor } from ${JSON.stringify(resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.executor).href)};
     const root = ${JSON.stringify(root)};
     const mode = ${JSON.stringify(mode)};
     const opts = {};
@@ -74,21 +85,25 @@ it.skipIf(process.platform === "win32").each([
     });
   `,
     );
-    const child = spawn(process.execPath, ["--import", "./scripts/tsx.mjs", script], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        HOME: root,
-        USERPROFILE: root,
-        OPENCLAW_STATE_DIR: root,
-        OPENCLAW_CONFIG_PATH: path.join(root, "openclaw.json"),
-        OPENCLAW_SUPERVISOR_MODE: "external",
-        OPENCLAW_UPDATE_RUN_ID: undefined,
-        OPENCLAW_UPDATE_RUN_HANDOFF: undefined,
-        OPENCLAW_UPDATE_POST_CORE: undefined,
+    const child = spawn(
+      process.execPath,
+      [...(process.versions.bun ? [] : resolveVitestNodeArgs()), ...sourceImportArgs, script],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: root,
+          USERPROFILE: root,
+          OPENCLAW_STATE_DIR: root,
+          OPENCLAW_CONFIG_PATH: path.join(root, "openclaw.json"),
+          OPENCLAW_SUPERVISOR_MODE: "external",
+          OPENCLAW_UPDATE_RUN_ID: undefined,
+          OPENCLAW_UPDATE_RUN_HANDOFF: undefined,
+          OPENCLAW_UPDATE_POST_CORE: undefined,
+        },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
       },
-      stdio: ["ignore", "ignore", "pipe", "ipc"],
-    });
+    );
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
       stderr += chunk;

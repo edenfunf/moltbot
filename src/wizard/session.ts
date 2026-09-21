@@ -1,5 +1,6 @@
 // Wizard session helpers track onboarding session ids and state.
 import { randomUUID } from "node:crypto";
+import { coerceErrorMessage } from "@openclaw/normalization-core/error-coercion";
 import type {
   WizardNextResult as ProtocolWizardNextResult,
   WizardStep as ProtocolWizardStep,
@@ -79,7 +80,7 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
     // Each emitted step receives an id so remote clients can answer the exact
     // pending prompt and stale answers can be rejected. Explicit browser
     // destinations bind to the very next step regardless of its input type.
-    const externalUrl = session.consumeExternalUrl();
+    const externalUrl = session.consumeExternalUrl(step.type === "note");
     return {
       ...step,
       ...(externalUrl ? { externalUrl } : {}),
@@ -123,8 +124,10 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
       expiresInMinutes?: number;
       message?: string;
     }): Promise<void> {
+      const externalUrl = session.consumeExternalUrl(true);
       const fallbackMessage = [
         params.message ?? "Enter this one-time code on the provider's sign-in page.",
+        ...(externalUrl ? [externalUrl] : []),
         `Code: ${params.code}`,
         ...(params.expiresInMinutes ? [`Code expires in ${params.expiresInMinutes} minutes.`] : []),
         // Device-code phishing works by getting the victim to enter the attacker's
@@ -133,16 +136,13 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
         // carry no expiry hint. Matches the Codex CLI prompt.
         DEVICE_CODE_PHISHING_WARNING,
       ].join("\n");
-      await prompt({
-        type: "note",
+      session.pushProgress(fallbackMessage, {
         title: params.title,
-        message: fallbackMessage,
         deviceCode: {
           code: params.code,
           ...(params.expiresInMinutes ? { expiresInMinutes: params.expiresInMinutes } : {}),
           ...(params.message ? { message: params.message } : {}),
         },
-        executor: "client",
       });
     },
 
@@ -269,6 +269,7 @@ export class WizardSession {
   private expiryPending = false;
   private settled = false;
   private pendingExternalUrl: string | undefined;
+  private devicePresentation: Pick<WizardStep, "title" | "deviceCode" | "message"> = {};
   private externalUrlImmediate: ReturnType<typeof setImmediate> | undefined;
   private answerDeferred = new Map<
     string,
@@ -472,16 +473,26 @@ export class WizardSession {
     this.resolveStep(step);
   }
 
-  pushProgress(message: string) {
+  pushProgress(message: string, presentation?: Pick<WizardStep, "title" | "deviceCode">) {
     if (this.status !== "running") {
       return;
     }
     clearImmediate(this.externalUrlImmediate);
     this.externalUrlImmediate = undefined;
+    if (presentation) {
+      this.devicePresentation = { ...presentation, message };
+      // Keep the code as the first unread event, ahead of later polling updates.
+      this.progressSteps = [];
+    }
     const step: WizardStep = {
+      ...this.devicePresentation,
       id: randomUUID(),
       type: "progress",
-      message,
+      // Snapshot clients can miss the first event and render only this text.
+      message:
+        !presentation && this.devicePresentation.message
+          ? `${this.devicePresentation.message}\n\n${message}`
+          : message,
       executor: "gateway",
       ...(this.pendingExternalUrl ? { externalUrl: this.pendingExternalUrl } : {}),
     };
@@ -514,7 +525,7 @@ export class WizardSession {
     if (this.status !== "running" || this.inputClosedError) {
       return;
     }
-    this.consumeExternalUrl();
+    clearImmediate(this.externalUrlImmediate);
     this.pendingExternalUrl = url;
     // Let same-turn prompts consume the URL first; callback waits have no next prompt.
     // Publish progress afterward so browser sign-in never needs an extra answer.
@@ -523,11 +534,14 @@ export class WizardSession {
     });
   }
 
-  consumeExternalUrl(): string | undefined {
+  consumeExternalUrl(retain = false): string | undefined {
     clearImmediate(this.externalUrlImmediate);
     this.externalUrlImmediate = undefined;
     const url = this.pendingExternalUrl;
-    this.pendingExternalUrl = undefined;
+    if (!retain) {
+      this.pendingExternalUrl = undefined;
+      this.devicePresentation = {};
+    }
     return url;
   }
 
@@ -549,7 +563,7 @@ export class WizardSession {
         this.error = error.message;
       } else {
         this.status = "error";
-        this.error = String(error);
+        this.error = coerceErrorMessage(error);
       }
     } finally {
       this.settled = true;

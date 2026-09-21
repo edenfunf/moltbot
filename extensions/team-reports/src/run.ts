@@ -1,4 +1,3 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { aggregateDay, aggregateDays, boundReportDocument } from "./aggregate.js";
 import type { TeamReportsConfig, resolveTeamReportsConfig } from "./config.js";
 import { describePeriod } from "./periods.js";
@@ -6,7 +5,7 @@ import { renderMarkdown } from "./render/markdown.js";
 import { buildRoster } from "./roster.js";
 import { createDiscordSource, createGithubSource } from "./sources/index.js";
 import type { TeamReportsStore } from "./store.js";
-import { generateSummaries } from "./summaries.js";
+import { generateSummaries, type SummaryLlm } from "./summaries.js";
 import type {
   DiscordSource,
   GithubSource,
@@ -68,7 +67,7 @@ export async function generateReportPeriods(params: {
   config: TeamReportsConfig;
   resolved: ResolvedTeamReportsConfig;
   store: TeamReportsStore;
-  llm: OpenClawPluginApi["runtime"]["llm"];
+  llm: SummaryLlm;
   periods: PeriodDescriptor[];
   runtime: SourceRuntime & { signal: AbortSignal };
   sources: ReportSourceFactory;
@@ -86,7 +85,7 @@ export async function generateReportPeriods(params: {
   const statuses: Record<string, SourceStatus> = {};
   for (const period of params.periods) {
     runtime.signal.throwIfAborted();
-    const previous = await store.getPeriod(period.period, period.key);
+    const previous = await store.getPeriodDocument(period.period, period.key);
     runtime.signal.throwIfAborted();
     let report;
     if (period.period === "day") {

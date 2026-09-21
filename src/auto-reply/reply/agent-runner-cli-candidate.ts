@@ -21,11 +21,14 @@ import { createAgentRunSupersededAbortError } from "../../agents/run-termination
 import { withLocalSessionPlacementTurnSettlement } from "../../agents/session-placement-admission.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { loadSessionEntry } from "../../config/sessions/session-accessor.js";
+import { createStructuredOutboundPayloadPlan } from "../../infra/outbound/payloads.js";
 import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../sessions/input-provenance.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,
 } from "../../tasks/task-status-access.js";
+import { setReplyPayloadMetadata } from "../reply-payload.js";
+import type { BlockReplyContext, ReplyPayload } from "../types.js";
 import { createAgentLifecycleTerminalBackstop } from "./agent-lifecycle-terminal.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
 import {
@@ -40,6 +43,7 @@ import { resolveRunModelHasVision } from "./agent-runner-run-params.js";
 import { shouldBridgeCliPreambleEvents } from "./get-reply.types.js";
 import { hasInboundAudio } from "./inbound-media.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
+import { parseReplyDirectives } from "./reply-directives.js";
 import { resolveReplyOperationTerminationFields } from "./reply-operation-abort.js";
 
 export async function runCliFallbackCandidate(
@@ -53,6 +57,16 @@ export async function runCliFallbackCandidate(
   bootstrapPromptWarningSignaturesSeen: string[];
 }> {
   const turn = params.turn;
+  const onPreparedBlockReply = turn.opts?.onPreparedBlockReply;
+  const onNativeBlockReply =
+    turn.opts?.onBlockReply ??
+    (onPreparedBlockReply
+      ? async (payload: ReplyPayload, context?: BlockReplyContext) => {
+          for (const plan of createStructuredOutboundPayloadPlan([payload])) {
+            await onPreparedBlockReply(plan, context);
+          }
+        }
+      : undefined);
   const expectedLifecycleRevision = turn.getActiveSessionEntry()?.lifecycleRevision;
   const selectedModelEntry = findModelInCatalog(
     params.candidateRun.thinkingCatalog ?? [],
@@ -89,18 +103,6 @@ export async function runCliFallbackCandidate(
     config: params.runtimeConfig,
     agentId: params.candidateRun.agentId,
   });
-  // The CLI owner must see explicit pins before provider scoping can discard them.
-  const authProfileId = allowCliAuthProfileForwarding
-    ? resolveCliExecutionAuthProfileId({
-        cliExecutionProvider: params.cliExecutionProvider,
-        authProfileProvider: params.provider,
-        config: params.runtimeConfig,
-        agentDir: params.candidateRun.agentDir,
-        selected: params.candidateRun,
-      })
-    : resolveRunAuthProfile(params.candidateRun, params.cliExecutionProvider, {
-        config: params.runtimeConfig,
-      }).authProfileId;
   const hookMessageProvider = resolveOriginMessageProvider({
     originatingChannel: turn.followupRun.originatingChannel,
     provider: turn.sessionCtx.Provider,
@@ -178,8 +180,21 @@ export async function runCliFallbackCandidate(
         ) {
           throw createAgentRunSupersededAbortError();
         }
-        const diagnosticOwner = params.deferredLifecycle.handoffToCli();
         const cliSessionBinding = getCliSessionBinding(sessionEntry, params.cliExecutionProvider);
+        // The CLI owner must see explicit pins before provider scoping can discard them.
+        const authProfileId = allowCliAuthProfileForwarding
+          ? resolveCliExecutionAuthProfileId({
+              cliExecutionProvider: params.cliExecutionProvider,
+              authProfileProvider: params.provider,
+              config: params.runtimeConfig,
+              agentDir: params.candidateRun.agentDir,
+              selected: params.candidateRun,
+              sessionBinding: cliSessionBinding,
+            })
+          : resolveRunAuthProfile(params.candidateRun, params.cliExecutionProvider, {
+              config: params.runtimeConfig,
+            }).authProfileId;
+        const diagnosticOwner = params.deferredLifecycle.handoffToCli();
         const mediaTaskIdsBefore = getGeneratedMediaTaskIdsForSessionKey(turn.sessionKey);
         let droppedCliSessionReplacement = false;
         const candidateResult = await runCliAgentWithLifecycle({
@@ -286,6 +301,7 @@ export async function runCliFallbackCandidate(
               ),
             ]);
           },
+          onItemEvent: turn.opts?.onItemEvent,
           onCommentaryText:
             bridgeCliPreambleProgress || bridgeCliDurableCommentary
               ? async (payload) => {
@@ -304,12 +320,23 @@ export async function runCliFallbackCandidate(
                   if (bridgeCliDurableCommentary) {
                     // Block mode treats completed CLI text as an ordinary answer block so
                     // the existing pipeline owns coalescing and final-payload dedupe.
-                    deliveries.push(
-                      params.presentation.blockReplyHandler?.({
-                        text: payload.text,
-                        ...(turn.blockStreamingEnabled ? {} : { isCommentary: true }),
-                      }),
-                    );
+                    const parsed = parseReplyDirectives(payload.text, {
+                      currentMessageId:
+                        turn.sessionCtx.MessageSidFull ?? turn.sessionCtx.MessageSid,
+                    });
+                    const reply: ReplyPayload = {
+                      text: parsed.text,
+                      mediaUrls: parsed.mediaUrls,
+                      replyToId: parsed.replyToId,
+                      replyToCurrent: parsed.replyToCurrent,
+                      ...(parsed.replyToTag ? { replyToTag: true } : {}),
+                      audioAsVoice: parsed.audioAsVoice,
+                      ...(turn.blockStreamingEnabled ? {} : { isCommentary: true }),
+                    };
+                    if (parsed.isSilent) {
+                      setReplyPayloadMetadata(reply, { silentReply: true });
+                    }
+                    deliveries.push(params.presentation.blockReplyHandler?.(reply));
                   }
                   await Promise.all(deliveries);
                 }
@@ -330,6 +357,7 @@ export async function runCliFallbackCandidate(
               : undefined,
           runParams: {
             preparedRunAdmission: params.preparedRunAdmission,
+            messageActionTurnCapability: params.messageActionTurnCapability,
             diagnosticOwner,
             sessionId: turn.followupRun.run.sessionId,
             sessionKey,
@@ -376,6 +404,7 @@ export async function runCliFallbackCandidate(
               }),
             ),
             modelProvider: params.provider,
+            requesterModel: { provider: params.provider, model: params.model },
             modelHasVision,
             modelContextWindow: selectedModelEntry?.contextWindow,
             modelContextTokens: selectedModelEntry?.contextTokens,
@@ -399,8 +428,9 @@ export async function runCliFallbackCandidate(
             taskSuggestionDeliveryMode: turn.followupRun.run.taskSuggestionDeliveryMode,
             // Heartbeat ambient routes are never implicit message recipients.
             ...(turn.isHeartbeat ? { requireExplicitMessageTarget: true } : {}),
+            cleanupBundleMcpOnRunEnd: turn.opts?.cleanupBundleMcpOnRunEnd,
             silentReplyPromptMode: turn.followupRun.run.silentReplyPromptMode,
-            allowEmptyAssistantReplyAsSilent: turn.followupRun.run.allowEmptyAssistantReplyAsSilent,
+            terminalReplyExpectation: turn.followupRun.run.terminalReplyExpectation,
             extraSystemPromptStatic: turn.followupRun.run.extraSystemPromptStatic,
             cliSessionBindingFacts: turn.followupRun.run.cliSessionBindingFacts,
             ownerNumbers: turn.followupRun.run.ownerNumbers,
@@ -421,6 +451,7 @@ export async function runCliFallbackCandidate(
             messageChannel: turn.followupRun.originatingChannel ?? undefined,
             messageProvider: hookMessageProvider,
             clientCaps: turn.followupRun.run.clientCaps,
+            gatewayUiCommandTarget: turn.followupRun.run.gatewayUiCommandTarget,
             currentChannelId:
               turn.followupRun.originatingTo ?? turn.sessionCtx.OriginatingTo ?? turn.sessionCtx.To,
             senderId: turn.followupRun.run.senderId,
@@ -448,7 +479,7 @@ export async function runCliFallbackCandidate(
             abortSignal: params.runAbortSignal,
             // Native input is already host-authored. Keep its stable delivery
             // context out of the model-output normalization wrapper.
-            onBlockReply: turn.opts?.onBlockReply,
+            onBlockReply: onNativeBlockReply,
             onPartialReply: turn.opts?.onPartialReply,
             onExecutionPhase: params.signalExecutionPhaseForTyping,
             replyOperation: turn.replyOperation,
@@ -494,6 +525,7 @@ export async function runCliFallbackCandidate(
       {
         preparedRunAdmission: params.preparedRunAdmission,
         lifecycleGeneration: params.lifecycleGeneration,
+        isFinalFallbackAttempt: params.isFinalFallbackAttempt,
         abortSignal: params.runAbortSignal,
         trigger: turn.isHeartbeat ? "heartbeat" : "user",
         inputProvenance: turn.followupRun.run.inputProvenance,

@@ -32,13 +32,66 @@ import {
   registerSubagentRun,
   replaceSubagentRunAfterSteerCore,
 } from "./subagent-registry.js";
-import { writeSubagentSessionEntry } from "./subagent-registry.persistence.test-support.js";
+import {
+  removeSubagentSessionEntry,
+  writeSubagentSessionEntry,
+} from "./subagent-registry.persistence.test-support.js";
 import { loadSubagentRegistryFromSqlite } from "./subagent-registry.store.sqlite.js";
 import { testing } from "./subagent-registry.test-helpers.js";
 
 const fixture = useSubagentControlFixture();
 const rootKey = "agent:main:subagent:publication-root";
 const childKey = "agent:main:subagent:publication-drain";
+
+it.each(["replacement", "retirement"] as const)(
+  "revalidates the session after held publication preparation permits %s",
+  async (transition) => {
+    const target = {
+      stateDir: fixture.stateDir,
+      agentId: "main",
+      sessionKey: rootKey,
+      defaultSessionId: "prepared-publication-session",
+    };
+    await writeSubagentSessionEntry(target);
+    registerSubagentRun({
+      runId: "prepared-publication",
+      childSessionKey: rootKey,
+      requesterSessionKey: "agent:main:main",
+      requesterAgentId: "main",
+      requesterDisplayKey: "main",
+      task: "publication ownership",
+      cleanup: "keep",
+    });
+    const onResult = vi.fn();
+    const preparePublication = vi.fn(async () => {
+      if (transition === "replacement") {
+        await writeSubagentSessionEntry({ ...target, sessionId: "successor-session" });
+      } else {
+        await removeSubagentSessionEntry(target);
+      }
+    });
+    const result = await killSubagentRunAdmin(
+      {
+        cfg: getRuntimeConfig(),
+        sessionKey: rootKey,
+        agentId: "main",
+        expectedRunId: "prepared-publication",
+        onResult,
+      },
+      {
+        assertCurrent: () => {},
+        preparePublication: { prepare: preparePublication, needsPreparation: () => false },
+      },
+    );
+    expect(preparePublication).toHaveBeenCalledOnce();
+    expect(onResult).toHaveBeenCalledExactlyOnceWith(result);
+    expect(result).toMatchObject({
+      found: true,
+      error: expect.stringContaining("ownership changed"),
+    });
+    expect(result).not.toHaveProperty("targetState");
+  },
+);
 
 it.each(["canonical", "managed"] as const)(
   "publishes same-owner completion when the selected %s task write lags",
@@ -189,65 +242,17 @@ it.each(["canonical", "managed"] as const)(
 );
 
 it.each([
-  {
-    replace: true,
-    priorChildKill: false,
-    completeDuringDrain: false,
-    handoff: false,
-    provisional: false,
-  },
-  {
-    replace: true,
-    priorChildKill: true,
-    completeDuringDrain: false,
-    handoff: false,
-    provisional: false,
-  },
-  {
-    replace: false,
-    priorChildKill: false,
-    completeDuringDrain: false,
-    handoff: false,
-    provisional: false,
-  },
-  {
-    replace: false,
-    priorChildKill: false,
-    completeDuringDrain: true,
-    handoff: false,
-    provisional: false,
-  },
-  {
-    replace: true,
-    priorChildKill: false,
-    completeDuringDrain: true,
-    handoff: false,
-    provisional: false,
-  },
-  {
-    replace: true,
-    priorChildKill: false,
-    completeDuringDrain: false,
-    handoff: true,
-    provisional: false,
-  },
-  {
-    replace: true,
-    priorChildKill: true,
-    completeDuringDrain: false,
-    handoff: true,
-    provisional: false,
-  },
-  {
-    replace: true,
-    priorChildKill: true,
-    completeDuringDrain: false,
-    handoff: true,
-    provisional: true,
-  },
+  [true, false, false, false, false],
+  [true, true, false, false, false],
+  [false, false, false, false, false],
+  [false, false, true, false, false],
+  [true, false, true, false, false],
+  [true, false, false, true, false],
+  [true, true, false, true, false],
+  [true, true, false, true, true],
 ])(
-  "fences task publication (replace=$replace, priorChildKill=$priorChildKill, completeDuringDrain=$completeDuringDrain, handoff=$handoff, provisional=$provisional)",
-  async ({ replace, priorChildKill, completeDuringDrain, handoff, provisional }) => {
+  "fences task publication (replace=%s, priorChildKill=%s, completeDuringDrain=%s, handoff=%s, provisional=%s)",
+  async (replace, priorChildKill, completeDuringDrain, handoff, provisional) => {
     testing.setDepsForTest({
       ...subagentRegistryDeps,
       cleanupBrowserSessionsForLifecycleEnd: async () => {},
@@ -301,14 +306,20 @@ it.each([
     });
     const handoffOrder: string[] = [];
     let failures = 0;
+    // Completion retries must retain the lagging projection until cancellation publishes.
+    let rejectTerminalWrites = true;
     let registryCommittedBeforeFailure = false;
     vi.spyOn(taskStore, "upsertTaskWithDeliveryState").mockImplementation((params) => {
-      if (params.task.taskId === task.taskId && params.task.status === "failed" && failures === 0) {
+      if (
+        params.task.taskId === task.taskId &&
+        params.task.status === "failed" &&
+        rejectTerminalWrites
+      ) {
         registryCommittedBeforeFailure =
           loadSubagentRegistryFromSqlite().get(b0.runId)?.execution.status === "terminal";
         failures += 1;
         failedWrite.resolve();
-        throw new Error("one-shot terminal task persistence failure");
+        throw new Error("terminal task persistence failure before cancellation publication");
       }
       if (handoff && handoffOrder.includes("replacement") && params.task.status !== "running") {
         handoffOrder.push("task write");
@@ -412,7 +423,18 @@ it.each([
       }
       return result;
     });
-    const admin = vi.fn(killSubagentRunAdmin);
+    const admin = vi.fn<typeof killSubagentRunAdmin>((params, control) =>
+      killSubagentRunAdmin(
+        {
+          ...params,
+          onResult: (result) => {
+            rejectTerminalWrites = false;
+            params.onResult?.(result);
+          },
+        },
+        control,
+      ),
+    );
     setTaskRegistryControlRuntimeForTests({ ...taskControlRuntime, killSubagentRunAdmin: admin });
     const pending = cancelTaskById({ cfg: getRuntimeConfig(), taskId: task.taskId });
     const followupInterrupted = vi.fn();
@@ -518,7 +540,11 @@ it.each([
       }
       const published = await admin.mock.results[0]!.value;
       expect.soft(result.cancelled).toBe(false);
-      expect(failures).toBe(completeDuringDrain || provisional ? 0 : 1);
+      if (completeDuringDrain || provisional) {
+        expect(failures).toBe(0);
+      } else {
+        expect(failures).toBeGreaterThan(0);
+      }
       expect(markerWaits).toBe(completeDuringDrain && replace ? 1 : 0);
       if (!replace) {
         expect(result.task?.status).toBe(completeDuringDrain ? "succeeded" : "failed");
@@ -561,6 +587,7 @@ it.each([
       expect(subagentRuns.get("publication-b1")?.execution.status).toBe("terminal");
       expect.soft(getTaskById(task.taskId)?.status).toBe("succeeded");
     } finally {
+      rejectTerminalWrites = false;
       releaseMarker.resolve();
       childAdmission.release();
       followup?.release();

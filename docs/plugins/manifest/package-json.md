@@ -92,6 +92,8 @@ Runtime entrypoint fields do not override package-boundary checks for source ent
 
 Use it when setup, doctor, status, or read-only presence flows need a cheap yes/no auth probe before the full channel plugin loads. Persisted auth state is not configured channel state: do not use this metadata to auto-enable plugins, repair runtime dependencies, or decide whether a channel runtime should load. The target export should be a small function that reads persisted state only; do not route it through the full channel runtime barrel.
 
+A `persistedAuthState` checker whose data comes exclusively from the host's keyed plugin-state store may declare `"backingStore": "plugin-state"`. Before loading that checker, OpenClaw asks the existing state-read owner whether the backing database is definitely absent. An active retained snapshot, cached open handle, existing file or symlink, or uncertain filesystem result keeps the normal checker path. The absence result is not cached, so state created later in the same process is still discovered. This fact does not establish authentication or grant state access; the checker still validates existing records. Omit it for checkers that can find persisted auth in other stores or files. Older hosts ignore the optional fact and run the checker normally.
+
 `openclaw.channel.configuredState` supports cheap configured checks. Prefer declarative env metadata when environment variables are sufficient:
 
 ```json
@@ -120,7 +122,7 @@ OpenClaw discovers plugins from explicit `plugins.load.paths` entries, the curre
 If two distinct plugin roots share the same `id`, only the **highest-precedence** manifest is kept; lower-precedence duplicates are dropped instead of loading beside it. Precedence, highest to lowest:
 
 1. **Config-selected** — a path explicitly selected in `plugins.load.paths`
-2. **Development-source bundled** — a bundled plugin inside the checkout selected by `OPENCLAW_DEV_SOURCE_ROOT`
+2. **Source-checkout bundled** — a compiled bundled plugin inside the running host's source checkout, or a bundled plugin inside the checkout selected by `OPENCLAW_DEV_SOURCE_ROOT`
 3. **Global install matching a tracked install record** — an installed global candidate whose path matches its install record, managed by `openclaw plugins install`/`openclaw plugins update`
 4. **Bundled** — other plugins shipped with OpenClaw
 5. **Workspace** — plugins discovered relative to the current workspace

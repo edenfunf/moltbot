@@ -1,12 +1,27 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { quoteCliArg, quotePowerShellArg } from "../cli/quote-cli-arg.js";
-import { markPackagePostInstallDoctorAdvisory } from "./package-update-steps.js";
-import {
-  consumeUpdatePostInstallDoctorResult,
-  createUpdatePostInstallDoctorResultPath,
-  UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
-} from "./update-doctor-result.js";
 import { runStep } from "./update-runner-command.js";
-import type { RunStepOptions } from "./update-runner-types.js";
+import type { RunStepOptions, UpdateStepResult } from "./update-runner-types.js";
+
+// A successful Git status command does not imply a clean checkout.
+export async function runGitCleanCheckStep(options: RunStepOptions) {
+  const result = await runStep({
+    ...options,
+    progress: { ...options.progress, onStepComplete: undefined },
+  });
+  const dirty = result.exitCode === 0 && Boolean(result.stdoutTail?.trim());
+  if (dirty) {
+    result.exitCode = 1;
+    result.stderrTail = "This checkout has local changes. Installation has not started.";
+  }
+  options.progress?.onStepComplete?.({
+    ...result,
+    index: options.stepIndex,
+    total: options.totalSteps,
+  });
+  return { result, dirty };
+}
 
 // Publish completion only after the owner classifies its recoverable result.
 export async function runGitUpstreamStep(options: RunStepOptions) {
@@ -37,48 +52,23 @@ export async function runGitUpstreamStep(options: RunStepOptions) {
   return upstreamStep;
 }
 
-export async function runGitDoctorStep(params: {
-  root: string;
-  entryPath: string;
-  nodePath: string;
-  fix: boolean;
-  env: NodeJS.ProcessEnv;
-  step: (name: string, argv: string[], cwd: string, env?: NodeJS.ProcessEnv) => RunStepOptions;
-}) {
-  const options = params.step(
-    "openclaw doctor",
-    [
-      params.nodePath,
-      params.entryPath,
-      "doctor",
-      "--non-interactive",
-      ...(params.fix ? ["--fix"] : []),
-    ],
-    params.root,
-    params.env,
-  );
-  const doctorResultPath = createUpdatePostInstallDoctorResultPath();
-  try {
-    const doctorStep = await runStep({
-      ...options,
-      env: { ...options.env, [UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]: doctorResultPath },
-      progress: { ...options.progress, onStepComplete: undefined },
-    });
-    Object.assign(
-      doctorStep,
-      markPackagePostInstallDoctorAdvisory(
-        doctorStep,
-        await consumeUpdatePostInstallDoctorResult(doctorResultPath),
-      ),
-    );
-    options.progress?.onStepComplete?.({
-      ...doctorStep,
-      index: options.stepIndex,
-      total: options.totalSteps,
-    });
-    return doctorStep;
-  } catch (error) {
-    await consumeUpdatePostInstallDoctorResult(doctorResultPath);
-    throw error;
+export async function resolveGitDoctorEntry(root: string, steps: UpdateStepResult[]) {
+  const entry = path.join(root, "openclaw.mjs");
+  if (
+    await fs.stat(entry).then(
+      () => true,
+      () => false,
+    )
+  ) {
+    return entry;
   }
+  steps.push({
+    name: "package-doctor-entry",
+    command: `verify ${entry}`,
+    cwd: root,
+    durationMs: 0,
+    exitCode: 1,
+    stderrTail: `missing ${entry}`,
+  });
+  return null;
 }

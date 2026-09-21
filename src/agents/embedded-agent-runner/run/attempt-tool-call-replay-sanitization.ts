@@ -21,23 +21,16 @@ import {
   sanitizeToolCallIdsForCloudCodeAssist,
   type ToolCallIdMode,
 } from "../../tool-call-id.js";
+import { createCompletedToolCallPredicate } from "../../tool-call-shared.js";
 import {
   shouldAllowProviderOwnedThinkingReplay,
   shouldMergeConsecutiveUserTurns,
 } from "../../transcript-policy.js";
 import type { TranscriptPolicy } from "../../transcript-policy.js";
-import { isRunnerToolCallBlockType } from "./attempt-tool-call-block-type.js";
+import { isRunnerToolCallBlock } from "./attempt-tool-call-block-type.js";
 import { resolveToolCallName } from "./attempt-tool-call-name-resolution.js";
 
 const REPLAY_TOOL_CALL_NAME_MAX_CHARS = 64;
-
-type ReplayToolCallBlock = {
-  type?: unknown;
-  id?: unknown;
-  name?: unknown;
-  input?: unknown;
-  arguments?: unknown;
-};
 
 type ReplayToolCallSanitizeReport = {
   messages: AgentMessage[];
@@ -52,10 +45,14 @@ type AnthropicToolResultContentBlock = {
   tool_call_id?: unknown;
 };
 
-function isReplaySafeThinkingTurn(content: unknown[], allowedToolNames?: Set<string>): boolean {
+function isReplaySafeThinkingTurn(
+  content: unknown[],
+  allowedToolNames: Set<string> | undefined,
+  isCompleted: ReturnType<typeof createCompletedToolCallPredicate>,
+): boolean {
   const seenToolCallIds = new Set<string>();
   for (const block of content) {
-    if (!isReplayToolCallBlock(block)) {
+    if (!isRunnerToolCallBlock(block)) {
       continue;
     }
     const replayBlock = block;
@@ -65,19 +62,16 @@ function isReplaySafeThinkingTurn(content: unknown[], allowedToolNames?: Set<str
     }
     seenToolCallIds.add(toolCallId);
     const rawName = typeof replayBlock.name === "string" ? replayBlock.name : "";
-    const resolvedName = resolveReplayToolCallName(rawName, toolCallId, allowedToolNames);
+    const resolvedName = resolveReplayToolCallName(
+      rawName,
+      toolCallId,
+      isCompleted(replayBlock) ? undefined : allowedToolNames,
+    );
     if (!resolvedName || replayBlock.name !== resolvedName) {
       return false;
     }
   }
   return true;
-}
-
-function isReplayToolCallBlock(block: unknown): block is ReplayToolCallBlock {
-  if (!block || typeof block !== "object") {
-    return false;
-  }
-  return isRunnerToolCallBlockType((block as { type?: unknown }).type);
 }
 
 function collectFollowingToolResults(
@@ -138,6 +132,7 @@ function sanitizeReplayToolCallInputs(
   const out: AgentMessage[] = [];
   const preservedThinkingToolCallIds = new Set<string>();
   const priorToolCallIds = new Set<string>();
+  const isCompleted = createCompletedToolCallPredicate(messages);
 
   for (const [index, message] of messages.entries()) {
     if (!message) {
@@ -155,12 +150,12 @@ function sanitizeReplayToolCallInputs(
     if (
       allowProviderOwnedThinkingReplay &&
       message.content.some((block) => isThinkingLikeBlock(block)) &&
-      message.content.some((block) => isReplayToolCallBlock(block))
+      message.content.some((block) => isRunnerToolCallBlock(block))
     ) {
       const replaySafeToolCalls = extractToolCallsFromAssistant(message);
       const followingToolResults = collectFollowingToolResults(messages, index);
       if (
-        isReplaySafeThinkingTurn(message.content, allowedToolNames) &&
+        isReplaySafeThinkingTurn(message.content, allowedToolNames, isCompleted) &&
         replaySafeToolCalls.every(
           (toolCall) =>
             !preservedThinkingToolCallIds.has(toolCall.id) &&
@@ -185,11 +180,11 @@ function sanitizeReplayToolCallInputs(
     let messageChanged = false;
 
     for (const block of message.content) {
-      if (!isReplayToolCallBlock(block)) {
+      if (!isRunnerToolCallBlock(block)) {
         nextContent.push(block);
         continue;
       }
-      const replayBlock = block as ReplayToolCallBlock;
+      const replayBlock = block;
 
       if (!hasToolCallInput(replayBlock) || !replayToolCallNonEmptyString(replayBlock.id)) {
         changed = true;
@@ -198,7 +193,11 @@ function sanitizeReplayToolCallInputs(
       }
 
       const rawName = typeof replayBlock.name === "string" ? replayBlock.name : "";
-      const resolvedName = resolveReplayToolCallName(rawName, replayBlock.id, allowedToolNames);
+      const resolvedName = resolveReplayToolCallName(
+        rawName,
+        replayBlock.id,
+        isCompleted(replayBlock) ? undefined : allowedToolNames,
+      );
       if (!resolvedName) {
         changed = true;
         messageChanged = true;
@@ -206,7 +205,7 @@ function sanitizeReplayToolCallInputs(
       }
 
       if (replayBlock.name !== resolvedName) {
-        nextContent.push({ ...(block as object), name: resolvedName } as typeof block);
+        nextContent.push({ ...block, name: resolvedName });
         changed = true;
         messageChanged = true;
         continue;
@@ -265,7 +264,7 @@ function isSignedThinkingReplayAssistantSpan(message: AgentMessage | undefined):
   }
   return (
     content.some((block) => isThinkingLikeBlock(block)) &&
-    content.some((block) => isReplayToolCallBlock(block))
+    content.some((block) => isRunnerToolCallBlock(block))
   );
 }
 
@@ -303,14 +302,10 @@ function sanitizeAnthropicReplayToolResults(
       const previousContent = (previous as { content?: unknown }).content;
       if (Array.isArray(previousContent)) {
         for (const block of previousContent) {
-          if (!block || typeof block !== "object") {
+          if (!isRunnerToolCallBlock(block) || typeof block.id !== "string") {
             continue;
           }
-          const typedBlock = block as { type?: unknown; id?: unknown };
-          if (!isRunnerToolCallBlockType(typedBlock.type) || typeof typedBlock.id !== "string") {
-            continue;
-          }
-          const trimmedId = typedBlock.id.trim();
+          const trimmedId = block.id.trim();
           if (trimmedId) {
             validToolUseIds.add(trimmedId);
           }
@@ -366,7 +361,7 @@ function assistantTurnHasReplayToolCall(message: AgentMessage): boolean {
   if (!Array.isArray(content)) {
     return false;
   }
-  return content.some((block) => isReplayToolCallBlock(block));
+  return content.some((block) => isRunnerToolCallBlock(block));
 }
 
 function stripTrailingAssistantPrefillTurns(messages: AgentMessage[]): AgentMessage[] {

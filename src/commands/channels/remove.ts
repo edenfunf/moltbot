@@ -1,13 +1,12 @@
-import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 // Implements guided and non-interactive disable/delete for channel accounts.
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   type ChannelIngressQueueAccountPurge,
   purgeChannelIngressQueueAccount,
 } from "../../channels/message/ingress-queue.js";
 import {
-  applyPreparedChannelAccountRemoval,
+  applyChannelAccountRemoval,
   type ChannelAccountMutationPlugin,
-  prepareChannelAccountRemoval,
 } from "../../channels/plugins/account-config-mutation.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { listReadOnlyChannelPluginsForConfig } from "../../channels/plugins/read-only.js";
@@ -25,6 +24,7 @@ import { defaultRuntime, type RuntimeEnv } from "../../runtime.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
 import { createClackPrompter } from "../../wizard/clack-prompter.js";
 import { resolveChannelSetupOwner } from "../channel-setup/owner.js";
+import { withCommandPluginMetadata, type ConfigWriteSnapshot } from "../config-validation.js";
 import { parseAccountSelector } from "./account-selector.js";
 import { persistChannelPluginConfig } from "./plugin-config-persistence.js";
 import { channelLabel } from "./runtime-label.js";
@@ -211,6 +211,21 @@ export async function channelsRemoveCommand(
   if (!writeSnapshot) {
     return;
   }
+  return withCommandPluginMetadata(
+    {
+      config: writeSnapshot.snapshot.sourceConfig,
+      snapshot: writeSnapshot.writeOptions.basePluginMetadataSnapshot,
+    },
+    () => removeChannelAccount(writeSnapshot, opts, runtime, params),
+  );
+}
+
+async function removeChannelAccount(
+  writeSnapshot: ConfigWriteSnapshot,
+  opts: ChannelsRemoveOptions,
+  runtime: RuntimeEnv,
+  params?: { hasFlags?: boolean },
+) {
   const cfg: OpenClawConfig = writeSnapshot.snapshot.sourceConfig;
 
   const useWizard = shouldUseWizard(params);
@@ -314,24 +329,20 @@ export async function channelsRemoveCommand(
     return;
   }
   const resolvedChannelId: ChatChannel = resolvedChannel;
-  const preparedRemoval = prepareChannelAccountRemoval({
+  const removal = await applyChannelAccountRemoval({
+    cfg,
     plugin,
     accountId,
     action: deleteConfig ? "delete" : "disable",
-  });
-
-  await stopGatewayRuntimeBeforeRemove({
-    cfg,
-    channel: resolvedChannelId,
-    accountId: preparedRemoval.accountKey,
-    shouldStopRuntime: preparedRemoval.shouldStopRuntime,
     runtime,
-  });
-
-  const removal = await applyPreparedChannelAccountRemoval({
-    cfg,
-    prepared: preparedRemoval,
-    runtime,
+    beforeRemoval: () =>
+      stopGatewayRuntimeBeforeRemove({
+        cfg,
+        channel: resolvedChannelId,
+        accountId,
+        shouldStopRuntime: Boolean(plugin.gateway?.startAccount || plugin.gateway?.logoutAccount),
+        runtime,
+      }),
   });
   if (!removal.ok) {
     if (removal.error.kind !== "unsupported-action") {
@@ -339,10 +350,8 @@ export async function channelsRemoveCommand(
         formatAccountRemovalErrorMessage({
           channel: resolvedChannelId,
           kind: removal.error.kind,
-          accountId: preparedRemoval.accountKey,
-          requestedAccount: useWizard
-            ? preparedRemoval.accountKey
-            : normalizeOptionalString(opts.account),
+          accountId,
+          requestedAccount: useWizard ? accountId : normalizeOptionalString(opts.account),
           accountIds: removal.error.accountIds,
         }),
       );
@@ -372,15 +381,15 @@ export async function channelsRemoveCommand(
   const discard = deleteConfig
     ? discardRemovedAccountIngressRows({
         channelId: resolvedChannelId,
-        accountId: preparedRemoval.accountKey,
+        accountId,
         cfg,
         workspaceDir: resolveChannelSetupOwner(cfg, opts.agent).workspaceDir,
       })
     : undefined;
   const summary = [
     deleteConfig
-      ? `Deleted ${channelLabel(resolvedChannelId)} account "${preparedRemoval.accountKey}".`
-      : `Disabled ${channelLabel(resolvedChannelId)} account "${preparedRemoval.accountKey}".`,
+      ? `Deleted ${channelLabel(resolvedChannelId)} account "${accountId}".`
+      : `Disabled ${channelLabel(resolvedChannelId)} account "${accountId}".`,
     ...(discard?.kind === "discarded" ? [formatDiscardedIngressEvents(discard.purge)] : []),
     ...(discard?.kind === "kept" ? [`Kept its stored ingress events: ${discard.reason}.`] : []),
     ...(discard?.kind === "failed"

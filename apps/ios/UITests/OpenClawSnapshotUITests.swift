@@ -591,6 +591,13 @@ final class OpenClawSnapshotUITests: XCTestCase {
 
         let latestSeededReply = app.staticTexts["OPENCLAW_LONG_CHAT_LATEST"]
         XCTAssertTrue(latestSeededReply.waitForExistence(timeout: 8))
+        let work = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Worked")).firstMatch
+        XCTAssertTrue(work.waitForExistence(timeout: 5))
+        work.tap()
+        for _ in 0..<12 where !latestSeededReply.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(latestSeededReply.isHittable)
 
         let input = self.chatMessageInput(in: app)
         XCTAssertTrue(input.waitForExistence(timeout: 8))
@@ -649,6 +656,39 @@ final class OpenClawSnapshotUITests: XCTestCase {
         self.assertElementHasRenderedContent(reply, named: "reply after send")
         XCTAssertFalse(app.buttons["Jump to latest reply"].exists)
         self.attachScreenshot(named: "keyboard-transcript-visible-after-send")
+    }
+
+    func testCompletedWorkDisclosureKeepsFinalReplyVisible() throws {
+        self.launchApp(
+            for: Self.chatScreenshotTarget,
+            additionalArguments: ["--openclaw-long-chat-fixture"])
+        let app = try XCTUnwrap(self.app)
+        let latest = app.staticTexts["OPENCLAW_LONG_CHAT_LATEST"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 8))
+        self.attachScreenshot(named: "completed-work-initial")
+
+        let work = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Worked")).firstMatch
+        XCTAssertTrue(work.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(work.frame.height, 44)
+        let earlier = app.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Earlier response context.")).firstMatch
+        XCTAssertFalse(earlier.exists)
+        let composer = app.otherElements["chat-composer-surface"]
+        XCTAssertLessThanOrEqual(latest.frame.maxY, composer.frame.minY)
+        self.assertElementHasRenderedContent(latest, named: "final reply with work collapsed")
+        work.tap()
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5))
+        self.attachScreenshot(named: "completed-work-expanded")
+        let workLabel = work.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Worked")).firstMatch
+        for _ in 0..<12 where !workLabel.isHittable {
+            app.swipeDown()
+        }
+        XCTAssertTrue(workLabel.isHittable)
+        workLabel.tap()
+        XCTAssertTrue(earlier.waitForNonExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(latest.frame.maxY, composer.frame.minY)
+        self.assertElementHasRenderedContent(latest, named: "final reply after collapsing work again")
+        self.attachScreenshot(named: "completed-work-collapsed-again")
     }
 
     func testExistingSessionRestoresLatestOutput() throws {

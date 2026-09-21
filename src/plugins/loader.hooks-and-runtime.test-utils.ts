@@ -504,7 +504,7 @@ ${channelPluginSource({
       expectSetupRuntimeLoaded: true,
     },
     {
-      name: "merges bundled runtime plugin into setup-runtime channel loads",
+      name: "initializes both setup and runtime graphs before merging setup-runtime channels",
       fixture: {
         id: "setup-runtime-bundled-runtime-merge-test",
         label: "Setup Runtime Bundled Runtime Merge Test",
@@ -518,12 +518,17 @@ ${channelPluginSource({
           makePluginLoaderTempDir(),
           "bundled-runtime-applied.txt",
         ),
+        bundledSetupRuntimeMarker: path.join(
+          makePluginLoaderTempDir(),
+          "setup-runtime-applied.txt",
+        ),
       },
       loadOptions: { setupIntent: true },
       expectFullLoaded: true,
       expectSetupLoaded: true,
       expectedChannels: 1,
       expectBundledFullRuntimeLoaded: true,
+      expectSetupRuntimeLoaded: true,
     },
     {
       name: "defaults ordinary unconfigured channel loads to the full runtime",
@@ -1128,13 +1133,11 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "hook-policy",
       filename: "hook-policy.cjs",
-      body: `module.exports = { id: "hook-policy", register(api) {
-    api.on("before_prompt_build", () => ({ prependContext: "prepend" }));
-    api.on("before_model_resolve", () => ({
-      modelOverride: "demo-model",
-      providerOverride: "demo-provider",
-    }));
-  } };`,
+      registration: `api.on("before_prompt_build", () => ({ prependContext: "prepend" }));
+      api.on("before_model_resolve", () => ({
+        modelOverride: "demo-model",
+        providerOverride: "demo-provider",
+      }));`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1173,13 +1176,11 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "next-turn-policy",
       filename: "next-turn-policy.cjs",
-      body: `module.exports = { id: "next-turn-policy", register(api) {
-    void api.session.workflow.enqueueNextTurnInjection({
-      sessionKey: "global",
-      agentId: "work",
-      text: "blocked context",
-    });
-  } };`,
+      registration: `void api.session.workflow.enqueueNextTurnInjection({
+        sessionKey: "global",
+        agentId: "work",
+        text: "blocked context",
+      });`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1214,9 +1215,7 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "hook-policy-default",
       filename: "hook-policy-default.cjs",
-      body: `module.exports = { id: "hook-policy-default", register(api) {
-    api.on("before_prompt_build", () => ({ prependContext: "prepend" }));
-  } };`,
+      registration: `api.on("before_prompt_build", () => ({ prependContext: "prepend" }));`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1241,10 +1240,8 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "hook-timeouts",
       filename: "hook-timeouts.cjs",
-      body: `module.exports = { id: "hook-timeouts", register(api) {
-    api.on("before_prompt_build", () => ({ prependContext: "prepend" }), { timeoutMs: 5000 });
-    api.on("before_model_resolve", () => ({ providerOverride: "demo-provider" }));
-  } };`,
+      registration: `api.on("before_prompt_build", () => ({ prependContext: "prepend" }), { timeoutMs: 5000 });
+      api.on("before_model_resolve", () => ({ providerOverride: "demo-provider" }));`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1350,11 +1347,9 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "tool-result-middleware-no-timeout",
       filename: "tool-result-middleware-no-timeout.cjs",
-      body: `module.exports = { id: "tool-result-middleware-no-timeout", register(api) {
-    api.registerAgentToolResultMiddleware(() => new Promise(() => {}), {
-      runtimes: ["openclaw"],
-    });
-  } };`,
+      registration: `api.registerAgentToolResultMiddleware(() => new Promise(() => {}), {
+        runtimes: ["openclaw"],
+      });`,
     });
     updatePluginManifest(plugin, {
       contracts: { agentToolResultMiddleware: ["openclaw"] },
@@ -1398,9 +1393,7 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "after-tool-call-option-timeout",
       filename: "after-tool-call-option-timeout.cjs",
-      body: `module.exports = { id: "after-tool-call-option-timeout", register(api) {
-    api.on("after_tool_call", () => new Promise(() => {}), { timeoutMs: 30 });
-  } };`,
+      registration: `api.on("after_tool_call", () => new Promise(() => {}), { timeoutMs: 30 });`,
     });
     const registry = loadRegistryFromSinglePlugin({
       plugin,
@@ -1428,17 +1421,15 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "conversation-hooks",
       filename: "conversation-hooks.cjs",
-      body: `module.exports = { id: "conversation-hooks", register(api) {
-    api.on("before_model_resolve", () => undefined);
-    api.on("agent_turn_prepare", () => undefined);
-    api.on("before_prompt_build", () => undefined);
-    api.on("before_agent_reply", () => undefined);
-    api.on("llm_input", () => undefined);
-    api.on("llm_output", () => undefined);
-    api.on("before_agent_finalize", () => undefined);
-    api.on("agent_end", () => undefined);
-    api.on("before_agent_run", () => undefined);
-  } };`,
+      registration: `api.on("before_model_resolve", () => undefined);
+      api.on("agent_turn_prepare", () => undefined);
+      api.on("before_prompt_build", () => undefined);
+      api.on("before_agent_reply", () => undefined);
+      api.on("llm_input", () => undefined);
+      api.on("llm_output", () => undefined);
+      api.on("before_agent_finalize", () => undefined);
+      api.on("agent_end", () => undefined);
+      api.on("before_agent_run", () => undefined);`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1462,17 +1453,15 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "conversation-hooks-allowed",
       filename: "conversation-hooks-allowed.cjs",
-      body: `module.exports = { id: "conversation-hooks-allowed", register(api) {
-    api.on("before_model_resolve", () => undefined);
-    api.on("agent_turn_prepare", () => undefined);
-    api.on("before_prompt_build", () => undefined);
-    api.on("before_agent_reply", () => undefined);
-    api.on("llm_input", () => undefined);
-    api.on("llm_output", () => undefined);
-    api.on("before_agent_finalize", () => undefined);
-    api.on("agent_end", () => undefined);
-    api.on("before_agent_run", () => undefined);
-  } };`,
+      registration: `api.on("before_model_resolve", () => undefined);
+      api.on("agent_turn_prepare", () => undefined);
+      api.on("before_prompt_build", () => undefined);
+      api.on("before_agent_reply", () => undefined);
+      api.on("llm_input", () => undefined);
+      api.on("llm_output", () => undefined);
+      api.on("before_agent_finalize", () => undefined);
+      api.on("agent_end", () => undefined);
+      api.on("before_agent_run", () => undefined);`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -1507,17 +1496,15 @@ ${channelPluginSource({
     const plugin = writePlugin({
       id: "reply-hook-trigger-eligibility",
       filename: "reply-hook-trigger-eligibility.cjs",
-      body: `module.exports = { id: "reply-hook-trigger-eligibility", register(api) {
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["heartbeat", "cron", "heartbeat"] });
-    api.on("before_agent_reply", () => undefined);
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: [] });
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["heartbeat", "unknown"] });
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["manual"] });
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: "heartbeat" });
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: Array(1) });
-    api.on("before_agent_reply", () => undefined, { eligibleTriggers: [, "heartbeat"] });
-    api.on("before_tool_call", () => undefined, { eligibleTriggers: ["heartbeat"] });
-  } };`,
+      registration: `api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["heartbeat", "cron", "heartbeat"] });
+      api.on("before_agent_reply", () => undefined);
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: [] });
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["heartbeat", "unknown"] });
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: ["manual"] });
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: "heartbeat" });
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: Array(1) });
+      api.on("before_agent_reply", () => undefined, { eligibleTriggers: [, "heartbeat"] });
+      api.on("before_tool_call", () => undefined, { eligibleTriggers: ["heartbeat"] });`,
     });
 
     const registry = loadRegistryFromSinglePlugin({

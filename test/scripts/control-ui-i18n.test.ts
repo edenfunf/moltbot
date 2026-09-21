@@ -30,12 +30,18 @@ import {
 import { loadControlUiSourceCatalog } from "../../scripts/lib/control-ui-i18n-catalog.ts";
 import { collectControlUiRawCopyFromSource } from "../../scripts/lib/control-ui-i18n-raw-copy.ts";
 import { flattenTranslations } from "../../scripts/lib/control-ui-i18n-sync-plan.ts";
+import { makeAgentAssistantMessage } from "../../src/agents/test-helpers/agent-message-fixtures.js";
+import { createZeroUsageFixture } from "../../src/agents/test-helpers/usage-fixtures.js";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { configHintTranslationKey } from "../../ui/src/i18n/lib/config-hint-translation.ts";
+import { registerBackgroundTasksEnglish } from "../../ui/src/i18n/locales/en-background-tasks.ts";
+import { registerCodeBlocksEnglish } from "../../ui/src/i18n/locales/en-code-blocks.ts";
 import { registerTranscriptsEnglish } from "../../ui/src/i18n/locales/en-transcripts.ts";
 import { waitForChildClose, waitForPidFile } from "../helpers/process-wait.js";
 import { createTempDirTracker } from "../helpers/temp-dir.js";
 
 vi.mock("../../scripts/lib/sleep.mjs", () => ({ sleep: async () => {} }));
+const testNodeExecPath = resolveTestNodeExecPath();
 const llm = vi.hoisted(() => ({ completeSimple: vi.fn() }));
 vi.mock("@openclaw/ai", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@openclaw/ai")>();
@@ -53,29 +59,18 @@ describe("translation provider privacy and fallback", () => {
     source: "Open",
     sourcePath: "fixture.ts",
   }));
-  const response = (overrides: Partial<AssistantMessage> = {}): AssistantMessage => ({
-    role: "assistant",
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify(Object.fromEntries(entries.map((entry) => [entry.id, "Ouvrir"]))),
-      },
-    ],
-    api: "openai-responses",
-    provider: "openai",
-    model: primary,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: 0,
-    ...overrides,
-  });
+  const response = (overrides: Partial<AssistantMessage> = {}): AssistantMessage =>
+    makeAgentAssistantMessage({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(Object.fromEntries(entries.map((entry) => [entry.id, "Ouvrir"]))),
+        },
+      ],
+      model: primary,
+      usage: createZeroUsageFixture(),
+      ...overrides,
+    });
   beforeEach(() => {
     llm.completeSimple.mockReset();
     vi.stubEnv("OPENAI_API_KEY", "test-key");
@@ -304,9 +299,9 @@ describe("control-ui config hint source catalog", () => {
 });
 
 describe("control-ui-i18n generated ownership", () => {
-  it("includes lazy transcript copy and shared search labels in the generator catalog", () => {
+  it("includes lazy task and transcript copy and shared search labels in the generator catalog", () => {
     const result = spawnSync(
-      process.execPath,
+      testNodeExecPath,
       [
         "--import",
         "./scripts/tsx.mjs",
@@ -323,9 +318,15 @@ describe("control-ui-i18n generated ownership", () => {
     expect(result.status, result.stderr).toBe(0);
     const catalog: unknown = JSON.parse(result.stdout);
     const source = flattenControlUiCatalog(catalog, "en");
-    const lazyCopy = flattenControlUiCatalog(registerTranscriptsEnglish.catalog, "transcripts");
-    for (const [key, value] of lazyCopy) {
-      expect(source.get(key), key).toBe(value);
+    for (const fragment of [
+      registerBackgroundTasksEnglish.catalog,
+      registerCodeBlocksEnglish.catalog,
+      registerTranscriptsEnglish.catalog,
+    ]) {
+      const lazyCopy = flattenControlUiCatalog(fragment, "lazy copy");
+      for (const [key, value] of lazyCopy) {
+        expect(source.get(key), key).toBe(value);
+      }
     }
     expect(source.get("meetingCapture.title")).toBe("Meeting capture");
     expect(source.get("meetingCapture.sources")).toBe("Auto-start sources");

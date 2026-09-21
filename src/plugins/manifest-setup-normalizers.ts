@@ -10,8 +10,10 @@ import {
   sanitizeCommandDescriptorDescription,
 } from "../cli/program/command-descriptor-utils.js";
 import { isBlockedObjectKey } from "../infra/prototype-keys.js";
+import type { ChannelAccountKeyPolicy } from "../routing/account-lookup.js";
 import type { JsonSchemaObject } from "../shared/json-schema.types.js";
 import { isRecord } from "../utils.js";
+import { normalizeManifestPlatforms } from "./manifest-platforms.js";
 import type {
   PluginManifestActivation,
   PluginManifestActivationCapability,
@@ -22,7 +24,6 @@ import type {
   PluginManifestDashboard,
   PluginManifestDashboardActionVerb,
   PluginManifestDashboardDataBinding,
-  PluginManifestDefaultPlatform,
   PluginManifestOnboardingScope,
   PluginManifestProviderAuthChoice,
   PluginManifestQaRunner,
@@ -67,6 +68,29 @@ export function normalizeManifestActivation(value: unknown): PluginManifestActiv
   return Object.keys(activation).length > 0 ? activation : undefined;
 }
 
+export function normalizeChannelAccountKeyPolicies(
+  value: unknown,
+  channels: readonly string[],
+): Record<string, ChannelAccountKeyPolicy> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const policies: Record<string, ChannelAccountKeyPolicy> = Object.create(null);
+  for (const channel of channels) {
+    if (isBlockedObjectKey(channel) || !Object.hasOwn(value, channel)) {
+      continue;
+    }
+    const entry = value[channel];
+    const field = isRecord(entry)
+      ? normalizeOptionalString(entry.canonicalAliasesRequireOwnField)
+      : undefined;
+    if (field && !isBlockedObjectKey(field)) {
+      policies[channel] = { canonicalAliasesRequireOwnField: field };
+    }
+  }
+  return Object.keys(policies).length ? policies : undefined;
+}
+
 export function normalizeManifestCliCommands(
   value: unknown,
 ): PluginManifestCliCommand[] | undefined {
@@ -92,27 +116,6 @@ export function normalizeManifestCliCommands(
     commands.push({ name, description, hasSubcommands: entry.hasSubcommands });
   }
   return commands;
-}
-
-const MANIFEST_DEFAULT_ENABLEMENT_PLATFORMS = new Set<PluginManifestDefaultPlatform>([
-  "aix",
-  "android",
-  "darwin",
-  "freebsd",
-  "haiku",
-  "linux",
-  "openbsd",
-  "sunos",
-  "win32",
-  "cygwin",
-  "netbsd",
-]);
-
-export function normalizeManifestDefaultPlatforms(value: unknown): PluginManifestDefaultPlatform[] {
-  return normalizeTrimmedStringList(value).filter(
-    (platform): platform is PluginManifestDefaultPlatform =>
-      MANIFEST_DEFAULT_ENABLEMENT_PLATFORMS.has(platform as PluginManifestDefaultPlatform),
-  );
 }
 
 function normalizeManifestSetupProviders(
@@ -401,7 +404,9 @@ export function normalizeProviderAuthChoices(
         ? entry.assistantPriority
         : undefined;
     const assistantVisibility =
-      entry.assistantVisibility === "manual-only" || entry.assistantVisibility === "visible"
+      entry.assistantVisibility === "manual-only" ||
+      entry.assistantVisibility === "visible" ||
+      entry.assistantVisibility === "detected-only"
         ? entry.assistantVisibility
         : undefined;
     const deprecatedChoiceIds = normalizeTrimmedStringList(entry.deprecatedChoiceIds);
@@ -429,6 +434,10 @@ export function normalizeProviderAuthChoices(
       provider,
       method,
       choiceId,
+      ...(entry.modelTarget === "utility" ? { modelTarget: "utility" as const } : {}),
+      ...(entry.platforms !== undefined
+        ? { platforms: normalizeManifestPlatforms(entry.platforms) }
+        : {}),
       ...(choiceLabel ? { choiceLabel } : {}),
       ...(choiceHint ? { choiceHint } : {}),
       ...(icon ? { icon } : {}),

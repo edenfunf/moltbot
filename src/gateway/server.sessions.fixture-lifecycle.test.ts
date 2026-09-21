@@ -25,13 +25,16 @@ vi.mock("vitest", async (importOriginal) => ({
   afterEach: () => {},
   test: Object.assign(() => {}, { each: () => () => {} }),
 }));
+vi.mock("../agents/prepared-model-runtime.test-support.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../agents/prepared-model-runtime.test-support.js")>()),
+  resetPreparedGatewayModelCatalogForTest: async () => {},
+}));
 
 const listeners = vi.hoisted(() => new Set<import("node:net").Server>());
 // The fixture owns a disposable server, not Gateway business logic. Keep its
 // real port, socket, harness and environment lifetime; fork tests cover RPC boot.
 vi.mock("./server.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./server.js")>()),
-  resetPreparedModelCatalogForTest: async () => {},
   startGatewayServer: async (port: number) => {
     const { createServer } = await import("node:net");
     const listener = createServer();
@@ -480,11 +483,11 @@ test("observes retained Gateway owners through fixture teardown", async () => {
   });
   let stopCalls = 0;
   // This independent producer belongs to the generic owner, not the connection scope.
-  kernel.registerGatewayLifetimeSidecars([{ stop: async () => {
+  kernel.registerGatewayLifetimeSidecars({ stop: async () => {
     stopCalls++;
     releaseProducer.resolve();
     await producer;
-  } }]);
+  } });
   let connectionCleanupFinished = false;
   const trackCleanup = kernel.connectionWork.trackCleanup.bind(kernel.connectionWork);
   vi.spyOn(kernel.connectionWork, "trackCleanup").mockImplementationOnce(run =>

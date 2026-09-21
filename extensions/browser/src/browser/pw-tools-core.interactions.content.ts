@@ -6,7 +6,10 @@ import { withTimeout } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { FileChooser, Locator, Page } from "playwright-core";
 import { getImageMetadata } from "../media/media-services.js";
 import { ACT_MAX_WAIT_TIME_MS, resolveActWaitTimeoutMs } from "./act-policy.js";
-import { DEFAULT_BROWSER_SCREENSHOT_TIMEOUT_MS } from "./constants.js";
+import {
+  DEFAULT_BROWSER_DOWNLOAD_TIMEOUT_MS,
+  DEFAULT_BROWSER_SCREENSHOT_TIMEOUT_MS,
+} from "./constants.js";
 import { normalizeBrowserEvaluateFunctionSource } from "./evaluate-source.js";
 import { resolveStrictExistingUploadPaths } from "./paths.js";
 import {
@@ -16,6 +19,7 @@ import {
   restoreRoleRefsForTarget,
 } from "./pw-session.js";
 import {
+  assertInteractionCurrent,
   awaitActionWithAbort,
   awaitNavigationGuardedInteraction,
   createAbortPromiseWithListener,
@@ -28,6 +32,7 @@ import {
   runCancellablePageInteraction,
   throwIfInteractionAborted,
 } from "./pw-tools-core.interactions.navigation.js";
+import { normalizeTimeoutMs } from "./pw-tools-core.shared.js";
 import { runPageEmulationTransition } from "./pw-tools-core.state.js";
 import {
   ANNOTATION_MAX_LABELS_DEFAULT,
@@ -207,10 +212,17 @@ export async function waitForViaPlaywright(
       await waitFor(page.waitForLoadState(opts.loadState, { timeout }));
     }
     if (fn) {
+      if (opts.assertCurrent) {
+        await assertInteractionCurrent(opts);
+        throwIfInteractionAborted(opts.signal);
+      }
       // Passing the live document handle makes Playwright fail instead of
       // recreating this predicate in a replacement execution context.
       const documentHandle = await page.evaluateHandle(() => globalThis.document);
       try {
+        if (opts.assertCurrent) {
+          await assertInteractionCurrent(opts);
+        }
         throwIfInteractionAborted(opts.signal);
         await waitFor(
           page.waitForFunction(
@@ -244,6 +256,7 @@ export async function waitForViaPlaywright(
         page,
         ...interactionNavigationPolicy(opts),
         targetId: opts.targetId,
+        assertCurrent: opts.assertCurrent,
       },
       abortPromise,
       opts.signal,
@@ -391,7 +404,7 @@ export async function takeScreenshotViaPlaywright(
 
 type LabeledScreenshotOptions = InteractionTargetOptions &
   ScreenshotOptions & {
-    refs: Record<string, { role: string; name?: string; nth?: number }>;
+    refs?: Record<string, { role: string; name?: string; nth?: number }>;
     maxLabels?: number;
     ref?: string;
     element?: string;
@@ -470,11 +483,12 @@ async function screenshotWithLabelsOnPage(
     };
   }
 
-  const refKeys = Object.keys(opts.refs ?? {});
+  const refs = opts.refs ?? ensurePageState(page).roleRefs ?? {};
+  const refKeys = Object.keys(refs);
   const inputs: RawAnnotationInput[] = [];
   let skippedRefs = 0;
   for (const ref of refKeys) {
-    const refInfo = opts.refs[ref];
+    const refInfo = refs[ref];
     if (refInfo === undefined) {
       continue;
     }
@@ -576,6 +590,7 @@ export async function setInputFilesViaPlaywright(
     inputRef?: string;
     element?: string;
     paths: string[];
+    timeoutMs?: number;
   },
 ): Promise<void> {
   const page = await getPageForTargetId(opts);
@@ -598,7 +613,11 @@ export async function setInputFilesViaPlaywright(
   await runCancellablePageInteraction(
     page,
     opts,
-    async (signal) => await locator.setInputFiles(resolvedFiles, { signal }),
+    async (signal) =>
+      await locator.setInputFiles(resolvedFiles, {
+        timeout: normalizeTimeoutMs(opts.timeoutMs, DEFAULT_BROWSER_DOWNLOAD_TIMEOUT_MS),
+        signal,
+      }),
     inputRef || element,
   );
 }

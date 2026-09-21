@@ -35,15 +35,17 @@ Launch ACP/subagent work through its supported runtime **before** calling `runTa
 
 For Gateway-backed plugin subagents, the public path is `api.runtime.subagent.run({ completionDelivery: "current-requester", ... })` inside a real requester-bound `before_dispatch` hook handling an authenticated inbound request. The host creates the canonical subagent task and mirrored flow. Ordinary plugin runs without this setting deliberately have `not_applicable` completion delivery and cannot supply that mirrored backing. Merely binding `managedFlows.fromToolContext(ctx)` does not grant requester launch authority.
 
-Use the returned identities and current owner-visible task facts, not invented status/timing. A child can finish before linkage; `runTask` does not replay past terminal events. Do not create a running projection of completed work. See the [SDK Tasks contract](/plugins/sdk-runtime) for the launch, synchronous pre-link check, result handling and revision rules.
+Use the returned identities and current owner-visible task facts, not invented status/timing. Prefer `await api.runtime.tasks.async.managedFlows.bindSession(...).runTask(...)`; its worker rereads current backing before linking and refuses a new active projection of completed work. A child can finish before linkage; `runTask` does not replay past terminal events. See the [SDK Tasks contract](/plugins/sdk-runtime) for launch, result handling, revision rules, and the deprecated synchronous contract.
 
 #### Run a managed Lobster workflow
 
 For operator/agent use, the optional [Lobster tool](/tools/lobster) can execute a workflow with `flowControllerId` and `flowGoal`. It creates a managed flow, records a real approval pause as waiting, and finishes or fails from the workflow outcome. The workflow steps are not detached child task records.
 
-The tool returns envelope fields plus `flow` and `mutation` at the top level of its details. Check `mutation.applied` and use `mutation.flow`, the post-mutation record, for the next `flowExpectedRevision`. After the user's decision, resume with the returned token or approval ID and the actual flow id/revision; check cancellation through `mutation.cancelled`. Report errors and rejected updates instead of treating workflow output as proof that flow state persisted.
+The tool returns envelope fields plus `flow` and `mutation` at the top level of its details. Check `mutation.applied` and use `mutation.flow`, the post-mutation record, for the next `flowExpectedRevision`. After the user's decision, resume with the actual flow id/revision; omit the token and approval ID to recover the checkpoint saved in that flow. Explicit checkpoint credentials must match the saved approval. Check cancellation through `mutation.cancelled`. Report errors and rejected updates instead of treating workflow output as proof that flow state persisted.
 
 The bundled TaskFlow skill examples route synthetic inbox/PR batches and suspend for approval without contacting external services. A workflow approval is not an arbitrary Slack-reply listener: a real controller must register that listener, persist thread correlation and resume when the matching event arrives.
+
+The same skill includes subagent recipes for research/review fan-out, implementation with independent verification, and recovery from canonical task IDs. Optional [Workboard](/plugins/workboard#agent-tools) claims coordinate cooperating writers through its existing claim/heartbeat/release lifecycle. Claims apply to cards, not paths or shell processes; overlapping writers must agree on the same card or use isolated worktrees.
 
 ### Mirrored mode
 

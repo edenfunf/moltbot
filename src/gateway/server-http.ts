@@ -146,6 +146,8 @@ type GatewayHttpRequestStage = () => Promise<boolean> | boolean;
 
 /** Creates the gateway HTTP/HTTPS server and ordered request-stage router. */
 export function createGatewayHttpServer(opts: {
+  /** Pre-bound listener supplied by the internal test transport. */
+  testListener?: HttpServer;
   clients: Set<GatewayWsClient>;
   controlUiEnabled?: boolean;
   controlUiBasePath: string;
@@ -220,9 +222,10 @@ export function createGatewayHttpServer(opts: {
       }
     });
   };
-  const httpServer: HttpServer = opts.tlsOptions
-    ? createHttpsServer(opts.tlsOptions, handleServerRequest)
-    : createHttpServer(handleServerRequest);
+  const httpServer =
+    opts.testListener ??
+    (opts.tlsOptions ? createHttpsServer(opts.tlsOptions) : createHttpServer());
+  httpServer.on("request", handleServerRequest);
   // Node otherwise sends interim/expectation responses before application admission.
   httpServer.on("checkContinue", (req, res) => handleServerRequest(req, res, "continue"));
   httpServer.on("checkExpectation", (req, res) => handleServerRequest(req, res, "reject"));
@@ -650,6 +653,7 @@ export function createGatewayHttpServer(opts: {
               req,
               res,
               ...routeAuth,
+              getResolvedAuth,
               requestPath: scopedRequestPath,
               resolveOperatorScopes: resolvePluginRouteRuntimeOperatorScopes,
             });
@@ -686,7 +690,7 @@ export function createGatewayHttpServer(opts: {
       );
       for (const [routes, loadHandler] of [
         [
-          ["pluginIcon", "catalogIcon", "linkFavicon"],
+          ["pluginIcon", "pluginActivityIcon", "catalogIcon", "linkFavicon"],
           async () => (await getPluginIconHttpModule()).handlePluginIconHttpRequest,
         ],
         [
@@ -708,8 +712,9 @@ export function createGatewayHttpServer(opts: {
           async () => (await loadHandler())(req, res, controlUiRouteOptions),
         );
       }
+      // Authenticated media also serves non-browser clients when dashboard hosting is disabled.
       addRequestStage(
-        controlUiEnabled,
+        scopedRequestPath === resolveAssistantMediaRoutePath(controlUiBasePath),
         async () =>
           (await loadControlUi())?.handleControlUiAssistantMediaRequest(req, res, {
             ...controlUiRouteOptions,

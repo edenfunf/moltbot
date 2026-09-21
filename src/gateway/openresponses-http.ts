@@ -9,15 +9,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
-import type { AdmittedRunContext } from "../agents/admitted-run-context.js";
 import { isClientToolNameConflictError } from "../agents/agent-tool-definition-adapter.js";
+import type { ClientToolDefinition } from "../agents/command/shared-types.js";
 import type { ImageContent } from "../agents/command/types.js";
-import type { ClientToolDefinition } from "../agents/embedded-agent-runner/run/params.js";
 import { toOpenAiResponsesUsage } from "../agents/usage.js";
-import { readAgentRunTerminalOutcome } from "../channels/turn/agent-run-terminal-outcome.js";
-import { createDefaultDeps } from "../cli/deps.js";
-import type { CliDeps } from "../cli/deps.types.js";
-import { agentCommandFromGatewayIngress } from "../commands/agent.js";
 import { getRuntimeConfig } from "../config/io.js";
 import type { GatewayHttpResponsesConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEventForRun } from "../infra/agent-events.js";
@@ -37,15 +32,14 @@ import {
   type InputImageLimits,
   type InputImageSource,
 } from "../media/input-files.js";
-import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
 import { retainGatewayRootWorkAdmissionContinuation } from "../process/gateway-work-admission.js";
-import { defaultRuntime } from "../runtime.js";
 import {
   mergeAssistantText,
   mergePendingAssistantText,
   resolveAssistantResultText,
   resolveAssistantTextCompletion,
   resolveAssistantTextInput,
+  resolveAssistantTextStreamDelta,
   type AssistantTextSnapshot,
 } from "./agent-event-assistant-text.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
@@ -87,6 +81,11 @@ import {
 } from "./open-responses.schema.js";
 import { resolveAgentRunUsage } from "./openai-agent-run-usage.js";
 import { resolveOpenAiCompatError } from "./openai-compat-errors.js";
+import {
+  type OpenAiCompatiblePendingToolCall,
+  readOpenAiHttpRunTerminal,
+  runOpenAiCompatibleAgentCommand,
+} from "./openai-compatible-agent-run.js";
 import {
   applyToolChoice,
   isToolChoiceConstraintSatisfied,
@@ -255,8 +254,7 @@ export const testing = {
 };
 
 function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
+  res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 }
 
 type ResolvedResponsesLimits = {
@@ -339,19 +337,6 @@ function extractUsageFromResult(result: unknown): Usage {
   return toOpenAiResponsesUsage(resolveAgentRunUsage(result));
 }
 
-type PendingToolCall = { id: string; name: string; arguments: string };
-
-function resolveStopReasonAndPendingToolCalls(meta: unknown): {
-  stopReason: string | undefined;
-  pendingToolCalls: PendingToolCall[] | undefined;
-} {
-  if (!meta || typeof meta !== "object") {
-    return { stopReason: undefined, pendingToolCalls: undefined };
-  }
-  const record = meta as { stopReason?: string; pendingToolCalls?: PendingToolCall[] };
-  return { stopReason: record.stopReason, pendingToolCalls: record.pendingToolCalls };
-}
-
 function createResponseResource(params: {
   id: string;
   createdAt: number;
@@ -374,50 +359,6 @@ function createResponseResource(params: {
       ? { incomplete_details: { reason: "max_output_tokens" as const } }
       : {}),
   };
-}
-
-async function runResponsesAgentCommand(params: {
-  message: string;
-  images: ImageContent[];
-  clientTools: ClientToolDefinition[];
-  extraSystemPrompt: string;
-  modelOverride?: string;
-  streamParams: { maxTokens?: number; temperature?: number; topP?: number } | undefined;
-  sessionKey: string;
-  runId: string;
-  messageChannel: string;
-  senderIsOwner: boolean;
-  deps: CliDeps;
-  resolveGatewayContext?: GatewayContextResolver;
-  abortSignal?: AbortSignal;
-}) {
-  return agentCommandFromGatewayIngress(
-    {
-      message: params.message,
-      images: params.images.length > 0 ? params.images : undefined,
-      clientTools: params.clientTools.length > 0 ? params.clientTools : undefined,
-      extraSystemPrompt: params.extraSystemPrompt || undefined,
-      model: params.modelOverride,
-      streamParams: params.streamParams ?? undefined,
-      sessionKey: params.sessionKey,
-      runId: params.runId,
-      deliver: false,
-      messageChannel: params.messageChannel,
-      senderIsOwner: params.senderIsOwner,
-      bestEffortDeliver: false,
-      allowModelOverride: params.modelOverride !== undefined,
-      abortSignal: params.abortSignal,
-      ...(params.resolveGatewayContext
-        ? {
-            onAdmittedRunContext: (context: AdmittedRunContext) =>
-              bindGatewayContextResolver(context, params.resolveGatewayContext),
-          }
-        : {}),
-    },
-    defaultRuntime,
-    params.deps,
-    {},
-  );
 }
 
 export async function handleOpenResponsesHttpRequest(
@@ -700,7 +641,6 @@ export async function handleOpenResponsesHttpRequest(
   const rememberResponseSession = () =>
     storeResponseSession(responseId, sessionKey, responseSessionScope);
   const outputItemId = `msg_${randomUUID()}`;
-  const deps = createDefaultDeps();
   const streamMaxTokens =
     typeof payload.max_output_tokens === "number" ? payload.max_output_tokens : undefined;
   const streamTemperature =
@@ -714,36 +654,36 @@ export async function handleOpenResponsesHttpRequest(
           ...(streamTopP !== undefined ? { topP: streamTopP } : {}),
         }
       : undefined;
+  const runAgentCommand = () =>
+    runOpenAiCompatibleAgentCommand({
+      message: prompt.message,
+      images,
+      clientTools: resolvedClientTools,
+      extraSystemPrompt,
+      modelOverride,
+      streamParams,
+      sessionKey,
+      runId: responseId,
+      messageChannel,
+      senderIsOwner,
+      resolveGatewayContext: opts.resolveGatewayContext,
+      abortSignal: abortController.signal,
+    });
 
   if (!stream) {
     try {
-      const result = await runResponsesAgentCommand({
-        message: prompt.message,
-        images,
-        clientTools: resolvedClientTools,
-        extraSystemPrompt,
-        modelOverride,
-        streamParams,
-        sessionKey,
-        runId: responseId,
-        messageChannel,
-        senderIsOwner,
-        deps,
-        resolveGatewayContext: opts.resolveGatewayContext,
-        abortSignal: abortController.signal,
-      });
+      const result = await runAgentCommand();
 
       if (abortController.signal.aborted) {
         return true;
       }
 
-      const meta = (result as { meta?: { error?: unknown; stopReason?: unknown } } | null)?.meta;
-      if (readAgentRunTerminalOutcome(result) === "failed") {
+      const { runFailed, stopReason, pendingToolCalls } = readOpenAiHttpRunTerminal(result);
+      if (runFailed) {
         throw new Error("agent run failed");
       }
       const assistantText = resolveAssistantResultText(result);
       const usage = extractUsageFromResult(result);
-      const { stopReason, pendingToolCalls } = resolveStopReasonAndPendingToolCalls(meta);
 
       // A `required`/pinned `tool_choice` must reject a text-only turn instead
       // of returning ordinary assistant prose, mirroring /v1/chat/completions.
@@ -858,10 +798,10 @@ export async function handleOpenResponsesHttpRequest(
   setSseHeaders(res);
 
   let assistantText: AssistantTextSnapshot = { text: "" };
-  let streamedAssistantText = "";
+  let streamedAssistantText = assistantText;
   let pendingAssistantText: AssistantTextSnapshot | undefined;
   let finalResultText: string | undefined;
-  let finalToolCalls: PendingToolCall[] | undefined;
+  let finalToolCalls: OpenAiCompatiblePendingToolCall[] | undefined;
   let unrepresentableAssistantReplacement = false;
   let closed = false;
   let unsubscribe = () => {};
@@ -898,14 +838,14 @@ export async function handleOpenResponsesHttpRequest(
         assistantText,
         pending: pendingAssistantText,
         resultText: finalResultText,
-        streamedText: streamedAssistantText,
+        streamedText: streamedAssistantText.text,
         fallbackText: finalToolCalls ? "" : "No response from OpenClaw.",
       });
-      if (!finalText.startsWith(streamedAssistantText)) {
+      if (!finalText.startsWith(streamedAssistantText.text)) {
         finalizeUnrepresentableAssistantReplacement();
         return;
       }
-      const delta = finalText.slice(streamedAssistantText.length);
+      const delta = finalText.slice(streamedAssistantText.text.length);
       if (delta) {
         writeSseEvent(res, {
           type: "response.output_text.delta",
@@ -915,7 +855,6 @@ export async function handleOpenResponsesHttpRequest(
           delta,
         });
       }
-      streamedAssistantText = finalText;
       closed = true;
       unsubscribe();
 
@@ -1093,31 +1032,33 @@ export async function handleOpenResponsesHttpRequest(
           !input.replaceable &&
           input.replace &&
           input.text !== undefined &&
-          pendingAssistantText.text.startsWith(streamedAssistantText)
+          pendingAssistantText.text.startsWith(streamedAssistantText.text)
         ) {
           unrepresentableAssistantReplacement = false;
         }
         return;
       }
 
-      assistantText = mergeAssistantText(assistantText, input, "append-only");
+      const previous = assistantText;
+      const merged = mergeAssistantText(previous, input, "append-only");
+      assistantText = merged;
       // Unconfirmed tool-choice prose may still be corrected before it is sent.
       if (toolChoiceConstraint) {
         return;
       }
       // Keep physical wire progress separate from a corrected item snapshot.
-      if (!assistantText.text.startsWith(streamedAssistantText)) {
+      const content = resolveAssistantTextStreamDelta(previous, merged, streamedAssistantText);
+      if (content === undefined) {
         unrepresentableAssistantReplacement = true;
         return;
       }
       if (input.replace && input.text !== undefined) {
         unrepresentableAssistantReplacement = false;
       }
-      const content = assistantText.text.slice(streamedAssistantText.length);
+      streamedAssistantText = assistantText;
       if (!content) {
         return;
       }
-      streamedAssistantText = assistantText.text;
       writeSseEvent(res, {
         type: "response.output_text.delta",
         item_id: outputItemId,
@@ -1161,27 +1102,14 @@ export async function handleOpenResponsesHttpRequest(
 
   void (async () => {
     try {
-      const result = await runResponsesAgentCommand({
-        message: prompt.message,
-        images,
-        clientTools: resolvedClientTools,
-        extraSystemPrompt,
-        modelOverride,
-        streamParams,
-        sessionKey,
-        runId: responseId,
-        messageChannel,
-        senderIsOwner,
-        deps,
-        resolveGatewayContext: opts.resolveGatewayContext,
-        abortSignal: abortController.signal,
-      });
+      const result = await runAgentCommand();
 
       if (closed) {
         return;
       }
 
-      if (readAgentRunTerminalOutcome(result) === "failed") {
+      const { runFailed, stopReason, pendingToolCalls } = readOpenAiHttpRunTerminal(result);
+      if (runFailed) {
         terminalLifecyclePhase = "error";
         rememberResponseSession();
         finalizeFailedResponse(
@@ -1197,10 +1125,7 @@ export async function handleOpenResponsesHttpRequest(
 
       // Check for pending client tool calls BEFORE maybeFinalize() because the
       // lifecycle:end event may already have requested finalization.
-      const resultAny = result as { meta?: unknown };
       const resultPayloadText = resolveAssistantResultText(result);
-      const meta = resultAny.meta;
-      const { stopReason, pendingToolCalls } = resolveStopReasonAndPendingToolCalls(meta);
 
       // Reject an unsatisfied `required`/pinned `tool_choice` before any
       // buffered prose is flushed, mirroring the non-streaming path and

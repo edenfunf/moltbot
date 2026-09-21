@@ -1,6 +1,6 @@
 import { setImmediate } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
-import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
+import { racePromiseWithAbortSignal, waitForAbortSignal } from "../../infra/abort-signal.js";
 import { bindCloudWorkerSetupCompletion } from "../../infra/device-pairing-cloud-worker.js";
 import { WorkerProviderError } from "../../plugins/capability-provider.types.js";
 import type { WorkerNodeEnrollment } from "../../plugins/types.js";
@@ -12,7 +12,10 @@ import { createWorkerBootstrapArtifactTransferService } from "./worker-bootstrap
 function createRuntimeManager(
   transfer: ReturnType<typeof createWorkerBootstrapArtifactTransferService>,
 ) {
-  support.testState.config.gateway = { publicOrigin: "https://gateway.example.test" };
+  support.testState.config.gateway = {
+    publicOrigin: "https://gateway.example.test",
+    auth: { mode: "token", token: "test-gateway-token" },
+  };
   return createWorkerNodeEnrollmentManager({
     store: support.testState.store,
     getConfig: () => support.testState.config,
@@ -165,14 +168,12 @@ describe("worker provisioning cancellation ownership", () => {
         },
       );
       const creation = service
-        .create(
-          "development",
-          `runtime-stop-${phase}`,
-          undefined,
-          "worker-turn",
-          undefined,
-          controller.signal,
-        )
+        .createWithRequest({
+          profileId: "development",
+          idempotencyKey: `runtime-stop-${phase}`,
+          executionMode: "worker-turn",
+          signal: controller.signal,
+        })
         .catch((error: unknown) => error)
         .finally(() => {
           settled = true;
@@ -241,14 +242,11 @@ describe("worker provisioning cancellation ownership", () => {
       });
       const service = support.createService(provider);
       const creation = service
-        .create(
-          "development",
-          "cancelled-provision",
-          undefined,
-          undefined,
-          undefined,
-          controller.signal,
-        )
+        .createWithRequest({
+          profileId: "development",
+          idempotencyKey: "cancelled-provision",
+          signal: controller.signal,
+        })
         .then(
           (value) => ({ ok: true as const, value }),
           (error: unknown) => ({ ok: false as const, error }),
@@ -282,92 +280,99 @@ describe("worker provisioning cancellation ownership", () => {
     },
   );
 
-  it("cleans a warm runtime lease while shutdown retains its cancelled bundle producer", async () => {
-    const preparing = createDeferredCore();
-    const prepared = createDeferredCore();
-    const controller = new AbortController();
-    const events: string[] = [];
-    support.testState.prepareInstallation = vi.fn(async () => {
-      events.push("bundle-started");
-      preparing.resolve();
-      await prepared.promise;
-      events.push("bundle-settled");
-      return support.BUNDLE_ARTIFACT;
-    });
-    const transfer = createWorkerBootstrapArtifactTransferService();
-    const grant = vi.spyOn(transfer, "prepare");
-    const manager = createRuntimeManager(transfer);
-    const destroy = vi.fn(async () => {
-      events.push("destroy");
-    });
-    const service = support.createService(
-      support.createProvider({
-        supportedExecutionModes: ["worker-turn"],
-        requiresNodeEnrollment: true,
-        provisionBeforeInstallation: true,
-        provision: async (_profile, _operation, options) => {
-          events.push("allocated");
-          await options!.prepareNodeRuntime!();
-          throw new Error("Cancelled runtime preparation unexpectedly completed");
-        },
-        destroy,
-      }),
-      {
-        prepareNodeBootstrap: manager.prepare,
-        prepareNodeRuntime: manager.prepareRuntime,
-        closeNodeRuntime: manager.closeRuntime,
-        prepareNodeEnrollment: manager.begin,
-        closeNodeEnrollment: manager.close,
-        stopNodeEnrollmentWaits: manager.stop,
-      },
-    );
-    let settled = false;
-    const creation = service
-      .create(
-        "development",
-        "warm-runtime-bundle-stop",
-        undefined,
-        "worker-turn",
-        undefined,
-        controller.signal,
-      )
-      .catch((error: unknown) => error)
-      .finally(() => {
-        settled = true;
+  it.each(["warm-runtime", "enrollment"] as const)(
+    "cleans the %s lease while shutdown retains its cancelled bundle producer",
+    async (phase) => {
+      const preparing = createDeferredCore();
+      const prepared = createDeferredCore();
+      const controller = new AbortController();
+      const events: string[] = [];
+      support.testState.prepareInstallation = vi.fn(async () => {
+        events.push("bundle-started");
+        preparing.resolve();
+        await prepared.promise;
+        events.push("bundle-settled");
+        return support.BUNDLE_ARTIFACT;
       });
-    let teardown: ReturnType<typeof service.destroy> | undefined;
-    let shutdown: Promise<void> | undefined;
-    let shutdownSettled = false;
-    try {
-      await Promise.race([
-        preparing.promise,
-        creation.then(() => {
-          throw new Error("Creation ended before warm runtime bundle preparation");
+      const transfer = createWorkerBootstrapArtifactTransferService();
+      const grant = vi.spyOn(transfer, "prepare");
+      const manager = createRuntimeManager(transfer);
+      const destroy = vi.fn(async () => {
+        events.push("destroy");
+      });
+      const service = support.createService(
+        support.createProvider({
+          supportedExecutionModes: ["worker-turn"],
+          requiresNodeEnrollment: true,
+          provisionBeforeInstallation: true,
+          provision: async (_profile, _operation, options) => {
+            events.push("allocated");
+            if (phase === "warm-runtime") {
+              await options!.prepareNodeRuntime!();
+            } else {
+              await options!.beginNodeEnrollment!();
+              await waitForAbortSignal(options!.signal);
+              options!.signal!.throwIfAborted();
+            }
+            throw new Error("Cancelled runtime preparation unexpectedly completed");
+          },
+          destroy,
         }),
-      ]);
-      const record = support.testState.store.list()[0]!;
-      controller.abort(new DOMException("Stop warm runtime packaging", "AbortError"));
-      teardown = service.destroy(record.environmentId);
-      await support.waitForFast(() => expect(settled).toBe(true));
-      await expect(teardown).resolves.toMatchObject({ state: "destroyed" });
-      expect(events).toEqual(["allocated", "bundle-started", "destroy"]);
-      expect(destroy).toHaveBeenCalledOnce();
-      expect(grant).not.toHaveBeenCalled();
-      shutdown = service.stop().then(() => {
-        shutdownSettled = true;
-      });
-      await setImmediate();
-      expect(shutdownSettled).toBe(false);
-    } finally {
-      prepared.resolve();
-      await Promise.allSettled([creation, teardown, shutdown]);
-      manager.stop();
-      grant.mockRestore();
-    }
-    expect(await creation).toMatchObject({ name: "AbortError" });
-    expect(shutdownSettled).toBe(true);
-    expect(events).toEqual(["allocated", "bundle-started", "destroy", "bundle-settled"]);
-  });
+        {
+          prepareNodeBootstrap: manager.prepare,
+          prepareNodeRuntime: manager.prepareRuntime,
+          closeNodeRuntime: manager.closeRuntime,
+          prepareNodeEnrollment: manager.begin,
+          closeNodeEnrollment: manager.close,
+          stopNodeEnrollmentWaits: manager.stop,
+        },
+      );
+      let settled = false;
+      const creation = service
+        .createWithRequest({
+          profileId: "development",
+          idempotencyKey: `${phase}-bundle-stop`,
+          executionMode: "worker-turn",
+          signal: controller.signal,
+        })
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      let teardown: ReturnType<typeof service.destroy> | undefined;
+      let shutdown: Promise<void> | undefined;
+      let shutdownSettled = false;
+      try {
+        await Promise.race([
+          preparing.promise,
+          creation.then((result) => {
+            throw new Error("Creation ended before bundle preparation", { cause: result });
+          }),
+        ]);
+        const record = support.testState.store.list()[0]!;
+        controller.abort(new DOMException("Stop bundle packaging", "AbortError"));
+        teardown = service.destroy(record.environmentId);
+        await support.waitForFast(() => expect(settled).toBe(true));
+        await expect(teardown).resolves.toMatchObject({ state: "destroyed" });
+        expect(events).toEqual(["allocated", "bundle-started", "destroy"]);
+        expect(destroy).toHaveBeenCalledOnce();
+        expect(grant).toHaveBeenCalledTimes(phase === "enrollment" ? 1 : 0);
+        shutdown = service.stop().then(() => {
+          shutdownSettled = true;
+        });
+        await setImmediate();
+        expect(shutdownSettled).toBe(false);
+      } finally {
+        prepared.resolve();
+        await Promise.allSettled([creation, teardown, shutdown]);
+        manager.stop();
+        grant.mockRestore();
+      }
+      expect(await creation).toMatchObject({ name: "AbortError" });
+      expect(shutdownSettled).toBe(true);
+      expect(events).toEqual(["allocated", "bundle-started", "destroy", "bundle-settled"]);
+    },
+  );
 
   it("does not let older runtime packaging revoke a newer enrollment", async () => {
     const preparing = createDeferredCore();
@@ -416,7 +421,11 @@ describe("worker provisioning cancellation ownership", () => {
       },
     );
     const creation = service
-      .create("development", "runtime-before-enrollment", undefined, "worker-turn")
+      .createWithRequest({
+        profileId: "development",
+        idempotencyKey: "runtime-before-enrollment",
+        executionMode: "worker-turn",
+      })
       .catch((error: unknown) => error);
     try {
       const enrollment = await Promise.race([
@@ -466,14 +475,11 @@ describe("worker provisioning cancellation ownership", () => {
       const service = support.createService(support.createProvider({ provision }));
       let creationSettled = false;
       const creation = service
-        .create(
-          "development",
-          "cancelled-preparation",
-          undefined,
-          undefined,
-          undefined,
-          controller.signal,
-        )
+        .createWithRequest({
+          profileId: "development",
+          idempotencyKey: "cancelled-preparation",
+          signal: controller.signal,
+        })
         .then(
           (value) => ({ ok: true as const, value }),
           (error: unknown) => ({ ok: false as const, error }),
@@ -537,14 +543,12 @@ describe("worker provisioning cancellation ownership", () => {
     );
     let settled = false;
     const creation = service
-      .create(
-        "development",
-        "node-preflight-stop",
-        undefined,
-        "worker-turn",
-        undefined,
-        controller.signal,
-      )
+      .createWithRequest({
+        profileId: "development",
+        idempotencyKey: "node-preflight-stop",
+        executionMode: "worker-turn",
+        signal: controller.signal,
+      })
       .catch((error: unknown) => error)
       .finally(() => {
         settled = true;
@@ -601,20 +605,22 @@ describe("worker provisioning cancellation ownership", () => {
           destroy,
         }),
       );
-      await expect(service.create("development", "replay-preparation-stop")).rejects.toMatchObject({
+      await expect(
+        service.createWithRequest({
+          profileId: "development",
+          idempotencyKey: "replay-preparation-stop",
+        }),
+      ).rejects.toMatchObject({
         code: "provider_failure",
       });
       replay = true;
       let settled = false;
       const creation = service
-        .create(
-          "development",
-          "replay-preparation-stop",
-          undefined,
-          undefined,
-          undefined,
-          controller.signal,
-        )
+        .createWithRequest({
+          profileId: "development",
+          idempotencyKey: "replay-preparation-stop",
+          signal: controller.signal,
+        })
         .catch((error: unknown) => error)
         .finally(() => {
           settled = true;
@@ -674,7 +680,11 @@ describe("worker provisioning cancellation ownership", () => {
     });
     const service = support.createService(provider, { providerCallTimeoutMs: 20 });
     const creation = service
-      .create("development", "timeout-cancel", undefined, undefined, undefined, controller.signal)
+      .createWithRequest({
+        profileId: "development",
+        idempotencyKey: "timeout-cancel",
+        signal: controller.signal,
+      })
       .catch((error: unknown) => error);
     await entered.promise;
     await creation;
@@ -728,14 +738,12 @@ describe("worker provisioning cancellation ownership", () => {
     );
     let settled = false;
     const creation = service
-      .create(
-        "development",
-        "node-install-stop",
-        undefined,
-        "worker-turn",
-        undefined,
-        controller.signal,
-      )
+      .createWithRequest({
+        profileId: "development",
+        idempotencyKey: "node-install-stop",
+        executionMode: "worker-turn",
+        signal: controller.signal,
+      })
       .catch((error: unknown) => error)
       .finally(() => {
         settled = true;
@@ -802,14 +810,12 @@ describe("worker provisioning cancellation ownership", () => {
       { prepareNodeEnrollment: async () => enrollment, closeNodeEnrollment },
     );
     const creation = service
-      .create(
-        "development",
-        "enrollment-cancel",
-        undefined,
-        "worker-turn",
-        undefined,
-        controller.signal,
-      )
+      .createWithRequest({
+        profileId: "development",
+        idempotencyKey: "enrollment-cancel",
+        executionMode: "worker-turn",
+        signal: controller.signal,
+      })
       .catch((error: unknown) => error);
     await waiting.promise;
     controller.abort(new Error("Stop enrollment"));

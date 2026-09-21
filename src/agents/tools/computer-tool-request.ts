@@ -263,6 +263,13 @@ export function buildComputerActParams(params: {
       if (windowRef !== undefined) {
         wire.windowRef = windowRef;
       }
+      if (action === "get_window_state") {
+        copyOptionalBooleanParam(wire, input, "includeScreenshot");
+        // Released nodes capture by default but reject the newer wire field.
+        if (wire.includeScreenshot === true) {
+          delete wire.includeScreenshot;
+        }
+      }
       copyOptionalStringParam(wire, input, "query");
       copyOptionalIntegerParam(wire, input, "depth", { min: 0, max: 64 });
       copyOptionalIntegerParam(wire, input, "maxElements", { min: 1, max: 2_000 });
@@ -463,7 +470,7 @@ export function buildComputerActParams(params: {
 export function validateCapabilityBoundInput(params: {
   action: ComputerUseV2ActionName;
   input: Record<string, unknown>;
-  nodeId: string;
+  targetKey: string;
   capabilities?: ComputerUseCapabilityDescriptor;
   observationState?: ComputerObservationState;
 }): void {
@@ -489,17 +496,23 @@ export function validateCapabilityBoundInput(params: {
     );
   }
   if (windowRef && !capabilities?.targets.includes("window")) {
-    throw new Error(`${COMPUTER_CONTRACT_MISMATCH}: selected node has no window target support`);
+    throw new Error(
+      `${COMPUTER_CONTRACT_MISMATCH}: selected computer has no window target support`,
+    );
   }
   if (elementRef && !capabilities?.targets.includes("element")) {
-    throw new Error(`${COMPUTER_CONTRACT_MISMATCH}: selected node has no element target support`);
+    throw new Error(
+      `${COMPUTER_CONTRACT_MISMATCH}: selected computer has no element target support`,
+    );
   }
   if ((browserRef || pageRef) && !capabilities?.targets.includes("browser")) {
-    throw new Error(`${COMPUTER_CONTRACT_MISMATCH}: selected node has no browser target support`);
+    throw new Error(
+      `${COMPUTER_CONTRACT_MISMATCH}: selected computer has no browser target support`,
+    );
   }
   if (deliveryMode && !capabilities?.deliveryModes.some((mode) => mode === deliveryMode)) {
     throw new Error(
-      `${COMPUTER_CONTRACT_MISMATCH}: selected node does not advertise ${deliveryMode} delivery`,
+      `${COMPUTER_CONTRACT_MISMATCH}: selected computer does not advertise ${deliveryMode} delivery`,
     );
   }
   if (elementRef && !observationId) {
@@ -510,7 +523,7 @@ export function validateCapabilityBoundInput(params: {
   }
   if (
     !params.observationState ||
-    params.observationState.nodeId !== params.nodeId ||
+    params.observationState.targetKey !== params.targetKey ||
     params.observationState.providerGeneration !== capabilities?.provider.generation ||
     params.observationState.observationId !== observationId
   ) {

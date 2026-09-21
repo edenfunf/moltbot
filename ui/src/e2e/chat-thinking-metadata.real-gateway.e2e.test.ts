@@ -114,7 +114,7 @@ suite.define(() => {
       const { browserUrl }: { browserUrl: string } = JSON.parse(handoff.stdout);
       const url = new URL(browserUrl);
       url.pathname = "/chat/main/thinking-saved-off";
-      url.search = "?nav=collapsed";
+      url.search = "";
       await suite.withPage(
         { locale: "en-US", serviceWorkers: "block", viewport: { width: 1280, height: 900 } },
         async ({ page }) => {
@@ -281,7 +281,7 @@ suite.define(() => {
       const { browserUrl }: { browserUrl: string } = JSON.parse(handoff.stdout);
       const url = new URL(browserUrl);
       url.pathname = "/chat/main/thinking-status";
-      url.search = "?nav=collapsed";
+      url.search = "";
       await suite.withPage(
         { locale: "en-US", serviceWorkers: "block", viewport: { width: 1280, height: 900 } },
         async ({ page }) => {
@@ -346,8 +346,8 @@ suite.define(() => {
               path: path.join(suite.artifactDir, "session-thinking.png"),
             });
 
-            stage = "open New session";
-            await page.getByRole("link", { name: "New session", exact: true }).first().click();
+            stage = "open New conversation";
+            await page.getByRole("link", { name: "New conversation", exact: true }).first().click();
             await page.waitForURL((current) => current.pathname === "/new");
             await waitForControlUiGatewayReady(page);
             const modelControl = page.locator("[data-chat-model-select='true']");

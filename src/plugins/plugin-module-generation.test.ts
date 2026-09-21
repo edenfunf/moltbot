@@ -1,12 +1,13 @@
 import fs from "node:fs";
-import { createRequire } from "node:module";
+import Module, { createRequire } from "node:module";
 import path from "node:path";
 import { createJiti } from "jiti";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { createPluginCache, withPluginCache } from "./plugin-cache.js";
+import { capturePluginGenerationArtifact } from "./plugin-generation-artifact.js";
+import { bindPluginInstanceModuleLoader } from "./plugin-instance-module-loader.js";
 import { PluginInstance } from "./plugin-instance.js";
-import { bindPluginInstanceModuleLoader } from "./plugin-module-loader-cache.js";
 
 const temp = useAutoCleanupTempDirTracker(afterEach);
 const nativeRequire = createRequire(import.meta.url);
@@ -90,9 +91,11 @@ describe("plugin module generations", () => {
          export const nativeResolve = () => createRequire(import.meta.url).resolve('conditional-dependency');
          export const requireProperties = () => {
            const native = createRequire(import.meta.url);
+           const hasLookupPaths = (paths) => Array.isArray(paths) && paths.length > 0;
            return [require.cache === native.cache, require.extensions === native.extensions,
              require.main === native.main,
-             JSON.stringify(require.resolve.paths('conditional-dependency')) === JSON.stringify(native.resolve.paths('conditional-dependency'))];
+             hasLookupPaths(require.resolve.paths('conditional-dependency')),
+             hasLookupPaths(native.resolve.paths('conditional-dependency'))];
          };`,
       );
       const value = importOnly ? 99 : 42;
@@ -115,17 +118,22 @@ describe("plugin module generations", () => {
       const first = load(root, entry).value as StartupPlugin;
       expect(first).toMatchObject(expected);
       expect(first.resolveThenRequire()).toBe(value);
-      expect(first.requireProperties()).toEqual([true, true, true, true]);
+      expect(first.requireProperties()).toEqual(
+        process.versions.bun ? [true, true, true, false, true] : [true, true, true, true, true],
+      );
       expect(first.resolve()).toMatch(importOnly ? /import\.mjs$/ : /require\.cjs$/);
       if (importOnly) {
         expect(legacy.alias()).toBe(value);
         expect(first.alias()).toBe(value);
-        expect(() => legacy.nativeResolve()).toThrow(
-          expect.objectContaining({ code: "ERR_PACKAGE_PATH_NOT_EXPORTED" }),
-        );
-        expect(() => first.nativeResolve()).toThrow(
-          expect.objectContaining({ code: "ERR_PACKAGE_PATH_NOT_EXPORTED" }),
-        );
+        for (const resolve of [() => legacy.nativeResolve(), () => first.nativeResolve()]) {
+          if (process.versions.bun) {
+            expect(resolve).toThrow("conditional-dependency");
+          } else {
+            expect(resolve).toThrow(
+              expect.objectContaining({ code: "ERR_PACKAGE_PATH_NOT_EXPORTED" }),
+            );
+          }
+        }
       }
       fs.writeFileSync(
         importOnly ? path.join(dependency, "import.mjs") : required,
@@ -337,8 +345,8 @@ describe("plugin module generations", () => {
       const source = path.join(root, entry);
       expect(() =>
         createJiti(source, { tryNative: false, fsCache: false, moduleCache: false })(source),
-      ).toThrow(/await/);
-      expect(() => load(root, entry)).toThrow(/await/);
+      ).toThrow(/await|Promise/);
+      expect(() => load(root, entry)).toThrow(/await|Promise/);
     },
   );
 
@@ -615,6 +623,64 @@ describe("plugin module generations", () => {
     },
   );
 
+  it.each([
+    "before bind",
+    "directory before bind",
+    "after bind",
+    "unchanged",
+    "nested state",
+    "state at source root",
+  ])(
+    "checks expected source bytes before execution and uses that same capture (%s)",
+    async (change) => {
+      const marker = path.join(temp.make("plugin-expected-effect-"), "ran");
+      const entry = (value: string) =>
+        `require("node:fs").writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(value)}); module.exports = ${JSON.stringify(value)};`;
+      const root = temp.make("plugin-expected-source-");
+      const source = path.join(root, "entry.cjs");
+      fs.writeFileSync(source, entry("reviewed"));
+      if (change === "nested state" || change === "state at source root") {
+        vi.stubEnv(
+          "OPENCLAW_STATE_DIR",
+          change === "nested state" ? path.join(root, ".state") : root,
+        );
+      }
+      const prepared = capturePluginGenerationArtifact(root);
+      const expectedSourceDigest = prepared.sourceDigest;
+      prepared.dispose();
+      const instance = new PluginInstance("fixture");
+      instances.push(instance);
+      const options = {
+        instance,
+        origin: "config" as const,
+        source,
+        rootDir: root,
+        expectedSourceDigest,
+      };
+      if (change.endsWith("before bind")) {
+        if (change === "directory before bind") {
+          fs.mkdirSync(path.join(root, "empty"));
+        } else {
+          fs.writeFileSync(source, entry("changed"));
+        }
+        expect
+          .soft(() => {
+            bindPluginInstanceModuleLoader(options);
+            instance.loadModule(source);
+          })
+          .toThrow(/source.*changed/i);
+        expect(fs.existsSync(marker)).toBe(false);
+      } else {
+        bindPluginInstanceModuleLoader(options);
+        if (change === "after bind") {
+          fs.writeFileSync(source, entry("changed"));
+        }
+        expect(instance.loadModule(source)).toBe("reviewed");
+        expect(fs.readFileSync(marker, "utf8")).toBe("reviewed");
+      }
+    },
+  );
+
   it("retains native JSON import attributes for a computed JavaScript edge", async () => {
     const root = temp.make("plugin-native-computed-json-");
     fs.writeFileSync(path.join(root, "data.json"), '{"value":42}');
@@ -625,9 +691,15 @@ describe("plugin module generations", () => {
     const plugin = load(root, "index.mjs", true).value as {
       read(name: string, attributes?: { type: string }): Promise<unknown>;
     };
-    await expect(plugin.read("./data.json")).rejects.toMatchObject({
-      code: "ERR_IMPORT_ATTRIBUTE_MISSING",
-    });
+    if (process.versions.bun) {
+      await expect(plugin.read("./data.json")).resolves.toMatchObject({
+        default: { value: 42 },
+      });
+    } else {
+      await expect(plugin.read("./data.json")).rejects.toMatchObject({
+        code: "ERR_IMPORT_ATTRIBUTE_MISSING",
+      });
+    }
     await expect(plugin.read("./data.json", { type: "json" })).resolves.toMatchObject({
       default: { value: 42 },
     });
@@ -704,6 +776,34 @@ describe("plugin module generations", () => {
     },
   );
 
+  it("resolves deferred TypeScript without acquiring the compiler until execution", () => {
+    const root = temp.make("plugin-resolve-only-typescript-");
+    fs.writeFileSync(
+      path.join(root, "index.cjs"),
+      "exports.resolve = () => require.resolve('./deferred.ts'); exports.read = () => require('./deferred.ts').value;",
+    );
+    fs.writeFileSync(path.join(root, "deferred.ts"), "exports.value = 42 as number;");
+    // oxlint-disable-next-line typescript/unbound-method -- called below with the intercepted module receiver.
+    const originalRequire = Module.prototype.require;
+    const compilerGuard = vi.spyOn(Module.prototype, "require").mockImplementation(function (
+      this: NodeJS.Module,
+      id: string,
+    ) {
+      if (id === "typescript") {
+        throw new Error("Resolution must not acquire the TypeScript compiler");
+      }
+      return originalRequire.call(this, id);
+    });
+    let plugin: { resolve(): string; read(): number };
+    try {
+      plugin = load(root, "index.cjs").value as typeof plugin;
+      expect(fs.existsSync(plugin.resolve())).toBe(true);
+    } finally {
+      compilerGuard.mockRestore();
+    }
+    expect(plugin.read()).toBe(42);
+  });
+
   it("defers unused TypeScript syntax errors until their module is loaded", async () => {
     const root = temp.make("plugin-lazy-source-error-");
     fs.writeFileSync(
@@ -713,7 +813,9 @@ describe("plugin module generations", () => {
     fs.writeFileSync(path.join(root, "broken.ts"), "export const value: = 1;");
     const plugin = load(root, "index.ts").value as { read(): Promise<unknown> };
     await expect(plugin.read()).rejects.toThrow(
-      /^broken\.ts\(1,21\): error TS1110: Type expected\./,
+      process.versions.bun
+        ? /ParseError: Unexpected token[\s\S]*broken\.ts:1:20/
+        : /^broken\.ts\(1,21\): error TS1110: Type expected\./,
     );
   });
 
@@ -813,11 +915,14 @@ describe("plugin module generations", () => {
     expect(await (load(root, "index.ts").value as typeof first).read()).toEqual([true, 1]);
   });
 
-  it("preserves native custom loader startup without replaying registration", async () => {
-    const root = temp.make("plugin-native-hooks-");
-    fs.writeFileSync(
-      path.join(root, "index.cjs"),
-      `const { registerHooks } = require('node:module');
+  // Enable under Bun after oven-sh/bun#35690 ships node:module.registerHooks.
+  it.runIf(!process.versions.bun)(
+    "preserves native custom loader startup without replaying registration",
+    async () => {
+      const root = temp.make("plugin-native-hooks-");
+      fs.writeFileSync(
+        path.join(root, "index.cjs"),
+        `const { registerHooks } = require('node:module');
        const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
          return specifier === 'fixture:answer'
            ? { url: 'data:text/javascript,export default 42', shortCircuit: true }
@@ -825,17 +930,18 @@ describe("plugin module generations", () => {
        }});
        exports.read = async () => (await import('fixture:answer')).default;
        exports.close = () => hooks.deregister();`,
-    );
-    const { instance, value } = load(root, "index.cjs");
-    const plugin = value as { read(): Promise<number>; close(): void };
-    try {
-      expect(await plugin.read()).toBe(42);
-    } finally {
-      plugin.close();
-      await instance.dispose();
-    }
-    expect(() => plugin.read()).toThrow("reloaded or disabled");
-  });
+      );
+      const { instance, value } = load(root, "index.cjs");
+      const plugin = value as { read(): Promise<number>; close(): void };
+      try {
+        expect(await plugin.read()).toBe(42);
+      } finally {
+        plugin.close();
+        await instance.dispose();
+      }
+      expect(() => plugin.read()).toThrow("reloaded or disabled");
+    },
+  );
 
   it.each(["cjs", "ts"])("does not reevaluate a failing module through a %s entry", (extension) => {
     const root = temp.make("plugin-failed-native-");

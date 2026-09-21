@@ -5,7 +5,12 @@ import {
   normalizeProviderId,
 } from "@openclaw/model-catalog-core/provider-id";
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
-import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
+import {
+  ErrorCodes,
+  errorShape,
+  validateModelsAuthSetApiKeyParams,
+  type ModelsAuthSetApiKeyResult,
+} from "../../../packages/gateway-protocol/src/index.js";
 import { tryResolveAmbientOwnerAgentId } from "../../agents/agent-scope-config.js";
 import {
   type AuthHealthSummary,
@@ -38,15 +43,13 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { NON_ENV_SECRETREF_MARKER } from "../../secrets/provider-credential-values.js";
 import { refreshActiveProviderAuthRuntimeSnapshot } from "../../secrets/runtime.js";
 import { abortChatRunsForProvider, type ChatAbortOps } from "../chat-abort.js";
+import { refreshModelAuthStateAfterMutation } from "../model-auth-refresh.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { loadDeferredCatalog, readPreparedCatalog } from "../server-model-catalog-auth.js";
 import { formatForLog } from "../ws-log.js";
 import { modelAuthAgentScopeError, resolveModelAuthAgentScope } from "./model-auth-agent-scope.js";
 import { resolveModelProviderCapabilities } from "./model-provider-capabilities.js";
-import {
-  modelsAuthRefreshHandlers,
-  refreshModelAuthStateAfterMutation,
-} from "./models-auth-refresh.js";
+import { modelsAuthRefreshHandlers } from "./models-auth-refresh.js";
 import { resolveProviderApiKeys } from "./models-auth-status-api-keys.js";
 import { resolveConfigBoundProfileIds } from "./models-auth-status-config.js";
 import {
@@ -63,6 +66,7 @@ import type {
 import { getProviderUsageRuntimeSnapshot } from "./provider-usage-runtime.js";
 import { respondUnavailableOnThrow } from "./response.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
+import { assertValidParams } from "./validation.js";
 
 export type {
   ModelAuthExpiry,
@@ -416,11 +420,10 @@ function resolveConfiguredProviders(
 
 async function refreshAfterCredentialMutation(
   context: GatewayRequestContext,
-  operation: "update" | "logout",
   agentId: string,
 ): Promise<string | undefined> {
   try {
-    await refreshModelAuthStateAfterMutation(context, operation, agentId);
+    await refreshModelAuthStateAfterMutation(context.getRuntimeConfig, agentId);
     return undefined;
   } catch (error) {
     log.warn(`credential change saved but auth refresh failed: ${formatForLog(error)}`);
@@ -431,16 +434,12 @@ async function refreshAfterCredentialMutation(
 export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
   ...modelsAuthRefreshHandlers,
   "models.authSetApiKey": async ({ params, respond, context }) => {
-    const provider = readProviderParam(params);
-    const apiKey = typeof params.apiKey === "string" ? params.apiKey : "";
-    if (!provider || !apiKey.trim()) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "provider and apiKey are required"),
-      );
+    if (
+      !assertValidParams(params, validateModelsAuthSetApiKeyParams, "models.authSetApiKey", respond)
+    ) {
       return;
     }
+    const provider = normalizeProviderId(params.provider);
     await respondUnavailableOnThrow(respond, async () => {
       const config = context.getRuntimeConfig();
       const scope = resolveModelAuthAgentScope(config, params.agentId);
@@ -449,14 +448,20 @@ export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
         return;
       }
       const { saveModelProviderApiKey } = await import("../../commands/models/auth-api-key.js");
-      const profileId = await saveModelProviderApiKey({
+      const { profileId, warning: configWarning } = await saveModelProviderApiKey({
         config,
         provider,
-        apiKey,
+        apiKey: params.apiKey,
         agentDir: scope.agentDir,
       });
-      const warning = await refreshAfterCredentialMutation(context, "update", scope.agentId);
-      respond(true, { provider, profileId, ...(warning ? { warning } : {}) }, undefined);
+      const refreshWarning = await refreshAfterCredentialMutation(context, scope.agentId);
+      const warning = [configWarning, refreshWarning].filter(Boolean).join(" ");
+      const result: ModelsAuthSetApiKeyResult = {
+        provider,
+        profileId,
+        ...(warning ? { warning } : {}),
+      };
+      respond(true, result, undefined);
     });
   },
   "models.authLogout": async ({ params, respond, context }) => {
@@ -532,7 +537,7 @@ export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
               agentId: scope.agentId,
               stopReason: "auth-revoked",
             });
-      const refreshWarning = await refreshAfterCredentialMutation(context, "logout", scope.agentId);
+      const refreshWarning = await refreshAfterCredentialMutation(context, scope.agentId);
       const warning = [configWarning, refreshWarning].filter(Boolean).join(" ");
       const result: ModelAuthLogoutResult = {
         provider,

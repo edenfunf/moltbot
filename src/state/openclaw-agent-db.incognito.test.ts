@@ -10,7 +10,7 @@ import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabases,
   closeOpenClawAgentDatabasesForTest,
-  IncognitoAgentDatabasePathCollisionError,
+  isIncognitoOpenClawAgentSqlitePath,
   listOpenClawRegisteredAgentDatabases,
   listOpenIncognitoAgentDatabases,
   openOpenClawAgentDatabase,
@@ -31,9 +31,61 @@ afterEach(() => {
 });
 
 describe("incognito agent database", () => {
+  it.runIf(process.platform === "win32")(
+    "matches mixed separators on drive and UNC roots without folding filename case",
+    () => {
+      for (const stateDir of ["C:\\incognito-state", "\\\\server\\share\\incognito-state"]) {
+        const options = { agentId: "worker", env: { OPENCLAW_STATE_DIR: stateDir } };
+        const sentinel = resolveIncognitoOpenClawAgentSqlitePath(options);
+        expect(isIncognitoOpenClawAgentSqlitePath(sentinel.replaceAll("\\", "/"), options)).toBe(
+          true,
+        );
+        expect(
+          isIncognitoOpenClawAgentSqlitePath(
+            path.join(path.dirname(sentinel), path.basename(sentinel).toUpperCase()),
+            options,
+          ),
+        ).toBe(false);
+      }
+    },
+  );
+
+  it("matches only the normalized sentinel for the current owner and state root", () => {
+    const env = { OPENCLAW_STATE_DIR: path.join(os.tmpdir(), "incognito-path-root") };
+    const options = { agentId: "worker", env };
+    const sentinel = resolveIncognitoOpenClawAgentSqlitePath(options);
+    const basename = path.basename(sentinel);
+    for (const pathname of [
+      sentinel,
+      path.relative(process.cwd(), sentinel),
+      `${sentinel}${path.sep}`,
+      `${sentinel}${path.sep}.`,
+      `${sentinel}${path.sep}..${path.sep}${basename}`,
+    ]) {
+      expect(isIncognitoOpenClawAgentSqlitePath(pathname, options), pathname).toBe(true);
+    }
+    for (const pathname of [
+      path.join(path.dirname(sentinel), "openclaw-agent.sqlite"),
+      path.join(env.OPENCLAW_STATE_DIR, basename),
+      `${sentinel}-wal`,
+      `${sentinel} `,
+      path.join(path.dirname(sentinel), basename.toUpperCase()),
+    ]) {
+      expect(isIncognitoOpenClawAgentSqlitePath(pathname, options), pathname).toBe(false);
+    }
+    expect(isIncognitoOpenClawAgentSqlitePath(sentinel, { ...options, agentId: "other" })).toBe(
+      false,
+    );
+    env.OPENCLAW_STATE_DIR = path.join(env.OPENCLAW_STATE_DIR, "changed");
+    expect(isIncognitoOpenClawAgentSqlitePath(sentinel, options)).toBe(false);
+    expect(
+      isIncognitoOpenClawAgentSqlitePath(resolveIncognitoOpenClawAgentSqlitePath(options), options),
+    ).toBe(true);
+  });
+
   it.each([false, true])(
     "rejects deletion-fenced opens and writes and retires prepared statements (held: %s)",
-    (held) => {
+    async (held) => {
       const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "incognito-delete-")));
       tempDirs.push(stateDir);
       const env = { OPENCLAW_STATE_DIR: stateDir };
@@ -61,7 +113,7 @@ describe("incognito agent database", () => {
           runOpenClawAgentWriteTransaction(({ db }) => db.prepare(writeSql).run(), options),
         )
         .toThrow("is deleted");
-      const plan = prepareAgentDeleteDatabases(
+      const plan = await prepareAgentDeleteDatabases(
         { agents: { entries: { worker: {}, kept: {} } } },
         "worker",
         path.dirname(sentinel),
@@ -113,7 +165,7 @@ describe("incognito agent database", () => {
     } catch (error) {
       collision = error;
     }
-    expect(collision).toBeInstanceOf(IncognitoAgentDatabasePathCollisionError);
+    expect(collision).toBeInstanceOf(Error);
     expect(collision).toMatchObject({
       name: "IncognitoAgentDatabasePathCollisionError",
       path: sentinel,

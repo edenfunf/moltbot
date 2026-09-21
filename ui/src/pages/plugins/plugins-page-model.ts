@@ -1,4 +1,5 @@
 import { t } from "../../i18n/index.ts";
+import { registerPluginManagementEnglish } from "../../i18n/locales/en-plugin-management.ts";
 import type {
   PluginCatalogItem,
   PluginDiscoveryDetailResult,
@@ -6,7 +7,10 @@ import type {
   PluginsInspectResult,
 } from "../../lib/plugins/index.ts";
 
+registerPluginManagementEnglish();
+
 export type PluginsPageDetail = {
+  tools?: Array<{ name: string; description?: string }>;
   pluginId: string;
   inspection: PluginsInspectResult | null;
   error: string | null;
