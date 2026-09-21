@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { SUPPORTED_NODE_VERSIONS } from "../../node-version.mjs";
 import type { GatewayDaemonRuntime } from "../commands/daemon-runtime.js";
+import { resolveBrewOpenClawPath } from "../infra/brew.js";
 import {
   buildGatewayDistEntrypointCandidates,
   findFirstAccessibleGatewayEntrypoint,
@@ -216,7 +217,11 @@ async function resolveCliProgramArguments(params: {
 
   const cliEntrypointPath = await resolveCliEntrypointPathForService();
   return {
-    programArguments: [runtimePath, cliEntrypointPath, ...params.args],
+    programArguments: [
+      runtimePath,
+      (await resolveBrewOpenClawPath(cliEntrypointPath)) ?? cliEntrypointPath,
+      ...params.args,
+    ],
   };
 }
 
@@ -257,6 +262,8 @@ export async function resolveNodeProgramArguments(params: {
   nodeId?: string;
   displayName?: string;
   installedAppsSharing?: boolean;
+  commands?: string[];
+  allCommands?: boolean;
   dev?: boolean;
   runtime: GatewayDaemonRuntime;
   runtimePath?: string;
@@ -284,6 +291,11 @@ export async function resolveNodeProgramArguments(params: {
   }
   if (params.installedAppsSharing !== undefined) {
     args.push(params.installedAppsSharing ? "--share-installed-apps" : "--no-share-installed-apps");
+  }
+  if (params.allCommands) {
+    args.push("--all-commands");
+  } else if (params.commands !== undefined) {
+    args.push("--commands", params.commands.join(","));
   }
   return resolveCliProgramArguments({
     args,

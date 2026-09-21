@@ -1,6 +1,8 @@
 import { formatErrorMessage } from "../../infra/errors.js";
 import { assertUpdateRecoveryAdmission } from "../../infra/update-run-recovery-admission.js";
 import { UpdateRecoveryRequiredError } from "../../infra/update-run-recovery.js";
+import { hasCommandProcessCleanupError } from "../../process/exec-result.js";
+import { withCommandProcessScope } from "../../process/exec-spawn.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import type { UpdateCommandOptions } from "./shared.js";
 import { UpdateCommandRecoveryPendingError } from "./update-command-recovery.js";
@@ -10,9 +12,12 @@ import {
   UpdateCommandPendingRecoveryFailure,
   mergeWindowsTaskRecoveryFailure,
 } from "./update-command-result.js";
-import { completeUpdateCommandRun, failUpdateCommandRun } from "./update-command-run.js";
+import { completeUpdateCommandRun } from "./update-command-run.js";
 import type { UpdateCommandRecoveryState } from "./update-command-service-maintenance.js";
-import { hasDeferredUpdateCommandTerminalResult } from "./update-command-terminal.js";
+import {
+  hasDeferredUpdateCommandTerminalResult,
+  prepareUnexpectedUpdateCommandFailure,
+} from "./update-command-terminal.js";
 
 /** Unwind only legacy updates; pending publication cannot authorize compensation or diagnostics. */
 export async function withUpdateCommandRecoveryUnwind(
@@ -34,9 +39,16 @@ export async function withUpdateCommandRecoveryUnwind(
         });
   let failure: { error: unknown } | undefined;
   try {
-    await operation();
+    await withCommandProcessScope(operation);
     run.executorFence?.assertCurrent();
   } catch (error) {
+    if (hasCommandProcessCleanupError(error)) {
+      throw new UpdateCommandPendingRecoveryFailure(
+        primaryResult(error),
+        formatErrorMessage(error),
+        { cause: error },
+      );
+    }
     try {
       run.executorFence?.assertCurrent();
     } catch (cause) {
@@ -74,7 +86,7 @@ export async function withUpdateCommandRecoveryUnwind(
     return;
   }
   if (recoveryState.ledgerHandoffOwned && !recoveryState.ledgerHandoffCompleted) {
-    let cause = failure?.error ?? new Error("Candidate finalization has no confirmed outcome.");
+    let cause = failure?.error ?? new Error("Update finalization has no confirmed outcome.");
     try {
       // Settle the existing guarded suspension without enabling a runtime whose
       // handoff did not finish. The native owner retains its own identity checks.
@@ -134,7 +146,7 @@ export async function withUpdateCommandRecoveryUnwind(
       if (failure.error instanceof UpdateCommandFailure) {
         completeUpdateCommandRun(failure.error.result, run);
       } else {
-        failUpdateCommandRun(failure.error, run);
+        failure.error = await prepareUnexpectedUpdateCommandFailure(failure.error, opts);
       }
     }
     throw failure.error;

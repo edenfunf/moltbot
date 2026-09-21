@@ -12,9 +12,11 @@ import {
   realtimeTalkDeviceIssueMessage,
   type RealtimeTalkDeviceIssue,
   type RealtimeTalkInputDevice,
-} from "../realtime-talk-input.ts";
-import type { RealtimeTalkLevelSignal } from "../realtime-talk-level.ts";
-import type { RealtimeTalkStatus } from "../realtime-talk.ts";
+} from "../talk/input.ts";
+import type { RealtimeTalkLevelSignal } from "../talk/level.ts";
+import type { RealtimeTalkStatus } from "../talk/session.ts";
+import type { RealtimeVoiceSelectionState } from "../talk/voice-selection.ts";
+import { renderRealtimeVoicePicker } from "./chat-realtime-controls.ts";
 import {
   renderChatVoiceStatus,
   renderMicrophoneActivity,
@@ -29,6 +31,7 @@ export type ChatRunControlsProps = {
   connected: boolean;
   draft: string;
   hasAttachments?: boolean;
+  preparingAttachments?: boolean;
   isBusy: boolean;
   followUpMode?: ControlUiFollowUpMode;
   alternateFollowUpMode?: ChatFollowUpMode;
@@ -50,6 +53,8 @@ export type ChatRunControlsProps = {
   onToggleVoice?: () => void;
   onToggleCamera?: () => void;
   microphonePicker?: TemplateResult | typeof nothing;
+  voice?: RealtimeVoiceSelectionState;
+  onSelectVoice?: (voice: string) => void;
 };
 
 type MicrophonePickerProps = {
@@ -593,14 +598,16 @@ export function renderChatPrimaryActions(props: ChatRunControlsProps) {
   // same slot shows stop while empty, then becomes the follow-up action as soon
   // as the operator composes content; two competing primary buttons never render.
   const sendAction = html`
-    <openclaw-tooltip .content=${sendStatus ?? activeRunActionTooltip}>
+    <openclaw-tooltip
+      .content=${props.preparingAttachments ? t("chat.composer.preparingAttachments") : (sendStatus ?? activeRunActionTooltip)}
+    >
       <button
         class="chat-send-btn chat-send-btn--send${props.sending ? " chat-send-btn--sending" : ""}"
         @pointerdown=${props.onPrimaryActionPointerDown}
         @click=${send}
         ?disabled=${!props.canSend || props.sending || Boolean(sendDisabledReason) || !hasComposedContent}
         aria-label=${sendStatus ?? activeRunActionDescription}
-        aria-busy=${sendBusy ? "true" : "false"}
+        aria-busy=${sendBusy || props.preparingAttachments ? "true" : "false"}
       >
         ${sendBusy ? html`<span class="btn__spinner" aria-hidden="true"></span>` : icons.arrowUp}
         <span class="agent-chat__control-label">${activeRunActionLabel}</span>
@@ -644,6 +651,11 @@ export function renderChatPrimaryActions(props: ChatRunControlsProps) {
     ${
       props.voiceActive && props.onToggleVoice
         ? html`
+            ${renderRealtimeVoicePicker({
+              ...props.voice,
+              disabled: !props.connected || voiceErrored,
+              onChange: props.onSelectVoice,
+            })}
             <span class="chat-talk-control chat-talk-control--active">
               <openclaw-tooltip .content=${t("chat.composer.stopVoiceInput")}>
                 <button

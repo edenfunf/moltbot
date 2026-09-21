@@ -23,6 +23,8 @@ import {
 } from "./code-mode-worker-types.js";
 
 export type CodeModeWorkerInlineHost = {
+  /** Metadata can be read synchronously, including immediately before a guest error. */
+  onNetworkContent?: () => void;
   /** Append boundary output once. Continue with the remaining shared call budget;
    * checkpoint only when genuinely parking the VM (including an internal wait). Host tools keep
    * their cell-owner signal, not the shorter-lived worker-task signal. */
@@ -158,6 +160,9 @@ export async function runCodeModeWorker(
               ) {
                 throw new Error("invalid code mode worker admission budget");
               }
+              if (value.networkContentObserved === true) {
+                inlineHost.onNetworkContent?.();
+              }
               const { onConsumed, ...input } = await inlineHost.onBoundary(
                 // SAFETY: The private worker owns this boundary, never a guest routing identity.
                 value as CodeModeWorkerBoundary,
@@ -180,6 +185,9 @@ export async function runCodeModeWorker(
             : [],
       },
     );
+    if (isRecord(message) && message.networkContentObserved === true) {
+      inlineHost?.onNetworkContent?.();
+    }
     return isRecord(message)
       ? normalizeCodeModeTimeoutResult(message as CodeModeWorkerResult)
       : failedCodeModeWorkerResult("invalid code mode worker response", "internal_error");
@@ -191,6 +199,15 @@ export async function runCodeModeWorker(
           : "code mode execution aborted",
         signal.reason instanceof CodeModeHeadlessTimeoutError ? "timeout" : "aborted",
       );
+    }
+    // A host exchange observes the same deadline as the scope that owns this run, so it
+    // can reject with the scope's own error before that scope's signal settles. Classify
+    // by the typed error too; otherwise an expired deadline reports an internal failure.
+    if (error instanceof CodeModeHeadlessTimeoutError) {
+      return failedCodeModeWorkerResult("code mode timeout exceeded", "timeout");
+    }
+    if (error instanceof CodeModeHeadlessAbortError) {
+      return failedCodeModeWorkerResult("code mode execution aborted", "aborted");
     }
     return error instanceof WorkerTaskError && error.code === "timeout"
       ? failedCodeModeWorkerResult("code mode worker timeout exceeded", "timeout")

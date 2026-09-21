@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { createHookRunner } from "../plugins/hooks.js";
@@ -6,6 +6,7 @@ import type { createPluginRegistryOwner } from "../plugins/runtime.js";
 import type { OpenClawPluginApi } from "../plugins/types.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { activeSessions } from "../transcripts/capture.js";
 import type {
   TranscriptOccupancyWatchRequest,
   TranscriptSourceProvider,
@@ -13,7 +14,6 @@ import type {
 } from "../transcripts/provider-types.js";
 import type { reloadGatewayPlugins } from "./server-plugin-reload.js";
 import type { createGatewayPluginRuntimeGeneration } from "./server-plugin-runtime-generation.js";
-import { createGatewaySidecarStopOwner } from "./server-sidecar-owners.js";
 import { startGatewayPostAttachRuntime } from "./server-startup-post-attach.js";
 
 export async function startTranscriptReloadFixtureSidecars(
@@ -30,12 +30,7 @@ export async function startTranscriptReloadFixtureSidecars(
 ) {
   const { runtime } = fixture;
   const startupWork = new AsyncWorkScope();
-  const sidecars = createGatewaySidecarStopOwner({
-    getRegistered: () => runtime.runtimeState.gatewayLifetimeSidecars,
-    setRegistered: (handles) => {
-      runtime.runtimeState.gatewayLifetimeSidecars = handles;
-    },
-  });
+  const sidecars = runtime.runtimeState.gatewayLifetimeSidecars;
   cleanups.push(async () => {
     startupWork.beginClose();
     await sidecars.stop().catch(() => {});
@@ -67,6 +62,7 @@ export async function startTranscriptReloadFixtureSidecars(
       deps: {},
       startChannels: async () => {},
       recoveryRuntime: {
+        dispatchSessionMethod: unusedRecovery,
         dispatchAgent: unusedRecovery,
         waitForAgent: unusedRecovery,
         sendRecoveryNotice: unusedRecovery,
@@ -79,6 +75,7 @@ export async function startTranscriptReloadFixtureSidecars(
       pluginRuntimeClaim: fixture.owner.currentClaim(),
       getCurrentPluginRegistry: () => fixture.registryOwner.registry,
       getCurrentPluginServices: () => fixture.owner.currentServices() ?? null,
+      onPostReadySidecars: runtime.runtimeState.postReadySidecars.publish,
       onGatewayLifetimeSidecars: sidecars.publish,
       unregisterConnectionDependentSidecar: vi.fn(),
       trackStartupWork: (run) => {
@@ -99,9 +96,7 @@ export async function startTranscriptReloadFixtureSidecars(
         start: () => {},
         stop: async () => {},
       }),
-      startGatewaySidecars: async () => ({
-        postReadySidecars: [],
-      }),
+      startGatewaySidecars: async () => 0,
       warmSystemCa: async () => {},
       loadSubagentRegistryActivation: () => () => {},
     },
@@ -139,15 +134,25 @@ export function registerTranscriptFixture(api: OpenClawPluginApi, owner: "first"
     },
     stop,
   });
+  const waitForCapture = async (count: number, signal: AbortSignal) => {
+    while (captures.length < count) {
+      await racePromiseWithAbortSignal(nextCapture.promise, signal);
+    }
+  };
   return {
     watches,
     captures,
     unwatch,
     stop,
-    async waitForCapture(count: number, signal: AbortSignal) {
-      while (captures.length < count) {
-        await racePromiseWithAbortSignal(nextCapture.promise, signal);
-      }
+    waitForCapture,
+    async waitForActiveCapture(count: number, signal: AbortSignal) {
+      // Gateway readiness precedes deferred capture startup and its session write.
+      await waitForCapture(count, signal);
+      await vi.waitFor(() => {
+        expect(captures).toHaveLength(count);
+        expect(activeSessions.get(captures[count - 1]!.session.sessionId)?.phase).toBe("active");
+      });
+      return captures[count - 1]!;
     },
   };
 }

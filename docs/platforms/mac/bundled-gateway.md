@@ -40,6 +40,12 @@ user-space Node runtime and the matching `openclaw` CLI under `~/.openclaw`,
 then installs and starts the per-user launchd service. This path needs no
 Terminal, Homebrew, or administrator access.
 
+The installer uses a private temporary directory for downloads and build tools.
+If the app's inherited temporary directory is inaccessible, setup automatically
+uses a private directory under `/tmp` and removes it when the installer exits.
+This also avoids macOS temporary-directory permission errors without installing
+the CLI as root.
+
 Gateway setup still needs an internet connection to download its separate
 runtime and matching OpenClaw package. The bundled installer owns that setup;
 the private worker is not a replacement for a CLI or Gateway installation.
@@ -90,6 +96,10 @@ Behavior:
 - Quitting the app does **not** stop the Gateway (launchd keeps it alive).
 - If a Gateway is already running on the configured port, the app attaches to
   it instead of starting a new one.
+- Other listeners are left running. Resolve port conflicts through the process
+  or service that owns them; automatic cleanup only reaps recorded orphaned SSH tunnels.
+- If service inspection is inconclusive, the app defers installation and uses
+  its existing readiness checks. A service confirmed absent can still be installed.
 
 Use the CLI for lifecycle checks and recovery:
 

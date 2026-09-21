@@ -207,7 +207,9 @@ openclaw gateway stop
 
 Use `openclaw gateway restart` for restarts. Do not chain `openclaw gateway stop` and `openclaw gateway start` as a restart substitute.
 
-On macOS, `gateway stop` uses `launchctl bootout` by default. This removes the LaunchAgent from the current boot session without persisting a disable, so KeepAlive auto-recovery still works after unexpected crashes and `gateway start` re-enables cleanly. To persistently suppress auto-respawn across reboots, pass `--disable`: `openclaw gateway stop --disable`.
+On macOS, `gateway stop` uses `launchctl bootout` and verifies that the LaunchAgent is unloaded and its process has exited before reporting success. This removes the LaunchAgent from the current boot session without persisting a disable, so KeepAlive auto-recovery still works after unexpected crashes and `gateway start` re-enables cleanly. To also persistently suppress auto-respawn across reboots, pass `--disable`: `openclaw gateway stop --disable`.
+
+If shutdown cannot be verified, the command fails with the exact `launchctl bootout gui/<uid>/<label>` command to run from an external terminal in the service owner's logged-in macOS session. A free Gateway port alone does not prove that the service is stopped.
 
 LaunchAgent labels are `ai.openclaw.gateway` (default) or `ai.openclaw.<profile>` (named profile). `openclaw doctor` audits and repairs service config drift.
 
@@ -242,6 +244,18 @@ sudo loginctl enable-linger $(whoami)
 
 On a headless server without a desktop session, also make sure `XDG_RUNTIME_DIR` is set (`export XDG_RUNTIME_DIR=/run/user/$(id -u)`) before retrying `systemctl --user` commands.
 
+Service inspection preserves an explicit `DBUS_SESSION_BUS_ADDRESS` that reaches
+the user manager. Otherwise it tries `$XDG_RUNTIME_DIR/bus`, then the private
+manager socket for inspection. Install, status, and update admission reuse the
+selected route; `gateway status --deep` shows it. Update admission rechecks routes
+that timed out during earlier discovery. A socket's existence alone does
+not replace a working custom bus. If no route reaches the manager, check
+`XDG_RUNTIME_DIR`, log in once
+or enable lingering, and verify `systemctl --user status`. On Debian/Ubuntu,
+`dbus-user-session` provides the user bus; start it with
+`systemctl --user start dbus.socket` if needed. An absent unit is safe to install;
+an unreadable existing definition must be repaired by its owner first.
+
 Manual user-unit example when you need a custom install path:
 
 ```ini
@@ -267,7 +281,7 @@ KillMode=mixed
 WantedBy=default.target
 ```
 
-`TimeoutStopSec=330` covers the Gateway's five-minute cooperative drain plus teardown reserve. To inspect the current managed unit body, run `systemctl --user cat openclaw-gateway.service` (or `systemctl --user cat openclaw-gateway-<profile>.service` for a named profile).
+`TimeoutStopSec=330` covers the Gateway's maximum 315-second stop drain plus a 15-second cleanup and exit margin. The Gateway clamps its drain to the installed unit's effective stop timeout; see [Systemd stop deadlines](/gateway/restart-recovery#systemd-stop-deadlines). To inspect the current managed unit body, run `systemctl --user cat openclaw-gateway.service` (or `systemctl --user cat openclaw-gateway-<profile>.service` for a named profile).
 
   </Tab>
 
@@ -314,6 +328,14 @@ host, the user unit above with `loginctl enable-linger` is the supported way
 to keep the Gateway running without a login session.
 
 Do not also let `openclaw doctor --fix` install a user-level gateway service for the same profile/port. Doctor refuses that automatic install when it finds a system-level OpenClaw gateway service; use `OPENCLAW_SERVICE_REPAIR_POLICY=external` when the system unit owns the lifecycle.
+
+`openclaw gateway status --deep` inspects the installed system unit and reports
+`systemd system`. Run Doctor from the non-root `User=` account with the same state
+and config paths. For offline repair, stop the unit through its system service
+owner first, run `openclaw doctor --fix`, then start the unit through that owner.
+Doctor can verify a stopped system unit without rewriting its definition or
+creating a competing user service. An unavailable manager or an unverified
+service account still blocks maintenance.
 
 After writing the unit, reload systemd and enable it:
 

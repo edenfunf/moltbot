@@ -1,4 +1,3 @@
-// Line plugin module implements bot message context behavior.
 import type { webhook } from "@line/bot-sdk";
 import { resolveAccessGroupAllowFromState } from "openclaw/plugin-sdk/access-groups";
 import { isSenderIdAllowed } from "openclaw/plugin-sdk/allow-from";

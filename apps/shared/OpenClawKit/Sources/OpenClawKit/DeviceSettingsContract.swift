@@ -12,6 +12,7 @@ public enum DeviceSettingKey: String, CaseIterable, Sendable {
     case appearance = "app.appearance"
     case notificationsEnabled = "app.notificationsEnabled"
     case showDockIcon = "app.showDockIcon"
+    case nativeExperienceEnabled = "app.nativeExperienceEnabled"
     case iconStyle = "app.iconStyle"
     case iconAnimationsEnabled = "app.iconAnimationsEnabled"
     case launchAtLogin = "app.launchAtLogin"
@@ -21,6 +22,7 @@ public enum DeviceSettingKey: String, CaseIterable, Sendable {
     case healthSummaryEnabled = "capabilities.healthSummaryEnabled"
     case canvasEnabled = "capabilities.canvasEnabled"
     case cameraEnabled = "capabilities.cameraEnabled"
+    case desktopSharingEnabled = "capabilities.desktopSharingEnabled"
     case computerControlEnabled = "capabilities.computerControlEnabled"
     case computerControlProvider = "capabilities.computerControlProvider"
     case peekabooBridgeEnabled = "capabilities.peekabooBridgeEnabled"
@@ -97,7 +99,7 @@ public enum DeviceSettingsPanel: String, CaseIterable, Sendable {
 
 public enum DeviceSettingsPermission: String, CaseIterable, Encodable, Sendable {
     case notifications, accessibility, screenRecording, microphone
-    case camera, speechRecognition, location, automation
+    case camera, speechRecognition, location
     case contacts, calendars, reminders, photos
 }
 
@@ -136,6 +138,7 @@ public enum DeviceSettingsRequest: Equatable, Sendable {
     case openSystemSettings(DeviceSettingsPermission)
     case open(DeviceSettingsPanel)
     case checkForUpdates
+    case chromeExtensionStatus
     case installChromeExtension
 
     public init?(body: Any) {
@@ -156,6 +159,9 @@ public enum DeviceSettingsRequest: Equatable, Sendable {
             else { return nil }
             self = .open(panel)
         case "check-for-updates": self = .checkForUpdates
+        case "chrome-extension-status":
+            guard payload.count == 1 else { return nil }
+            self = .chromeExtensionStatus
         case "install-chrome-extension":
             guard payload.count == 1 else { return nil }
             self = .installChromeExtension
@@ -251,6 +257,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
 
     public struct App: Encodable, Sendable {
         public let showDockIcon: Bool?
+        public let nativeExperienceEnabled: Bool?
         public let iconStyle: IconStyle?
         public let iconAnimationsEnabled: Bool?
         public let launchAtLogin: Bool?
@@ -264,6 +271,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
 
         public init(
             showDockIcon: Bool? = nil,
+            nativeExperienceEnabled: Bool? = nil,
             iconStyle: IconStyle? = nil,
             iconAnimationsEnabled: Bool? = nil,
             launchAtLogin: Bool? = nil,
@@ -275,6 +283,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
             notificationsEnabled: Bool? = nil)
         {
             self.showDockIcon = showDockIcon
+            self.nativeExperienceEnabled = nativeExperienceEnabled
             self.iconStyle = iconStyle
             self.iconAnimationsEnabled = iconAnimationsEnabled
             self.launchAtLogin = launchAtLogin
@@ -303,6 +312,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
     public struct Capabilities: Encodable, Sendable {
         public let canvasEnabled: Bool?
         public let cameraEnabled: Bool?
+        public let desktopSharingEnabled: Bool?
         public let computerControlEnabled: Bool?
         public let computerControlProvider: String?
         public let cuaDriverBundled: Bool?
@@ -316,6 +326,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
         public init(
             canvasEnabled: Bool? = nil,
             cameraEnabled: Bool? = nil,
+            desktopSharingEnabled: Bool? = nil,
             computerControlEnabled: Bool? = nil,
             computerControlProvider: String? = nil,
             cuaDriverBundled: Bool? = nil,
@@ -328,6 +339,7 @@ public struct DeviceSettingsSnapshot: Encodable, Sendable {
         {
             self.canvasEnabled = canvasEnabled
             self.cameraEnabled = cameraEnabled
+            self.desktopSharingEnabled = desktopSharingEnabled
             self.computerControlEnabled = computerControlEnabled
             self.computerControlProvider = computerControlProvider
             self.cuaDriverBundled = cuaDriverBundled

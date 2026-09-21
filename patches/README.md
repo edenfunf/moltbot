@@ -2,11 +2,24 @@
 
 Keep existing insertion anchors when extending these patches: pnpm 12 can apply a zero-context, zero-length insertion one line early. After regeneration and installation, verify installed files against the patch's target blob hashes before testing.
 
+`chrome-devtools-mcp@1.8.0` has an approved exact-version snapshot-identity patch, backported from [ChromeDevTools/chrome-devtools-mcp#2788](https://github.com/ChromeDevTools/chrome-devtools-mcp/pull/2788) at `06c8d4bc44f68bde8bd3fcd97dcc47375df81fe9`. Stable IDs include the frame's captured CDP session and document generation; ambiguous IDs stay capture-local, and stale lazy handles cannot resolve into a replacement renderer. Frame-local lookup and retained extra handles preserve actions and labeled screenshots. The published bundle also needs its existing `CdpFrame` export exposed. Original license notices remain intact, with modifications recorded in `build/src/OPENCLAW_PATCH_NOTICE.md`.
+
+The published integrity is `sha512-Wrm9z0/5WbVs778apjWgYRkpe9bvYQWjK2zVRwqoPAtz1IHQ5+GvotM07UGXJcfrA0rj6Gt1Pnn5+w/Tf1nU4w==`; the patch SHA-256 is `c9e9590160eb099415e7ff6e705b0e0f725e364419f91153a0207e31a71f8547`.
+
+| Target | Published SHA-256 | Patched SHA-256 |
+| --- | --- | --- |
+| `build/src/TextSnapshot.js` | `f3496989b93d174723fcf394628fabc36936b37e6a815fd85cbe20fba46d5ea0` | `299833ad0e4cfc171a417afaec41df594e4862fe53a7ada6ba160409f979788b` |
+| `build/src/McpPage.js` | `24c2dd374c2f48c02069d2e21fa2cb006a3771f7faa5dee3fccca798d7345641` | `b9e791d758e4d28589525e2d427600e24b271d365a5879893a392043a11cf426` |
+| `build/src/third_party/index.js` | `f8d1c452d8a10734929e87d46151fff0d12651ae2d2a3e2e7aed0ed28fbdb4cb` | `a8f5cb1e02405d347117114141b58572f71c083861fb50ab31a27511e3a279bf` |
+| `build/src/OPENCLAW_PATCH_NOTICE.md` | Added | `8f5a32aaedf4bb6f8ad39f226bd343bf804132c11ebc6c3c19f667669856287c` |
+
+The root package bundles this patched dependency so npm installations preserve the same bytes as pnpm source installs. Browser launches the packaged CLI directly with Node. Remove this patch, its registration, and the patch-specific package checks when a published upstream version passes `pnpm test:e2e:browser-mcp` and the installed-package stdio proof, including renderer replacement, cross-origin frames, cancellation, and snapshot → wait → action.
+
 `@novnc/novnc@1.7.0` has an approved temporary patch for ignored extended-clipboard payloads. The RFB owner consumes the remaining compressed bytes before returning for view-only clients or unsupported clipboard formats. It does not inflate or publish ignored clipboard data, and controlling text clipboard handling stays unchanged. This keeps clipboard bytes from becoming the next RFB message and disconnecting WebVNC.
 
 Remove the noVNC patch, its registration, and its exact-version guard exception when an upstream version passes the Desktop panel and document browser suites (`test/vitest/vitest.ui-e2e.config.ts`) and the live view-only selection/type stress check. The regression uses the real noVNC parser, covers coalesced and fragmented payload delivery, and requires the next framebuffer update without a reconnect.
 
-`matrix-js-sdk@42.2.0` has an approved temporary patch for saved-sync verification replay. Classic sync propagates its existing cache provenance through ordinary client events, and the crypto listener ignores restored events. This preserves room history, sync cursors, ordinary event listeners, fresh verification events, and to-device processing while preventing cached verification requests from restarting after a clean client shutdown.
+`matrix-js-sdk@42.3.0` has an approved temporary patch for saved-sync verification replay. Classic sync propagates its existing cache provenance through ordinary client events, and the crypto listener ignores restored events. This preserves room history, sync cursors, ordinary event listeners, fresh verification events, and to-device processing while preventing cached verification requests from restarting after a clean client shutdown. Version 42.3.0 still routes restored events into crypto, so the patch remains necessary.
 
 Remove the Matrix patch, its registration, and its exact-version guard exception when an upstream release passes `node scripts/run-vitest.mjs extensions/matrix/src/matrix/client/file-sync-store.sdk.test.ts` and the full Matrix QA catalog, including the original DM SAS-to-QR sequence. The regression exercises the real SQLite sync store, SDK cache hydration, and crypto event wiring; it observes crypto input rather than substituting for native verification proof.
 
@@ -15,12 +28,13 @@ runner, and `@vitest/runner@5.0.0` is not published, so no standalone runner
 dependency or patch remains. The published package integrity is
 `sha512-gpsMNoRhMjMktVxPtstOH4/PJuPyovVaMDr4oDilXaGH1EcqM2OE96SoHT2VIQ6fTGtTjqmHDrEu2X9RQiXf8Q==`.
 The patch SHA-256 is
-`76a69c6de8bc85bb68eebebddf7e1e798a4ebf46d36ad60e6447ebc62c49f702`
-and it changes exactly these seven published files:
+`883cdb073fe7cc1097c58700a80e0fe180b3d08a5313222fa91eeb989849c675`
+and it changes exactly these eight published files:
 
 | Target | Published SHA-256 | Patched SHA-256 |
 | --- | --- | --- |
 | `dist/chunks/cac.D805sv8h.js` | `a0971660b8c52884366a1ca3dceb6a7eb7ff41e2e3cfaed27b98395ed054e1d0` | `f37acc539be54a668448c9ae1faeacc4b37df68f81952a21001c377a775da55e` |
+| `dist/chunks/index.1_nbEjJY.js` | `9868c71ba3a06ca6f9890c60a9e6b298762b0fca74b09595a8f76340d3f92fe9` | `ad9069287604e97d9e965f7f5a74dc5d23da2e8420ce1cbd2d051765d37d900b` |
 | `dist/chunks/index.B89dZ0-N.js` | `7ae1406d3a808a5a2915895eede01e4e79fac5838f5a6457adbffd78df1bf56d` | `54a978632cf3584e4507bed3f09ba22d6f344ec45bac5ea37fda0b9718b59e58` |
 | `dist/chunks/index.OVGXnVRj.js` | `57c89e884bab20623afc06a58119c70c4f2e06397ae63e961ad0a0810c9a94b5` | `c4b8a1c9f865c4719d1bf01d871d89fd405b9a3141f2ef9bc9690e1d5078d0a8` |
 | `dist/chunks/init-forks.CiCtIMPj.js` | `ef8cf8283d7b420d2fae017b8f284555ed67e207ea12fa9f53ab28421168adfc` | `ce9b827f016907bd054c9c8041e70db67ba28943c13a0b66b8551b5b51f1fafa` |
@@ -30,6 +44,14 @@ and it changes exactly these seven published files:
 
 The patch owns these temporary invariants and removal gates:
 
+- **Mock resolution (`index.1_nbEjJY.js`):** module fetches join the mocker's
+  serialized resolution before reading its registry, even after the pending-id
+  queue is emptied by an in-flight pass. Resolution drains ids queued during a
+  pass; failed callers retain their errors without poisoning later callers.
+  Shared-worker cleanup joins the native completion tail. Remove this hunk when
+  stock Vitest passes `test/scripts/vitest-mock-resolution.test.ts` and the
+  original cold Gateway CI group containing
+  `authenticated-request-dispatch.lifetime.test.ts`.
 - **CLI validation (`cac.D805sv8h.js`):** public `parseCLI` validates unknown
   options, required values, and required arguments without executing a command.
   Help/version and `allowUnknownOptions` retain native semantics. Remove this

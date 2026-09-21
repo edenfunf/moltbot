@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHAT_ROUTE_READY_EVENT } from "../../app/route-transition.ts";
 import { consumeSessionNavigationHandoff } from "../../lib/sessions/navigation-handoff.ts";
+import { CHAT_ROUTE_READY_EVENT } from "../chat/chat-history-events.ts";
 import { createDraftFixture } from "./draft-submission-flow.test-support.ts";
 
 afterEach(() => {
@@ -24,10 +24,13 @@ describe("confirmed session navigation", () => {
       }),
     );
     vi.mocked(context.navigateAndWait).mockImplementation(async (_routeId, options) => {
-      expect(options?.pathname).toBe("/chat/main/0f403cb8");
-      expect(consumeSessionNavigationHandoff(context.gateway, "/chat/main/0f403cb8")).toBe(
-        sessionKey,
-      );
+      expect(options?.pathname).toBe("/chat/main/0f403cb839204cf18eb779f2f00ce488");
+      expect(
+        consumeSessionNavigationHandoff(
+          context.gateway,
+          "/chat/main/0f403cb839204cf18eb779f2f00ce488",
+        ),
+      ).toBe(sessionKey);
       queueMicrotask(() => document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT)));
     });
     flow.setMessage("start this task");
@@ -62,6 +65,8 @@ describe("confirmed session navigation", () => {
     expect(context.navigateAndWait).toHaveBeenCalledOnce();
     expect(flow.error).toBe("Chat route failed to load");
     expect(flow.submitting).toBe(false);
+    expect(flow.pendingMessage?.content).toContainEqual({ type: "text", text: "start this task" });
+    expect(flow.completedSubmission?.key).toBe("agent:main:dashboard:created");
 
     const readSignal = flow.attachmentDraft.readSignal;
     flow.attachmentDraft.updatePending(readSignal, 1);
@@ -73,12 +78,63 @@ describe("confirmed session navigation", () => {
     flow.attachmentDraft.updatePending(readSignal, -1);
 
     expect(flow.canSubmit()).toBe(true);
-    await flow.submit();
+    await flow.openSubmittedSession();
 
     expect(context.navigateAndWait).toHaveBeenCalledTimes(2);
     expect(context.sessions.createResult).toHaveBeenCalledOnce();
     expect(flow.error).toBeNull();
   });
+
+  it.each(["ready", "hello-known", "scope-pending"])(
+    "keeps a background prompt readable and opens it without another create (%s)",
+    async (scopeState) => {
+      const { context, flow } = createDraftFixture({
+        request: async (method) => (method === "agent.wait" ? { status: "ok", endedAt: 1 } : {}),
+      });
+      const key = "agent:main:dashboard:background-visible";
+      if (scopeState !== "ready") {
+        Object.assign(context.gateway.snapshot.client!, {
+          recoveryScope: "",
+          recoveryScopeReady: false,
+        });
+        if (scopeState === "scope-pending") {
+          delete context.gateway.snapshot.hello!.auth!.recoveryScope;
+        }
+      }
+      vi.mocked(context.sessions.createResult).mockResolvedValue({
+        key,
+        initialRun: { status: "started", runId: "background-run" },
+      });
+      flow.setMessage("keep this background prompt visible");
+      await flow.submit(undefined, true);
+      expect(flow.message).toBe("");
+      expect(flow.pendingMessage?.content).toContainEqual({
+        type: "text",
+        text: "keep this background prompt visible",
+      });
+      expect(flow.submitting).toBe(false);
+      expect(context.navigateAndWait).not.toHaveBeenCalled();
+      Object.assign(context.gateway.snapshot.client!, {
+        recoveryScope: "principal-a",
+        recoveryScopeReady: true,
+      });
+      expect(flow.pendingMessage?.content).toContainEqual({
+        type: "text",
+        text: "keep this background prompt visible",
+      });
+      vi.mocked(context.navigateAndWait).mockImplementation(async () => {
+        queueMicrotask(() => document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT)));
+      });
+      await flow.openSubmittedSession();
+      expect(context.navigateAndWait).toHaveBeenCalledOnce();
+      expect(context.sessions.createResult).toHaveBeenCalledOnce();
+      const auth = context.gateway.snapshot.hello!.auth!;
+      auth.recoveryScope = "another-account";
+      expect(flow.pendingMessage).toBeNull();
+      await flow.openSubmittedSession();
+      expect(context.navigateAndWait).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     {
@@ -124,7 +180,10 @@ describe("confirmed session navigation", () => {
       await flow.submit();
 
       expect(
-        consumeSessionNavigationHandoff(context.gateway, "/chat/main/0f403cb8"),
+        consumeSessionNavigationHandoff(
+          context.gateway,
+          "/chat/main/0f403cb839204cf18eb779f2f00ce488",
+        ),
       ).toBeUndefined();
       expect(context.navigateAndWait).not.toHaveBeenCalled();
       expect(context.sessions.createResult).toHaveBeenCalledOnce();
@@ -134,6 +193,7 @@ describe("confirmed session navigation", () => {
   it.each([
     {
       scenario: "the user edits the draft",
+      hasNewDraft: true,
       retire: ({ flow }: ReturnType<typeof createDraftFixture>) => flow.setMessage("a new task"),
     },
     {
@@ -172,36 +232,49 @@ describe("confirmed session navigation", () => {
         }
       },
     },
-  ])("never retries a committed session after $scenario", async ({ retire }) => {
-    const fixture = createDraftFixture({
-      scopes: ["operator.admin", "operator.read", "operator.write"],
-      agents: [
-        { id: "main", workspace: "/workspace", model: { primary: "openai/test" } },
-        { id: "other", workspace: "/workspace", model: { primary: "openai/test" } },
-      ],
-    });
-    const { context, flow } = fixture;
-    vi.mocked(context.sessions.createResult)
-      .mockResolvedValueOnce({ key: "agent:main:dashboard:old", initialRun: { status: "idle" } })
-      .mockImplementationOnce(async (params) => ({
-        key: `agent:${params?.agentId ?? fixture.place.agentId}:dashboard:new`,
-        initialRun: { status: "idle" },
-      }));
-    vi.mocked(context.navigateAndWait)
-      .mockRejectedValueOnce(new Error("old navigation failed"))
-      .mockImplementationOnce(async () => {
-        queueMicrotask(() => document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT)));
+  ])(
+    "never retries a committed session after $scenario",
+    async ({ retire, hasNewDraft = false }) => {
+      const fixture = createDraftFixture({
+        scopes: ["operator.admin", "operator.read", "operator.write"],
+        agents: [
+          { id: "main", workspace: "/workspace", model: { primary: "openai/test" } },
+          { id: "other", workspace: "/workspace", model: { primary: "openai/test" } },
+        ],
       });
-    flow.setMessage("the committed task");
-    await flow.submit();
+      const { context, flow } = fixture;
+      vi.mocked(context.sessions.createResult)
+        .mockResolvedValueOnce({ key: "agent:main:dashboard:old", initialRun: { status: "idle" } })
+        .mockImplementationOnce(async (params) => ({
+          key: `agent:${params?.agentId ?? fixture.place.agentId}:dashboard:new`,
+          initialRun: { status: "idle" },
+        }));
+      vi.mocked(context.navigateAndWait)
+        .mockRejectedValueOnce(new Error("old navigation failed"))
+        .mockImplementationOnce(async () => {
+          queueMicrotask(() => document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT)));
+        });
+      flow.setMessage("the committed task");
+      await flow.submit();
 
-    retire(fixture);
-    await flow.submit();
+      retire(fixture);
+      expect(flow.canSubmit()).toBe(hasNewDraft);
+      if (!hasNewDraft) {
+        await flow.submit();
+        expect(context.sessions.createResult).toHaveBeenCalledOnce();
+        expect(context.navigateAndWait).toHaveBeenCalledOnce();
+        flow.setMessage("a new task");
+      }
+      await flow.submit();
 
-    expect(context.sessions.createResult).toHaveBeenCalledTimes(2);
-    expect(context.gateway.snapshot.sessionKey).toBe(
-      `agent:${fixture.place.agentId}:dashboard:new`,
-    );
-    expect(context.navigateAndWait).toHaveBeenCalledTimes(2);
-  });
+      expect(context.sessions.createResult).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(context.sessions.createResult).mock.calls[1]?.[0]?.message).toBe(
+        "a new task",
+      );
+      expect(context.gateway.snapshot.sessionKey).toBe(
+        `agent:${fixture.place.agentId}:dashboard:new`,
+      );
+      expect(context.navigateAndWait).toHaveBeenCalledTimes(2);
+    },
+  );
 });

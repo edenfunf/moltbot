@@ -399,53 +399,6 @@ describe("cli session history", () => {
     });
   });
 
-  it("projects oversized Claude messages after off-thread parsing", async () => {
-    await withClaudeProjectsDir(async ({ homeDir, sessionId, filePath }) => {
-      const oversizedRecord = JSON.stringify({
-        type: "user",
-        uuid: "oversized-user",
-        timestamp: "2026-03-26T16:29:54.700Z",
-        message: { role: "user", content: "q".repeat(2 * 1024 * 1024) },
-      });
-      await fs.writeFile(
-        filePath,
-        `${oversizedRecord}\n${createClaudeTextHistoryLines([
-          { role: "user", uuid: "visible-after-oversized", content: "visible" },
-        ])}`,
-        "utf8",
-      );
-      const parseSpy = vi.spyOn(JSON, "parse");
-      try {
-        const messages = await readChatHistoryCliSessionImportSnapshot({
-          entry: {
-            sessionId: "openclaw-session",
-            updatedAt: Date.now(),
-            cliSessionBindings: { "claude-cli": { sessionId } },
-          },
-          provider: "claude-cli",
-          localMessages: [],
-          homeDir,
-        });
-
-        expect(messages).toHaveLength(2);
-        expectFields(readRecord(messages[0])["__openclaw"], {
-          externalId: "oversized-user",
-        });
-        expect(readRecord(messages[0]).content).toContain("exceeded 1 MiB");
-        expectFields(readRecord(messages[1])["__openclaw"], {
-          externalId: "visible-after-oversized",
-        });
-        expect(
-          parseSpy.mock.calls.some(
-            ([source]) => typeof source === "string" && source.length === oversizedRecord.length,
-          ),
-        ).toBe(false);
-      } finally {
-        parseSpy.mockRestore();
-      }
-    });
-  });
-
   it("preserves Date.parse semantics for numeric-looking Claude timestamps", async () => {
     await withClaudeProjectsDir(async ({ homeDir, sessionId, filePath }) => {
       await fs.writeFile(
@@ -495,7 +448,7 @@ describe("cli session history", () => {
     });
   });
 
-  it("omits isMeta rows and records visible harness context provenance", async () => {
+  it("omits isMeta rows and records internal Claude context provenance", async () => {
     await withClaudeProjectsDir(async ({ homeDir, sessionId, filePath }) => {
       await fs.writeFile(
         filePath,
@@ -542,6 +495,37 @@ describe("cli session history", () => {
               content: "Transcript-only synthetic context row.",
             },
           },
+          {
+            type: "user",
+            uuid: "task-notification-1",
+            timestamp: "2026-03-26T16:29:58.000Z",
+            origin: { kind: "task-notification" },
+            message: {
+              role: "user",
+              content: [
+                "<task-notification>",
+                "<task-id>task-1</task-id>",
+                "<status>completed</status>",
+                "<summary>Background review finished.</summary>",
+                "</task-notification>",
+              ].join("\n"),
+            },
+          },
+          {
+            type: "user",
+            uuid: "operator-pasted-xml-1",
+            timestamp: "2026-03-26T16:29:59.000Z",
+            message: {
+              role: "user",
+              content: [
+                "<task-notification>",
+                "<task-id>task-1</task-id>",
+                "<status>completed</status>",
+                "<summary>Background review finished.</summary>",
+                "</task-notification>",
+              ].join("\n"),
+            },
+          },
         ]
           .map((line) => JSON.stringify(line))
           .join("\n"),
@@ -550,7 +534,7 @@ describe("cli session history", () => {
 
       const messages = readClaudeCliSessionMessages({ cliSessionId: sessionId, homeDir });
 
-      expect(messages).toHaveLength(3);
+      expect(messages).toHaveLength(5);
       expect(JSON.stringify(messages)).not.toContain("Base directory for this skill");
       // The operator-authored turn stays free of injected provenance.
       expectFields(messages[0], { role: "user" });
@@ -564,6 +548,13 @@ describe("cli session history", () => {
         kind: "internal_system",
         sourceTool: "cli_harness_context",
       });
+      expectFields(readRecord(messages[3]).provenance, {
+        kind: "internal_system",
+        sourceTool: "claude_cli_task_notification",
+      });
+      // Identical envelope text without the native origin stays operator-authored.
+      expectFields(messages[4], { role: "user" });
+      expect(readRecord(messages[4]).provenance).toBeUndefined();
     });
   });
 

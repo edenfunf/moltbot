@@ -10,7 +10,6 @@ import {
   formatChannelProgressDraftText,
   getChannelStreamingConfigObject,
   isChannelProgressDraftWorkToolName,
-  isPotentialTruncatedFinal,
   mergeChannelProgressDraftLine,
   resolveChannelPreviewStreamMode,
   resolveChannelProgressDraftMaxLineChars,
@@ -24,8 +23,6 @@ import {
   resolveChannelStreamingPreviewChunk,
   resolveChannelStreamingSuppressDefaultToolProgressMessages,
   resolveChannelStreamingPreviewToolProgress,
-  resolveTranscriptBackedChannelFinalText,
-  selectLongerFinalText,
 } from "./streaming.js";
 
 const DEFAULT_PROGRESS_DRAFT_INITIAL_DELAY_MS = 1_500;
@@ -145,58 +142,6 @@ describe("channel-streaming", () => {
         },
       ),
     ).toBe(false);
-  });
-
-  it("keeps complete replies with long blank runs without stalling or reading candidates", async () => {
-    const finalText = `before${"\n".repeat(60_000)}after`;
-    const resolveCandidateText = vi.fn(async () => "unused");
-    const started = performance.now();
-    await expect(
-      resolveTranscriptBackedChannelFinalText({ finalText, resolveCandidateText }),
-    ).resolves.toBe(finalText);
-    expect(performance.now() - started).toBeLessThan(1_000);
-    expect(resolveCandidateText).not.toHaveBeenCalled();
-  });
-
-  it("selects a longer transcript candidate for ellipsis-truncated finals", async () => {
-    const fullAnswer =
-      "Here is the complete final answer with enough stable prefix text before the ellipsis and enough continuation text after it.";
-    const truncatedFinal =
-      "Here is the complete final answer with enough stable prefix text before the ellipsis...";
-
-    expect(isPotentialTruncatedFinal(truncatedFinal)).toBe(true);
-    expect(
-      selectLongerFinalText({
-        finalText: truncatedFinal,
-        candidateTexts: ["short", fullAnswer],
-      }),
-    ).toBe(fullAnswer);
-    await expect(
-      resolveTranscriptBackedChannelFinalText({
-        finalText: truncatedFinal,
-        resolveCandidateText: async () => fullAnswer,
-      }),
-    ).resolves.toBe(fullAnswer);
-  });
-
-  it("keeps intentional ellipsis finals when candidates do not prove truncation", async () => {
-    const finalText =
-      "Here is the complete final answer with enough stable prefix text before an intentional pause...";
-    const candidateText =
-      "Here is the complete final answer with enough stable prefix text before an intentional pause... then punctuation";
-
-    expect(
-      selectLongerFinalText({
-        finalText,
-        candidateTexts: [candidateText],
-      }),
-    ).toBeUndefined();
-    await expect(
-      resolveTranscriptBackedChannelFinalText({
-        finalText,
-        resolveCandidateText: async () => candidateText,
-      }),
-    ).resolves.toBe(finalText);
   });
 
   it("suppresses standalone tool progress for active preview drafts", () => {
@@ -710,6 +655,198 @@ describe("channel-streaming", () => {
     const again = mergeChannelProgressDraftLine(finished, outputLine, { maxLines: 4 });
     expect(again).toHaveLength(1);
     expect(again[0]?.id).toBe("tool:call-1");
+  });
+
+  it("keeps the shown command detail when command output restates the command", () => {
+    // The output event's title is the agent's item title ("command <meta>"),
+    // a second description of the command the tool line already shows.
+    const toolLine = buildChannelProgressDraftLine(
+      {
+        event: "tool",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "start",
+        args: { command: "pnpm test" },
+      },
+      { commandText: "raw" },
+    );
+    const failedOutput = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "command run tests",
+        exitCode: 1,
+      },
+      { commandText: "raw" },
+    );
+    const completedOutput = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "command run tests",
+        exitCode: 0,
+      },
+      { commandText: "raw" },
+    );
+    if (!toolLine || !failedOutput || !completedOutput) {
+      throw new Error("expected exec progress lines");
+    }
+    expect(toolLine.detail).toBe("run tests");
+    expect(failedOutput.detail).toBe("command run tests");
+
+    const failed = mergeChannelProgressDraftLine([toolLine], failedOutput, { maxLines: 4 });
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({
+      kind: "command-output",
+      detail: "run tests",
+      status: "exit 1",
+      text: "🛠️ exit 1; run tests",
+    });
+
+    const completed = mergeChannelProgressDraftLine([toolLine], completedOutput, { maxLines: 4 });
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({
+      kind: "command-output",
+      detail: "run tests",
+      status: "completed",
+      text: "🛠️ run tests",
+    });
+
+    const capitalizedOutput = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "Command  run tests",
+        exitCode: 1,
+      },
+      { commandText: "raw" },
+    );
+    if (!capitalizedOutput) {
+      throw new Error("expected exec progress line");
+    }
+    const capitalized = mergeChannelProgressDraftLine([toolLine], capitalizedOutput, {
+      maxLines: 4,
+    });
+    expect(capitalized[0]).toMatchObject({ detail: "run tests", text: "🛠️ exit 1; run tests" });
+  });
+
+  it("keeps the line's detail when command output repeats it exactly", () => {
+    const toolLine = buildChannelProgressDraftLine(
+      {
+        event: "tool",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "start",
+        args: { command: "pnpm test" },
+      },
+      { commandText: "raw" },
+    );
+    const output = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "run tests",
+        exitCode: 1,
+      },
+      { commandText: "raw" },
+    );
+    if (!toolLine || !output) {
+      throw new Error("expected exec progress lines");
+    }
+    expect(toolLine.detail).toBe("run tests");
+    expect(output.detail).toBe("run tests");
+
+    const merged = mergeChannelProgressDraftLine([toolLine], output, { maxLines: 4 });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual({ ...output, id: expect.any(String) });
+    expect(merged[0]).toMatchObject({
+      kind: "command-output",
+      detail: "run tests",
+      status: "exit 1",
+      text: "🛠️ exit 1; run tests",
+    });
+  });
+
+  it("replaces the shown detail when command output carries a different one", () => {
+    // Only a restatement of the shown command is dropped; a command-output
+    // line that carries its own text (output, a different description) must
+    // not lose it to the earlier detail.
+    const toolLine = buildChannelProgressDraftLine(
+      {
+        event: "tool",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "start",
+        args: { command: "pnpm test" },
+      },
+      { commandText: "raw" },
+    );
+    const output = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "3 tests failed",
+        exitCode: 1,
+      },
+      { commandText: "raw" },
+    );
+    if (!toolLine || !output) {
+      throw new Error("expected exec progress lines");
+    }
+    expect(toolLine.detail).toBe("run tests");
+    expect(output.detail).toBe("3 tests failed");
+
+    const merged = mergeChannelProgressDraftLine([toolLine], output, { maxLines: 4 });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      kind: "command-output",
+      detail: "3 tests failed",
+      status: "exit 1",
+      text: "🛠️ exit 1; 3 tests failed",
+    });
+  });
+
+  it("keeps the command output's own detail when the line showed none", () => {
+    const toolLine = buildChannelProgressDraftLine(
+      { event: "tool", toolCallId: "call-1", name: "exec", phase: "start" },
+      { commandText: "raw" },
+    );
+    const output = buildChannelProgressDraftLine(
+      {
+        event: "command-output",
+        itemId: "command:call-1",
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "end",
+        title: "command pnpm test",
+        exitCode: 2,
+      },
+      { commandText: "raw" },
+    );
+    if (!toolLine || !output) {
+      throw new Error("expected exec progress lines");
+    }
+    expect(toolLine.detail).toBeUndefined();
+
+    const merged = mergeChannelProgressDraftLine([toolLine], output, { maxLines: 4 });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual({ ...output, id: expect.any(String) });
+    expect(merged[0]).toMatchObject({ detail: "command pnpm test", status: "exit 2" });
   });
 
   it("starts progress drafts after the initial delay", async () => {

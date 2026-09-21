@@ -2,9 +2,9 @@ import {
   gatewayCredentialScope,
   isRetryableGatewayStartupUnavailableError,
   readControlUiBuildMismatchId,
-  resolveSafeTimeoutDelayMs,
 } from "@openclaw/gateway-client/browser";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import type { ModelCatalogTarget } from "../../../packages/gateway-protocol/src/index.js";
 import {
   isGatewayRestartUnavailableError,
   isGatewaySuspendUnavailableError,
@@ -23,7 +23,7 @@ import {
 import { CONTROL_UI_BUILD_INFO, controlUiBuildDiffersFrom } from "../build-info.ts";
 import { configuredUiDevGateway, isConfiguredUiDevGateway } from "../dev-gateway.ts";
 import { t } from "../i18n/index.ts";
-import { bumpCanvasWidgetFrameConnectionGeneration } from "../lib/chat/canvas-widget-frame-generation.ts";
+import { retireStoredGoalOperations } from "../lib/chat/goal-operation-storage.ts";
 import { readConnectionAuthReason } from "../lib/connection-hints.ts";
 import { formatUiError, formatUiExternalText } from "../lib/format-error.ts";
 import { setAvatarGatewayOrigin } from "../lib/identity-avatar-context.ts";
@@ -38,11 +38,21 @@ import type {
   ApplicationGatewaySnapshot,
 } from "./context.ts";
 import { resolveControlUiAuthCandidates } from "./control-ui-auth.ts";
+import { createGatewayCanvasSurfaceLease } from "./gateway-canvas-surface.ts";
 import {
   createGatewayControlUiReloadOptions,
   isSameOriginGateway,
 } from "./gateway-control-ui-reload.ts";
-import { createGatewayEventLog, notifyGatewayObservers } from "./gateway-observers.ts";
+import {
+  createGatewayEventLog,
+  createGatewayMetadataObserver,
+  createGatewayEventObserver,
+  notifyGatewayObservers,
+} from "./gateway-observers.ts";
+import { readSuspensionPhase } from "./gateway-readiness.ts";
+import { createAvailabilityIndicators } from "./gateway-store.availability.ts";
+import { createDeviceCredentialMethods } from "./gateway-store.device-credential.ts";
+import { readHelloPluginCapabilities } from "./plugin-capabilities.ts";
 import {
   loadGatewaySessionSelection,
   loadSettings,
@@ -54,22 +64,7 @@ import { scheduleStaleChunkReload } from "./stale-chunk-reload.ts";
 import { readPresenceEntries, resolveSelfPresenceUser, sameSelfUser } from "./user-profile.ts";
 
 type GatewayClientFactory = (opts: GatewayBrowserClientOptions) => GatewayBrowserClient;
-type CanvasSurfaceLeaseModule = typeof import("./canvas-surface-lease.runtime.ts");
-type CanvasSurfaceLease = ReturnType<CanvasSurfaceLeaseModule["createCanvasSurfaceLease"]>;
-
 const defaultClientFactory: GatewayClientFactory = (opts) => new GatewayBrowserClient(opts);
-// Grace window before offline presentation appears; reconnects never wait.
-const OFFLINE_INDICATOR_DELAY_MS = 2_000;
-
-function readSuspensionPhase(payload: unknown): ApplicationGatewaySnapshot["suspensionPhase"] {
-  const phase = asOptionalRecord(payload)?.phase;
-  return phase === "accepting" ||
-    phase === "preparing" ||
-    phase === "draining" ||
-    phase === "prepared"
-    ? phase
-    : undefined;
-}
 
 export function createApplicationGateway(
   initialSettings: ReturnType<typeof loadSettings>,
@@ -80,6 +75,7 @@ export function createApplicationGateway(
     persistDefaultConnectionSettings?: boolean;
     resourceBasePath?: string;
     bootstrapProfile?: ControlUiBootstrapProfileHint;
+    getModelCatalogTarget?: (gatewayUrl: string) => ModelCatalogTarget | undefined;
     clientOptions?: Pick<
       GatewayBrowserClientOptions,
       "clientName" | "mode" | "platform" | "deviceFamily" | "instanceId" | "scopes"
@@ -111,10 +107,10 @@ export function createApplicationGateway(
     selfUser: null,
   };
   let client: GatewayBrowserClient | null = null;
-  let canvasSurfaceLease: CanvasSurfaceLease | null = null;
-  let canvasSurfaceLeaseLoad: Promise<CanvasSurfaceLease> | null = null;
-  let canvasSurfaceLeaseClient: GatewayBrowserClient | null = null;
-  let canvasSurfaceLeaseGeneration = 0;
+  const canvasSurface = createGatewayCanvasSurfaceLease(
+    () => client,
+    (canvasPluginSurfaceUrl) => setSnapshot({ canvasPluginSurfaceUrl }),
+  );
   // Session lineage belongs to the selected Gateway: once its hello succeeds,
   // transport drops render as "reconnecting" (shell + banner) instead of
   // kicking the operator back to the login gate.
@@ -123,14 +119,18 @@ export function createApplicationGateway(
   // Snapshot observers can synchronously stop or replace their publishing client.
   const isCurrentClient = (expected: GatewayBrowserClient | null) =>
     !stopped && client === expected;
-  let offlineIndicatorTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
-  const unavailableDeadlines: Partial<
-    Record<"restartPending" | "suspensionPhase", ReturnType<typeof globalThis.setTimeout>>
-  > = {};
+  const availability = createAvailabilityIndicators({
+    isStopped: () => stopped,
+    getSnapshot: () => snapshot,
+    applySnapshot: (patch) => setSnapshot(patch),
+  });
+  const { clearOfflineIndicatorTimer, setUnavailableDeadline, scheduleOfflineIndicator } =
+    availability;
   const listeners = new Set<(next: ApplicationGatewaySnapshot) => void>();
   const eventListeners = new Set<GatewayEventListener>();
   const eventLogListeners = new Set<(events: readonly EventLogEntry[]) => void>();
   const eventLog = createGatewayEventLog();
+  const metadataObserver = createGatewayMetadataObserver((current) => current === snapshot);
   const publishEventLogRetirement = (events: readonly EventLogEntry[]) => {
     // Retirement remains valid after a reentrant stop or same-account client replacement.
     notifyGatewayObservers(
@@ -140,134 +140,23 @@ export function createApplicationGateway(
       (current) => current === eventLog.entries,
     );
   };
-  const clearOfflineIndicatorTimer = () => {
-    globalThis.clearTimeout(offlineIndicatorTimer ?? undefined);
-    offlineIndicatorTimer = null;
-  };
-  const setUnavailableDeadline = (key: keyof typeof unavailableDeadlines, expectedMs?: number) => {
-    globalThis.clearTimeout(unavailableDeadlines[key]);
-    delete unavailableDeadlines[key];
-    if (expectedMs === undefined) {
-      return;
-    }
-    unavailableDeadlines[key] = globalThis.setTimeout(
-      () => {
-        delete unavailableDeadlines[key];
-        setSnapshot({ [key]: key === "restartPending" ? false : undefined });
-      },
-      // Floor 15s: stale lifecycle evidence must degrade to the ordinary offline pill.
-      resolveSafeTimeoutDelayMs(expectedMs * 3, { minMs: 15_000 }),
-    );
-  };
-  const scheduleOfflineIndicator = () => {
-    if (
-      stopped ||
-      snapshot.phase === "connected" ||
-      snapshot.offlineStable ||
-      offlineIndicatorTimer !== null
-    ) {
-      return;
-    }
-    offlineIndicatorTimer = globalThis.setTimeout(() => {
-      offlineIndicatorTimer = null;
-      if (!stopped && snapshot.phase !== "connected") {
-        setSnapshot({ offlineStable: true });
-      }
-    }, OFFLINE_INDICATOR_DELAY_MS);
-  };
   const setSnapshot = (patch: Partial<ApplicationGatewaySnapshot>) => {
-    snapshot = { ...snapshot, ...patch };
+    const previous = snapshot;
+    snapshot = { ...previous, ...patch };
     if (snapshot.phase === "connected") {
       clearOfflineIndicatorTimer();
       snapshot.offlineStable = false;
     } else {
       // A disconnected transport cannot vouch for admission; the next hello replaces it.
-      snapshot.suspensionPhase = unavailableDeadlines.suspensionPhase
+      snapshot.suspensionPhase = availability.hasSuspensionDeadline()
         ? snapshot.suspensionPhase
         : undefined;
       snapshot.pluginCapabilities = null;
       scheduleOfflineIndicator();
     }
-    notifyGatewayObservers(listeners, snapshot, "snapshot", (current) => current === snapshot);
-  };
-  const loadCanvasSurfaceLease = (): Promise<CanvasSurfaceLease> => {
-    if (canvasSurfaceLease) {
-      return Promise.resolve(canvasSurfaceLease);
+    if (metadataObserver.synchronize(previous, snapshot)) {
+      notifyGatewayObservers(listeners, snapshot, "snapshot", (current) => current === snapshot);
     }
-    if (canvasSurfaceLeaseLoad) {
-      return canvasSurfaceLeaseLoad;
-    }
-    const load = import("./canvas-surface-lease.runtime.ts").then(
-      ({ createCanvasSurfaceLease }) => {
-        const lease = createCanvasSurfaceLease({
-          request: (method, params) => {
-            const requestClient = canvasSurfaceLeaseClient;
-            if (!requestClient || client !== requestClient) {
-              return Promise.reject(
-                new Error("canvas surface lease has no current gateway client"),
-              );
-            }
-            return requestClient.request(method, params);
-          },
-          onChange: (canvasPluginSurfaceUrl) => {
-            if (!canvasSurfaceLeaseClient || client !== canvasSurfaceLeaseClient) {
-              return;
-            }
-            setSnapshot({ canvasPluginSurfaceUrl });
-          },
-        });
-        canvasSurfaceLease = lease;
-        return lease;
-      },
-    );
-    canvasSurfaceLeaseLoad = load;
-    void load.catch(() => {
-      if (canvasSurfaceLeaseLoad === load) {
-        canvasSurfaceLeaseLoad = null;
-      }
-    });
-    return load;
-  };
-  const beginCanvasSurfaceLease = (nextClient: GatewayBrowserClient): number => {
-    canvasSurfaceLeaseClient = null;
-    canvasSurfaceLease?.stop();
-    canvasSurfaceLeaseGeneration += 1;
-    canvasSurfaceLeaseClient = nextClient;
-    // Rotation keeps mounted frames; a new hello starts a connection and must
-    // re-key them before the synchronously published URL can render.
-    bumpCanvasWidgetFrameConnectionGeneration();
-    return canvasSurfaceLeaseGeneration;
-  };
-  const startCanvasSurfaceLease = (
-    nextClient: GatewayBrowserClient,
-    expectedGeneration: number,
-    helloUrl: string | undefined,
-  ): void => {
-    void loadCanvasSurfaceLease()
-      .then((lease) => {
-        if (
-          canvasSurfaceLeaseGeneration === expectedGeneration &&
-          canvasSurfaceLeaseClient === nextClient &&
-          client === nextClient
-        ) {
-          lease.start(helloUrl);
-        }
-      })
-      .catch(() => {
-        // main.ts owns lazy-chunk fetch recovery through the Vite preload-error
-        // listener; retrying the same module URL cannot escape its cached failure.
-      });
-  };
-  const stopCanvasSurfaceLease = () => {
-    if (!canvasSurfaceLeaseClient) {
-      return;
-    }
-    canvasSurfaceLeaseGeneration += 1;
-    canvasSurfaceLeaseClient = null;
-    canvasSurfaceLease?.stop();
-    // Disconnect invalidates every capability URL, including those held by a
-    // frame that remounts after the socket closes.
-    bumpCanvasWidgetFrameConnectionGeneration();
   };
   const updateSettings = (patch: Partial<typeof settings>, selectGateway = false) => {
     if (!persistConnectionSettings && !selectGateway) {
@@ -279,7 +168,10 @@ export function createApplicationGateway(
   };
   const recordGatewayEvent = (event: Parameters<GatewayEventListener>[0]) => {
     const eventClient = client;
-    if (event.event === "plugins.changed" && eventClient) {
+    if (
+      (event.event === "plugins.changed" || event.event === "plugins.controlUi.changed") &&
+      eventClient
+    ) {
       // Capability updates keep hello identity; reconnects replace it.
       const eventHello = snapshot.hello;
       const readCurrent = () =>
@@ -290,8 +182,8 @@ export function createApplicationGateway(
           : null;
       void import("./plugin-capabilities.runtime.ts")
         .then(({ refreshPluginCapabilities }) =>
-          refreshPluginCapabilities(event.payload, eventClient, readCurrent, setSnapshot, (url) =>
-            startCanvasSurfaceLease(eventClient, canvasSurfaceLeaseGeneration, url),
+          refreshPluginCapabilities(event, eventClient, readCurrent, setSnapshot, (url) =>
+            canvasSurface.start(eventClient, canvasSurface.generation, url),
           ),
         )
         .catch((error: unknown) => {
@@ -433,7 +325,7 @@ export function createApplicationGateway(
       },
       persistConnectionSettings || gatewayUrlChanged,
     );
-    stopCanvasSurfaceLease();
+    canvasSurface.stop();
     client?.stop();
 
     const nextClient = createClient({
@@ -452,6 +344,13 @@ export function createApplicationGateway(
       mode: options.clientOptions?.mode ?? "webchat",
       instanceId: options.clientOptions?.instanceId ?? generateUUID(),
       scopes: options.clientOptions?.scopes,
+      get modelCatalog() {
+        return client === nextClient
+          ? metadataObserver.captureTarget(
+              options.getModelCatalogTarget?.(nextConnection.gatewayUrl),
+            )
+          : undefined;
+      },
       onHello: (hello: GatewayHelloOk) => {
         if (client !== nextClient) {
           return;
@@ -525,7 +424,7 @@ export function createApplicationGateway(
         }
         everConnected = true;
         const canvasPluginSurfaceUrl = hello.pluginSurfaceUrls?.canvas?.trim() || null;
-        const canvasLeaseGeneration = beginCanvasSurfaceLease(nextClient);
+        const canvasLeaseGeneration = canvasSurface.begin(nextClient);
         setUnavailableDeadline("restartPending");
         setSnapshot({
           client: nextClient,
@@ -533,7 +432,7 @@ export function createApplicationGateway(
           restartPending: false,
           suspensionPhase: readSuspensionPhase(asOptionalRecord(hello.snapshot)?.suspension),
           hello,
-          pluginCapabilities: null,
+          pluginCapabilities: readHelloPluginCapabilities(hello),
           canvasPluginSurfaceUrl,
           // Trim guards a whitespace-only defaultId from becoming a truthy selection.
           assistantAgentId: sessionDefaults?.defaultAgentId?.trim() || null,
@@ -546,23 +445,20 @@ export function createApplicationGateway(
             nextClient.instanceId,
           ),
         });
-        startCanvasSurfaceLease(
-          nextClient,
-          canvasLeaseGeneration,
-          canvasPluginSurfaceUrl ?? undefined,
-        );
+        canvasSurface.start(nextClient, canvasLeaseGeneration, canvasPluginSurfaceUrl ?? undefined);
       },
       onRecoveryScopeChange: () => {
         if (client !== nextClient || snapshot.phase !== "connected") {
           return;
         }
+        retireStoredGoalOperations(nextConnection.gatewayUrl, nextClient.recoveryScope);
         setSnapshot({});
       },
       onClose: ({ code, reason, error, willRetry }) => {
         if (client !== nextClient) {
           return;
         }
-        stopCanvasSurfaceLease();
+        canvasSurface.stop();
         const mismatchedBuildId = readControlUiBuildMismatchId(error?.details);
         if (mismatchedBuildId) {
           void scheduleStaleChunkReload({
@@ -634,22 +530,13 @@ export function createApplicationGateway(
           connect();
         }
       },
-      onEvent: (event) => {
-        // A replaced socket can still deliver queued events; never let it
-        // project presence or history into the current gateway connection.
-        if (client !== nextClient) {
-          return;
-        }
-        try {
-          recordGatewayEvent(event);
-        } catch (error) {
-          // Preserve protocol-client isolation: a broken log subscriber must
-          // not prevent chat, approvals, or the remaining app from updating.
-          console.error("[gateway] event handler error:", error);
-        }
-        const isActiveClient = () => isCurrentClient(nextClient);
-        notifyGatewayObservers(eventListeners, event, "event listener", isActiveClient);
-      },
+      onEvent: createGatewayEventObserver({
+        isAttached: () => client === nextClient,
+        isCurrent: () => isCurrentClient(nextClient),
+        project: (event) => metadataObserver.receive(event, snapshot),
+        record: recordGatewayEvent,
+        listeners: eventListeners,
+      }),
     });
     client = nextClient;
     setSnapshot({
@@ -708,7 +595,7 @@ export function createApplicationGateway(
       clearOfflineIndicatorTimer();
       setUnavailableDeadline("restartPending");
       setUnavailableDeadline("suspensionPhase");
-      stopCanvasSurfaceLease();
+      canvasSurface.stop();
       client?.stop();
       client = null;
       everConnected = false;
@@ -744,6 +631,11 @@ export function createApplicationGateway(
       }
       setSnapshot({ selfUser: { ...snapshot.selfUser, ...patch } });
     },
+    ...createDeviceCredentialMethods({
+      gatewayUrl: () => connection.gatewayUrl,
+      connect,
+      isStopped: () => stopped,
+    }),
   };
   return gateway;
 }

@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { promisify, stripVTControlCharacters } from "node:util";
+import { validateArtifactProducerRun } from "./full-release-artifacts.mjs";
+import {
+  publicationAdmissionContract,
+  publicationSourceContract,
+  validatePublicationAdmissionBinding,
+  validatePublicationSourceBinding,
+} from "./full-release-publication-contract.mjs";
 import {
   classifyReleaseGhTransportError,
   composeReleaseChildAttemptEvidence,
@@ -22,6 +29,11 @@ import {
   sha256Digest,
 } from "./lib/actions-artifact-archive.mjs";
 import { execPlainGh, plainGhAuthenticatedEnv, resolvePlainGhBin } from "./lib/plain-gh.mjs";
+import {
+  createReleaseEvidenceClient,
+  releaseExecutionPlanRestoreContract,
+  restoreOriginalPublicationAdmission,
+} from "./release-ci-summary.mjs";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_REPOSITORY = "openclaw/openclaw";
@@ -298,6 +310,110 @@ function exactParentJob(parentJobs, child, sourceParentAttempt) {
   return matches[0];
 }
 
+async function inspectArtifactProducers(producers, client) {
+  return Promise.all(
+    producers.map(async ({ request, runId, runAttempt }) => {
+      const run = validateArtifactProducerRun(
+        request,
+        await client.getRun(runId),
+        runId,
+        runAttempt,
+        {
+          allowFailure: true,
+          allowNewerAttempts: true,
+        },
+      );
+      const active = run.status !== "completed";
+      const passed = !active && run.conclusion === "success";
+      return {
+        key: `artifact:${request.stage}`,
+        runId,
+        plannedRunAttempt: Number(runAttempt),
+        effectiveRunAttempt: Number(run.run_attempt),
+        conclusion: String(run.conclusion ?? ""),
+        status: active ? "active" : passed ? "passed" : "failed",
+        passed,
+        url: run.html_url,
+      };
+    }),
+  );
+}
+
+async function inspectRecovery(plan, producers, client) {
+  const [diagnostics, artifacts] = await Promise.all([
+    inspectContinuation(plan, client),
+    inspectArtifactProducers(producers, client),
+  ]);
+  const children = [...diagnostics.children, ...artifacts];
+  return {
+    children,
+    failed: children.filter((child) => child.status === "failed"),
+    active: children.filter((child) => child.status === "active"),
+    missing: children.filter((child) => child.status === "missing"),
+    passed: children.filter((child) => child.status === "passed"),
+  };
+}
+
+async function recheckArtifactProducers(producers, status, client) {
+  const current = await inspectArtifactProducers(producers, client);
+  for (const observed of current) {
+    const expected = status.children.find((child) => child.runId === observed.runId);
+    if (
+      !expected ||
+      observed.effectiveRunAttempt !== expected.effectiveRunAttempt ||
+      observed.status !== expected.status ||
+      observed.conclusion !== expected.conclusion
+    ) {
+      throw new Error(`Artifact producer changed during recovery: ${observed.runId}`);
+    }
+  }
+}
+
+async function npmRecoveryProducers(plan, parentJobs, client, repository, workflow) {
+  // Older workflow revisions did not dispatch npm qualification independently.
+  if (!workflow.includes("node scripts/full-release-artifacts.mjs resolve")) {
+    return [];
+  }
+  const matches = parentJobs.filter(
+    (job) =>
+      job.name === "Prepare release npm artifacts" &&
+      Number(job.run_attempt) === plan.parentRunAttempt,
+  );
+  if (matches.length !== 1) {
+    throw new Error("Original npm dispatch job is missing or ambiguous");
+  }
+  const [job] = matches;
+  if (job.conclusion === "skipped") {
+    return [];
+  }
+  const log = stripVTControlCharacters(await client.getJobLog(job.id));
+  const dispatches = [
+    ...log.matchAll(
+      /(?:^|\n)(?:\d{4}-\d\d-\d\dT\S+ )?Dispatched full-release-artifacts\.yml: https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/actions\/runs\/([1-9][0-9]*) \(attempt ([1-9][0-9]*)\)\r?(?=\n|$)/gu,
+    ),
+  ];
+  if (
+    dispatches.length !== 1 ||
+    dispatches[0][1] !== repository ||
+    !log.includes(`TARGET_SHA: ${plan.targetSha}`)
+  ) {
+    throw new Error("Original npm dispatch identity is unavailable or ambiguous");
+  }
+  return [
+    {
+      request: {
+        stage: "npm",
+        repository,
+        dispatchId: `full-release-validation-${plan.parentRunId}-${plan.parentRunAttempt}-artifacts-npm`,
+        toolingSha: plan.workflowSha,
+        workflowRef: plan.workflowRef,
+      },
+      runId: dispatches[0][2],
+      runAttempt: dispatches[0][3],
+    },
+  ];
+}
+
 export async function preflightContinuation(
   plan,
   rootRunId,
@@ -375,6 +491,53 @@ export async function preflightContinuation(
   ) {
     throw new Error("source full release root is not an exact fail-fast-disabled all-group target");
   }
+  const evidenceClient = client.getReleaseEvidenceClient();
+  const workflow = evidenceClient.getWorkflowSource(plan.workflowSha);
+  const sourceContract = publicationSourceContract(workflow);
+  const registryContract = publicationAdmissionContract(workflow);
+  if (
+    plan.sourceAdmissionContract !== sourceContract ||
+    plan.publicationAdmissionContract !== registryContract
+  ) {
+    throw new Error("continuation admission differs from its immutable source workflow contract");
+  }
+  const sourceAdmission = validatePublicationSourceBinding(plan, {
+    sourceAdmissionContract: sourceContract,
+    parentRunId: String(rootRunId),
+    repository,
+    targetSha: plan.targetSha,
+  });
+  validatePublicationAdmissionBinding(plan, { publicationAdmissionContract: registryContract });
+  if (registryContract) {
+    if (!releaseExecutionPlanRestoreContract(workflow)) {
+      throw new Error(
+        "frozen workflow cannot restore publication admission after a parent rerun; use a fresh parent",
+      );
+    }
+    const original = await restoreOriginalPublicationAdmission({
+      request: sourceAdmission,
+      client: {
+        ...evidenceClient,
+        getWorkflowSource: (sha) =>
+          sha === plan.workflowSha ? workflow : evidenceClient.getWorkflowSource(sha),
+      },
+    });
+    const validated = validateReleaseExecutionPlanArtifact(plan, {
+      parentRunId: String(rootRunId),
+      sourceAdmissionContract: sourceContract,
+      publicationAdmissionContract: registryContract,
+    });
+    if (validated.sha256 !== original.plan.sha256) {
+      throw new Error("continuation differs from the authenticated original publication plan");
+    }
+  }
+  const artifactProducers = await npmRecoveryProducers(
+    plan,
+    parentJobs,
+    client,
+    repository,
+    workflow,
+  );
   const childObservations = await Promise.all(
     selectedChildren(plan).map(async (child) => {
       const sourceParentAttempt = child.sourceParentAttempt ?? source.sourceRunAttempt;
@@ -399,7 +562,7 @@ export async function preflightContinuation(
   for (const { child, childRun } of childObservations) {
     assertChildRunIdentity(child, childRun, repository);
   }
-  return sourceRun;
+  return { ...sourceRun, artifactProducers };
 }
 
 export async function inspectContinuation(plan, client) {
@@ -494,6 +657,7 @@ export async function inspectContinuation(plan, client) {
 }
 
 export function createClient(repository, dependencies = {}) {
+  let releaseEvidenceClient;
   const apiJson = dependencies.apiJson ?? ((path) => ghJson(repository, path));
   const apiText =
     dependencies.apiText ??
@@ -541,6 +705,10 @@ export function createClient(repository, dependencies = {}) {
   };
   return {
     repository,
+    getReleaseEvidenceClient() {
+      releaseEvidenceClient ??= createReleaseEvidenceClient(repository);
+      return releaseEvidenceClient;
+    },
     getAttemptJobs(runId, runAttempt) {
       return attemptJobs(runId, runAttempt);
     },
@@ -724,8 +892,13 @@ function exactTerminalRunState(run, runId) {
 }
 
 async function freezeVerificationAttempts(plan, rootRunId, status, client) {
+  // Artifact producers are checked independently around verification; the
+  // manifest verifier consumes only parent and selected diagnostic run IDs.
+  const diagnosticRunIds = new Set(selectedChildren(plan).map((child) => child.runId));
   const expectedRunAttempts = new Map(
-    status.children.map((child) => [child.runId, child.effectiveRunAttempt]),
+    status.children
+      .filter((child) => diagnosticRunIds.has(child.runId))
+      .map((child) => [child.runId, child.effectiveRunAttempt]),
   );
   // Reuse verification rereads its root and selected parent manifests too.
   const parentRunIds = new Set([
@@ -757,15 +930,25 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
       ? createOperationDeadline()
       : validateOperationDeadline(options.operationDeadline);
   const ownedAttempts = new Map();
-  await preflightContinuation(plan, rootRunId, client, client.repository ?? DEFAULT_REPOSITORY);
-  let status = await inspectContinuation(plan, client);
+  const { artifactProducers } = await preflightContinuation(
+    plan,
+    rootRunId,
+    client,
+    client.repository ?? DEFAULT_REPOSITORY,
+  );
+  // Do not replace any observed child attempt while the original diagnostic
+  // drain is still collecting it. A terminal parent closes that collection.
+  if ((await client.getRun(rootRunId)).status !== "completed") {
+    await waitForTerminal([rootRunId], client, operationDeadline);
+  }
+  let status = await inspectRecovery(plan, artifactProducers, client);
   if (status.active.length > 0) {
     await waitForTerminal(
       status.active.map((child) => child.runId),
       client,
       operationDeadline,
     );
-    status = await inspectContinuation(plan, client);
+    status = await inspectRecovery(plan, artifactProducers, client);
   }
   if (status.failed.length > 0) {
     if (options.dryRun) {
@@ -775,6 +958,22 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
       await Promise.all(
         status.failed.map(async (child) => {
           const run = await client.getRun(child.runId);
+          const producer = artifactProducers.find((entry) => entry.runId === child.runId);
+          if (producer) {
+            validateArtifactProducerRun(
+              producer.request,
+              run,
+              producer.runId,
+              child.effectiveRunAttempt,
+              { allowFailure: true },
+            );
+          } else {
+            assertChildRunIdentity(
+              selectedChildren(plan).find((entry) => entry.runId === child.runId),
+              run,
+              client.repository ?? DEFAULT_REPOSITORY,
+            );
+          }
           const terminal = exactTerminalRunState(run, child.runId);
           if (
             terminal.runAttempt !== child.effectiveRunAttempt ||
@@ -789,6 +988,7 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
     const minimumAttempts = new Map(
       status.failed.map((child) => [child.runId, child.effectiveRunAttempt + 1]),
     );
+    await recheckArtifactProducers(artifactProducers, status, client);
     remainingOperationTime(operationDeadline);
     const mutationResults = await Promise.allSettled(
       status.failed.map((child) => client.rerunFailed(child.runId)),
@@ -807,7 +1007,7 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
       operationDeadline,
       minimumAttempts,
     );
-    status = await inspectContinuation(plan, client);
+    status = await inspectRecovery(plan, artifactProducers, client);
     for (const child of status.children) {
       const expectedAttempt = ownedAttempts.get(child.runId);
       if (expectedAttempt !== undefined) {
@@ -841,12 +1041,14 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
     client.verifySeal !== undefined
   ) {
     verificationAttempts = await freezeVerificationAttempts(plan, rootRunId, status, client);
+    await recheckArtifactProducers(artifactProducers, status, client);
     parentSealed = await client.verifySeal(
       rootRunId,
       plan,
       operationDeadline,
       verificationAttempts,
     );
+    await recheckArtifactProducers(artifactProducers, status, client);
     if (!parentSealed) {
       const verifiedParent = exactTerminalRunState(completedParent, rootRunId);
       completedParent = await client.getRun(rootRunId);
@@ -859,6 +1061,7 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
   if (!parentSealed && (completedParent.conclusion !== "success" || childEvidenceAdvanced)) {
     const terminalParent = exactTerminalRunState(completedParent, rootRunId);
     const minimumAttempts = new Map([[rootRunId, terminalParent.runAttempt + 1]]);
+    await recheckArtifactProducers(artifactProducers, status, client);
     remainingOperationTime(operationDeadline);
     const mutationResults = await Promise.allSettled([client.rerunParent(rootRunId)]);
     await reconcileAttemptStarts(
@@ -874,7 +1077,9 @@ export async function continueFailed(plan, rootRunId, client, options = {}) {
   if (!parentSealed) {
     await waitForTerminal([...ownedAttempts.keys()], client, operationDeadline, ownedAttempts);
     verificationAttempts = await freezeVerificationAttempts(plan, rootRunId, status, client);
+    await recheckArtifactProducers(artifactProducers, status, client);
     await client.verify(rootRunId, plan, operationDeadline, verificationAttempts);
+    await recheckArtifactProducers(artifactProducers, status, client);
   }
   return {
     action: ownedAttempts.has(rootRunId) ? "reran-parent" : "verified-parent",

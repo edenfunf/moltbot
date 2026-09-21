@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   agentOutputHasExpectedOkMarker,
   acquireManagedGatewayInstallerHostLease,
@@ -111,6 +111,7 @@ import {
   writePackageDistInventoryForCandidate,
   writeSummary,
 } from "../../scripts/lib/cross-os-release-checks/index.ts";
+import * as candidateProcess from "../../scripts/lib/cross-os-release-checks/process.ts";
 import { LOCAL_BUILD_METADATA_DIST_PATHS } from "../../scripts/lib/local-build-metadata-paths.mts";
 
 const rootPackageManager = (
@@ -1189,6 +1190,80 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     });
   });
 
+  it.each([true, false])(
+    "prepares source-owned package inventory (helper=%s)",
+    async (hasHelper) => {
+      await withTempDirAsync("openclaw-cross-os-prepare-package-", async (sourceDir) => {
+        const outputDir = join(sourceDir, "out");
+        const logsDir = join(sourceDir, "logs");
+        const helperPath = join(sourceDir, "scripts", "package-openclaw-for-docker.mjs");
+        const inventoryPath = join(sourceDir, "dist", "postinstall-inventory.json");
+        const candidateTgz = join(outputDir, "package", "openclaw-2026.9.1.tgz");
+        const sourceSha = "a".repeat(40);
+        mkdirSync(dirname(helperPath), { recursive: true });
+        mkdirSync(dirname(inventoryPath), { recursive: true });
+        writeFileSync(
+          join(sourceDir, "CHANGELOG.md"),
+          "# Changelog\n\n## 2026.9.1\n\n- Preserve source-owned inventory during candidate packaging.\n",
+        );
+        writeFileSync(join(sourceDir, "pnpm-workspace.yaml"), "nodeLinker: isolated\n");
+        writeFileSync(
+          join(sourceDir, "package.json"),
+          JSON.stringify({
+            name: "openclaw",
+            version: "2026.9.1",
+            ...(hasHelper ? { bundleDependencies: ["fixture-runtime"] } : {}),
+          }),
+        );
+        if (hasHelper) {
+          writeFileSync(helperPath, "export {};\n");
+        }
+        const commands = vi
+          .spyOn(candidateProcess, "runCommand")
+          .mockImplementation(async (_, args) => {
+            let stdout = "";
+            if (args[0] === "rev-parse") {
+              stdout = sourceSha;
+            } else if (args[0] === helperPath) {
+              writeFileSync(inventoryPath, JSON.stringify(["dist/from-source-helper.js"]));
+              writeFileSync(candidateTgz, "fixture tarball");
+              stdout = `${candidateTgz}\n`;
+            } else if (args[0] === "pack") {
+              if (hasHelper) {
+                throw new Error('bundleDependencies does not work with "nodeLinker: isolated"');
+              }
+              stdout = JSON.stringify(
+                args.includes("--dry-run")
+                  ? { files: [{ path: "dist/from-historical-pack.js" }] }
+                  : { filename: candidateTgz, version: "2026.9.1" },
+              );
+            }
+            return { exitCode: 0, stdout, stderr: "" };
+          });
+        try {
+          const candidate = await prepareCandidate({ sourceDir, outputDir, logsDir });
+
+          expect(candidate).toMatchObject({
+            sourceSha,
+            candidateTgz,
+            candidateVersion: "2026.9.1",
+          });
+          expect(JSON.parse(readFileSync(inventoryPath, "utf8"))).toEqual([
+            hasHelper ? "dist/from-source-helper.js" : "dist/from-historical-pack.js",
+          ]);
+          expect(commands.mock.calls.filter(([, args]) => args[0] === "pack")).toHaveLength(
+            hasHelper ? 0 : 2,
+          );
+          expect(commands.mock.calls.filter(([, args]) => args[0] === helperPath)).toHaveLength(
+            hasHelper ? 1 : 0,
+          );
+        } finally {
+          commands.mockRestore();
+        }
+      });
+    },
+  );
+
   it("keeps the Windows packaged-upgrade fallback install out of npm lifecycle scripts", () => {
     const source = readFileSync("scripts/lib/cross-os-release-checks/lanes.ts", "utf8");
     const fallbackInstallSource = source.slice(
@@ -1247,22 +1322,18 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     ]
       .map((filePath) => readFileSync(filePath, "utf8"))
       .join("\n");
-    const providerOverride = "models.providers.${params.providerConfig.extensionId}";
+    const providerOverride = "models.providers.${providerMeta.extensionId}";
 
     expect(CROSS_OS_RELEASE_SMOKE_TOOLS_PROFILE).toBe("minimal");
     expect(source).toContain('"--thinking",\n    "off"');
-    expect(source.match(/"tools\.profile", CROSS_OS_RELEASE_SMOKE_TOOLS_PROFILE/g)).toHaveLength(2);
     expect(CROSS_OS_AGENT_TURN_TIMEOUT_SECONDS).toBeGreaterThanOrEqual(600);
     expect(source).toContain("buildReleaseProviderConfigOverride");
     expect(source).toContain("models: []");
     expect(source).toContain('agentRuntime: { id: "openclaw" }');
     expect(source).toContain('"--merge"');
     expect(source).toContain(providerOverride);
-    expect(source.match(/args: buildCrossOsReleaseSmokeMemorySlotConfigArgs\(\)/g)).toHaveLength(2);
-    expect(source).not.toContain("models.providers.${params.providerConfig.extensionId}.baseUrl");
+    expect(source).not.toContain(`${providerOverride}.baseUrl`);
     expect(source).toContain('"--timeout",\n    String(CROSS_OS_AGENT_TURN_TIMEOUT_SECONDS)');
-    const agentTurnArgCalls = source.match(/buildReleaseAgentTurnArgs\(sessionId\)/g) ?? [];
-    expect(agentTurnArgCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("uses collision-resistant IDs for cross-OS live release probes", () => {
@@ -1594,30 +1665,39 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     expect(resolveStaticFileContentType("openclaw-2026.4.14.tgz")).toBe("application/octet-stream");
   });
 
-  it("streams release artifacts from the static file server", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "openclaw-cross-os-static-server-"));
-    const filePath = join(dir, "openclaw-2026.4.14.tgz");
-    const logPath = join(dir, "server.log");
-    let server: Awaited<ReturnType<typeof startStaticFileServer>> | undefined;
+  it.each([
+    { fileName: "openclaw-2026.4.14.tgz", requestPath: "/openclaw-2026.4.14.tgz" },
+    { fileName: "openclaw release.tgz", requestPath: "/openclaw%20release.tgz" },
+    { fileName: "openclaw-🦞.tgz", requestPath: "/openclaw-%F0%9F%A6%9E.tgz" },
+    { fileName: "openclaw#release.tgz", requestPath: "/openclaw%23release.tgz" },
+  ])(
+    "streams release artifacts from the static file server: $fileName",
+    async ({ fileName, requestPath }) => {
+      const dir = mkdtempSync(join(tmpdir(), "openclaw-cross-os-static-server-"));
+      const filePath = join(dir, fileName);
+      const logPath = join(dir, "server.log");
+      let server: Awaited<ReturnType<typeof startStaticFileServer>> | undefined;
 
-    try {
-      const payload = Buffer.from(`artifact-head\n${"x".repeat(1024 * 1024)}\nartifact-tail`);
-      writeFileSync(filePath, payload);
+      try {
+        const payload = Buffer.from(`artifact-head\n${"x".repeat(1024 * 1024)}\nartifact-tail`);
+        writeFileSync(filePath, payload);
 
-      server = await startStaticFileServer({ filePath, logPath });
-      const response = await fetch(server.url);
-      const body = Buffer.from(await response.arrayBuffer());
+        server = await startStaticFileServer({ filePath, logPath });
+        const response = await fetch(server.url);
+        const body = Buffer.from(await response.arrayBuffer());
 
-      expect(response.status).toBe(200);
-      expect(response.headers.get("content-length")).toBe(String(payload.length));
-      expect(response.headers.get("content-type")).toBe("application/octet-stream");
-      expect(body.equals(payload)).toBe(true);
-      expect(readFileSync(logPath, "utf8")).toContain(`GET /${filePath.split(/[/\\]/u).at(-1)}`);
-    } finally {
-      await server?.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-length")).toBe(String(payload.length));
+        expect(response.headers.get("content-type")).toBe("application/octet-stream");
+        expect(body.equals(payload)).toBe(true);
+        await server.close();
+        expect(readFileSync(logPath, "utf8")).toContain(`GET ${requestPath}`);
+      } finally {
+        await server?.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("closes static release artifact sockets left by aborted clients", async () => {
     const dir = mkdtempSync(join(tmpdir(), "openclaw-cross-os-static-server-close-"));

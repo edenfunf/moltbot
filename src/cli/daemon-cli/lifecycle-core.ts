@@ -4,7 +4,6 @@ import { readBestEffortConfig } from "../../config/config.js";
 import { resolveIsNixMode } from "../../config/paths.js";
 import { checkTokenDrift } from "../../daemon/service-audit.js";
 import type { GatewayServiceRestartResult } from "../../daemon/service-types.js";
-import { assertGatewayServiceUpdateCurrent } from "../../daemon/service-update-authority.js";
 import type {
   GatewayServiceStartRepairIssue,
   GatewayServiceState,
@@ -19,11 +18,7 @@ import {
 import { renderSystemdUnavailableHints } from "../../daemon/systemd-hints.js";
 import { isSystemdUserServiceAvailable } from "../../daemon/systemd.js";
 import { isGatewaySecretRefUnavailableError } from "../../gateway/credentials.js";
-import {
-  clearGatewayRestartIntentSync,
-  type GatewayRestartIntent,
-  writeGatewayRestartIntentSync,
-} from "../../infra/restart-intent.js";
+import type { GatewayRestartIntent } from "../../infra/restart-intent.js";
 import { isWSL } from "../../infra/wsl.js";
 import { defaultRuntime } from "../../runtime.js";
 import { formatCliCommand } from "../command-format.js";
@@ -34,6 +29,7 @@ import {
   appendServiceLifecycleRepairAudit,
   createServiceLifecycleMutationAudit,
 } from "./lifecycle-audit.js";
+import { createServiceRestartIntent } from "./lifecycle-restart-intent.js";
 import {
   buildDaemonServiceSnapshot,
   createDaemonActionContext,
@@ -483,6 +479,9 @@ export async function runServiceRestart(params: {
   ) => Promise<ServiceRecoveryResult<"restarted"> | null>;
   postRestartCheck?: (ctx: RestartPostCheckContext) => Promise<GatewayServiceRestartResult | void>;
   onNotLoaded?: (ctx: ServiceRecoveryContext) => Promise<ServiceRecoveryResult<"restarted"> | null>;
+  restartOwnedProcess?: (
+    ctx: ServiceRecoveryContext,
+  ) => Promise<ServiceRecoveryResult<"restarted"> | null>;
 }): Promise<boolean> {
   const json = Boolean(params.opts?.json);
   const { stdout, warnings, emit, fail } = createDaemonActionContext({ action: "restart", json });
@@ -495,26 +494,12 @@ export async function runServiceRestart(params: {
   let handledRecovery: ServiceRecoveryResult<"restarted"> | null = null;
   let handledRepair: ServiceRecoveryResult<"restarted"> | null = null;
   let recoveredLoadedState: boolean | null = null;
-  let wroteRestartIntent = false;
-  const prepareGatewayRestartIntent = async () => {
-    if (params.serviceNoun !== "Gateway" || wroteRestartIntent) {
-      return;
-    }
-    const runtime = await params.service.readRuntime(process.env).catch(() => null);
-    assertGatewayServiceUpdateCurrent();
-    wroteRestartIntent = writeGatewayRestartIntentSync({
-      targetPid: runtime?.pid,
-      reason: "gateway.restart",
-      ...(restartIntent ? { intent: restartIntent } : {}),
+  const { prepare: prepareGatewayRestartIntent, clear: clearPreparedRestartIntent } =
+    createServiceRestartIntent({
+      serviceNoun: params.serviceNoun,
+      service: params.service,
+      intent: restartIntent,
     });
-  };
-  const clearPreparedRestartIntent = () => {
-    if (wroteRestartIntent) {
-      assertGatewayServiceUpdateCurrent();
-      clearGatewayRestartIntentSync();
-      wroteRestartIntent = false;
-    }
-  };
   const emitScheduledRestart = (
     restartStatus: ReturnType<typeof describeGatewayServiceRestart>,
     serviceLoaded: boolean,
@@ -541,7 +526,7 @@ export async function runServiceRestart(params: {
   }
 
   // Pre-flight config validation: check before any restart action (including
-  // onNotLoaded which may send SIGUSR1 to an unmanaged process). (#35862)
+  // onNotLoaded which may request an unmanaged process restart). (#35862)
   {
     const preflight = await getServiceActionPreflightFailure("restart");
     if (preflight) {
@@ -555,13 +540,22 @@ export async function runServiceRestart(params: {
     }
   }
 
+  if (params.restartOwnedProcess) {
+    try {
+      handledRecovery = await params.restartOwnedProcess({ json, stdout, warn, fail });
+    } catch (err) {
+      fail(`${params.serviceNoun} restart failed: ${String(err)}`);
+      return false;
+    }
+  }
+
   // Loaded services cross the native mutation boundary here. Not-loaded recovery
   // may still target a separately verified unmanaged listener.
-  if (loaded) {
+  if (loaded && !handledRecovery) {
     params.beforeServiceMutation?.();
   }
 
-  if (!loaded) {
+  if (!loaded && !handledRecovery) {
     try {
       handledRecovery = (await params.onNotLoaded?.({ json, stdout, warn, fail })) ?? null;
     } catch (err) {
@@ -583,7 +577,7 @@ export async function runServiceRestart(params: {
     recoveredLoadedState = handledRecovery.loaded ?? null;
   }
 
-  if (loaded && params.repairLoadedService) {
+  if (loaded && !handledRecovery && params.repairLoadedService) {
     try {
       const { state, issues } = await inspectGatewayServiceStartRepair(
         params.service,
@@ -627,7 +621,7 @@ export async function runServiceRestart(params: {
     }
   }
 
-  if (loaded && params.checkTokenDrift) {
+  if (loaded && !handledRecovery && params.checkTokenDrift) {
     // Check for token drift before restart (service token vs config token)
     try {
       const command = await params.service.readCommand(process.env);
@@ -664,7 +658,7 @@ export async function runServiceRestart(params: {
   let postCheckFailed = false;
   try {
     let restartResult: GatewayServiceRestartResult | undefined;
-    if (loaded && !handledRepair) {
+    if (loaded && !handledRepair && !handledRecovery) {
       await prepareGatewayRestartIntent();
       try {
         restartResult = await params.service.restart({

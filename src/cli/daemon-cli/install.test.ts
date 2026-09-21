@@ -1,5 +1,6 @@
 import "./install.test-support.js";
 import { describe, expect, it, vi } from "vitest";
+import { ServiceInspectionError } from "../../daemon/service-inspection-error.js";
 import { withGatewayServiceUpdateAuthority } from "../../daemon/service-update-authority.js";
 
 const {
@@ -26,6 +27,18 @@ const {
 describe("runDaemonInstall", () => {
   setupInstallTests();
 
+  it("provides readiness guidance after successful service registration", async () => {
+    await runDaemonInstall({ json: true, force: true });
+    expect(installDaemonServiceAndEmitMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        successMessage: expect.stringMatching(
+          /readiness has not been checked.*openclaw gateway status.*openclaw health/,
+        ),
+        onVerified: expect.any(Function),
+      }),
+    );
+  });
+
   it("refuses update-owned gateway defaults when authority expires during write preparation", async () => {
     const snapshot = await readConfigFileSnapshotMock();
     readConfigFileSnapshotMock.mockResolvedValue({ ...snapshot, sourceConfig: {} });
@@ -35,6 +48,7 @@ describe("runDaemonInstall", () => {
       await Promise.resolve();
       current = false;
       await params.writeOptions.beforeCommit?.();
+      params.writeOptions.assertCurrent?.();
       committed = true;
     });
     await expect(
@@ -92,6 +106,18 @@ describe("runDaemonInstall", () => {
     );
     expect(replaceConfigFileMock).not.toHaveBeenCalled();
     expect(randomTokenMock).not.toHaveBeenCalled();
+    expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["systemd-user-bus-unavailable", "systemd user session bus"],
+    ["launchd-gui-domain-unavailable", "launchd GUI domain"],
+  ] as const)("explains %s before writing config", async (reason, detail) => {
+    service.readCommand.mockRejectedValueOnce(new ServiceInspectionError(reason));
+    await runDaemonInstall({ json: true });
+    expect(actionState.failed[0]?.message).toContain(detail);
+    expect(actionState.failed[0]?.message).not.toContain("SERVICE_DEFINITION_UNKNOWN");
+    expect(replaceConfigFileMock).not.toHaveBeenCalled();
     expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
   });
 

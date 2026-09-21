@@ -14,7 +14,10 @@ import {
 import { createFixtureLifetime } from "../helpers/fixture-lifetime.js";
 import { isProcessAlive, waitForPidFile } from "../helpers/process-wait.js";
 import { runNodeScript } from "../helpers/run-node-script.js";
-import { materializeNativeCompiler } from "./native-boundary-fixture.js";
+import {
+  materializeNativeCompiler,
+  overrideNativeFixtureExecutable,
+} from "./native-boundary-fixture.js";
 
 describe("tsgo core test shards", () => {
   it("covers the repository test roots exactly once with headroom below the hard cap", () => {
@@ -38,17 +41,51 @@ describe("tsgo core test shards", () => {
         .map((file) => path.relative(process.cwd(), file).replaceAll(path.sep, "/"));
     };
 
+    const shards = TSGO_CORE_TEST_SHARDS.map((shard) => ({
+      name: shard.name,
+      roots: roots(shard.config),
+    }));
     expect(
       findTsgoCoreTestShardViolations({
         canonicalRoots: roots("test/tsconfig/tsconfig.core.test.json"),
         // Rebalance before the runner's 720-root cap blocks unrelated test-only PRs.
         maxRoots: 700,
-        shards: TSGO_CORE_TEST_SHARDS.map((shard) => ({
-          name: shard.name,
-          roots: roots(shard.config),
-        })),
+        shards,
       }),
     ).toEqual([]);
+    for (const [file, owner] of [
+      ["src/agents/sessions/settings-storage.test.ts", "agents-sessions"],
+      ["ui/src/pages/chat/chat-send-submit.test.ts", "ui-chat"],
+      ["ui/src/pages/config/config-page.test.ts", "ui-pages"],
+      ["src/gateway/server-methods/update-owner.test.ts", "gateway-methods"],
+      ["src/gateway/talk/client-authority.test.ts", "gateway-other"],
+      ["src/gateway/worker-environments/service.plugin-create.test.ts", "gateway-server"],
+      ["src/gateway/server-methods/environments.test.ts", "gateway-methods"],
+      ["src/commands/doctor-session-worktree-workspace.test.ts", "commands-doctor"],
+      ["src/commands/doctor/repair-sequencing.test.ts", "commands-doctor"],
+      ["src/commands/oauth-tls-preflight.doctor.test.ts", "commands-doctor"],
+      ["src/commands/onboard-agent.test.ts", "commands"],
+      ["src/agents/command/session-store.test.ts", "commands"],
+      ["src/cli/program/build-program.test.ts", "commands"],
+      ["src/cli/program/register.agent.test.ts", "commands"],
+      ["src/tui/tui-plugin-approvals.test.ts", "commands"],
+      ["src/wizard/setup.test.ts", "commands"],
+      ["src/cli/cron-cli.test.ts", "services"],
+      ["src/cli/cron-output.process.test.ts", "services"],
+      ["src/cli/cron-cli/register.cron-edit.test.ts", "services"],
+      ["src/cli/program/command-registry.test.ts", "commands"],
+      ["src/cli/update-cli.test.ts", "cli-update"],
+      ["src/cli/update-cli/update-command-config-fence.test.ts", "cli-update"],
+      ["src/gateway/worker-environments/admission.test.ts", "gateway-server"],
+      ["src/gateway/worker-environments/computer-transport.test.ts", "gateway-server"],
+      ["src/gateway/server-plugin-reload.recovery.test.ts", "gateway-server"],
+      ["src/gateway/server-methods/plugins.decisions.test.ts", "gateway-methods"],
+    ] as const) {
+      expect(
+        shards.filter((shard) => shard.roots.includes(file)).map((shard) => shard.name),
+        file,
+      ).toEqual([owner]);
+    }
   });
 
   it("stripes partition the full shard list exactly once", () => {
@@ -334,6 +371,7 @@ process.exit(result.status??1);
 `,
       );
       fs.chmodSync(compiler, 0o755);
+      overrideNativeFixtureExecutable(root, compiler);
       const driver = path.join(root, "scripts/run-tsgo-core-test-shards.mts");
       const changedArgs = (paths: string[]) => ["--changed-paths-json", JSON.stringify(paths)];
       const check = async (paths = [leaf]) => {

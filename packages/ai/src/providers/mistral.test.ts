@@ -403,7 +403,32 @@ describe("Mistral provider", () => {
     expect((mistralMockState.payloads[0] as { stop?: unknown }).stop).toEqual(["STOP"]);
   });
 
-  it("preserves Mistral messages while keeping error bodies UTF-16 safe and bounded", async () => {
+  it.each([360, undefined])(
+    "preserves requested maxTokens %s when the model output limit is unknown",
+    async (maxTokens) => {
+      const model = makeMistralModel();
+      Reflect.deleteProperty(model, "maxTokens");
+      let sentMaxTokens: unknown;
+      let payloadCaptured = false;
+      await runSimpleMistralFixture(
+        context,
+        {
+          maxTokens,
+          onPayload: (payload) => {
+            payloadCaptured = true;
+            sentMaxTokens = (payload as { maxTokens?: number }).maxTokens;
+            throw new Error("stop before network");
+          },
+        },
+        model,
+      );
+
+      expect(payloadCaptured).toBe(true);
+      expect(sentMaxTokens).toBe(maxTokens);
+    },
+  );
+
+  it("preserves Mistral HTTP status and message while keeping error bodies UTF-16 safe and bounded", async () => {
     const prefix = "a".repeat(3_999);
     mistralMockState.streamError = Object.assign(new Error("invalid request"), {
       statusCode: 400,
@@ -412,7 +437,7 @@ describe("Mistral provider", () => {
 
     const result = await runMistralFixture();
 
-    expect(result.errorMessage).toBe("invalid request");
+    expect(result.errorMessage).toBe("400: invalid request");
     expect(result.errorBody).toBe(`${prefix.slice(0, 500)}... [truncated]`);
   });
 
@@ -432,23 +457,47 @@ describe("Mistral provider", () => {
     expect(hostFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("uses reasoning effort for Mistral Medium 3.5", async () => {
-    const result = await runSimpleMistralFixture(
-      context,
-      { reasoning: "high" },
-      {
-        ...makeMistralModel(),
-        id: "mistral-medium-3-5",
-        name: "Mistral Medium 3.5",
-        reasoning: true,
-      },
-    );
-    const payload = mistralMockState.payloads[0] as Record<string, unknown>;
+  it.each([
+    ["minimal", "none", "mistral-small-latest"],
+    ["high", "high", "mistral-small-latest"],
+    ["minimal", "none", "mistral-small-2603"],
+    ["high", "high", "mistral-small-2603"],
+    ["minimal", "none", "mistral-medium-3-5"],
+    ["high", "high", "mistral-medium-3-5"],
+  ] as const)(
+    "maps %s thinking to %s reasoning effort for %s",
+    async (reasoning, reasoningEffort, modelId) => {
+      const result = await runSimpleMistralFixture(
+        context,
+        { reasoning },
+        { ...makeMistralModel(), id: modelId, reasoning: true },
+      );
+      const payload = mistralMockState.payloads[0] as Record<string, unknown>;
 
-    expect(result.stopReason).toBe("error");
-    expect(payload.reasoningEffort).toBe("high");
-    expect(payload).not.toHaveProperty("promptMode");
-  });
+      expect(result.stopReason).toBe("error");
+      expect(payload.reasoningEffort).toBe(reasoningEffort);
+      expect(payload).not.toHaveProperty("promptMode");
+    },
+  );
+
+  it.each([
+    ["off", undefined],
+    ["high", "reasoning"],
+  ] as const)(
+    "preserves native prompt-mode reasoning for legacy Mistral models at %s",
+    async (reasoning, promptMode) => {
+      const result = await runSimpleMistralFixture(
+        context,
+        { reasoning },
+        { ...makeMistralModel(), id: "magistral-small", reasoning: true },
+      );
+      const payload = mistralMockState.payloads[0] as Record<string, unknown>;
+
+      expect(result.stopReason).toBe("error");
+      expect(payload.promptMode).toBe(promptMode);
+      expect(payload).not.toHaveProperty("reasoningEffort");
+    },
+  );
 
   it("skips unreadable tool fields while preserving healthy Mistral tools", async () => {
     const healthyParameters = { type: "object", properties: { query: { type: "string" } } };

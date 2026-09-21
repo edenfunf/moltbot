@@ -1,6 +1,10 @@
 import path from "node:path";
 import { expect, test, vi } from "vitest";
-import { WORKER_EXECUTION_CONTEXT_PROTOCOL_FEATURE } from "../../packages/gateway-protocol/src/schema/worker-admission.js";
+import { WebSocket } from "../../packages/gateway-client/src/websocket.test-support.js";
+import {
+  WORKER_EXECUTION_AUTHORITY_PROTOCOL_FEATURE,
+  WORKER_EXECUTION_CONTEXT_PROTOCOL_FEATURE,
+} from "../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { runQaGatewayFixture } from "../../test/helpers/qa-gateway-cleanup.js";
 import { writeConfigFile } from "../config/config.js";
 import { approveNodePairing, requestNodePairing } from "../infra/device-pairing-node.js";
@@ -115,7 +119,7 @@ test.for(["direct", "restart"] as const)(
             }
             return result;
           });
-          kernel.registerGatewayLifetimeSidecars([{ stop: stopDependencies }]);
+          kernel.registerGatewayLifetimeSidecars({ stop: stopDependencies });
           node = await connectGatewayClient({
             url: `ws://127.0.0.1:${port}`,
             token: "secret",
@@ -163,6 +167,12 @@ test.for(["direct", "restart"] as const)(
               }
             },
           });
+          const ping = vi.spyOn(WebSocket.prototype, "ping");
+          await expect(
+            kernel.nodeRegistry.checkConnectivity(pairedNode.identity.deviceId),
+          ).resolves.toEqual({ ok: true });
+          expect(ping).toHaveBeenCalledOnce();
+          ping.mockRestore();
           await node.request("node.runnerInventory.update", {
             protocolFeatures: [NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE],
             workerHost: {
@@ -198,7 +208,10 @@ test.for(["direct", "restart"] as const)(
               bootstrapReceipt: {
                 bundleHash: BUNDLE_HASH,
                 openclawVersion: "2026.8.19",
-                protocolFeatures: [WORKER_EXECUTION_CONTEXT_PROTOCOL_FEATURE],
+                protocolFeatures: [
+                  WORKER_EXECUTION_CONTEXT_PROTOCOL_FEATURE,
+                  WORKER_EXECUTION_AUTHORITY_PROTOCOL_FEATURE,
+                ],
                 installKind: "bundle",
               },
               credential: {

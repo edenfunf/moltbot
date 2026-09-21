@@ -116,13 +116,16 @@ For local execution, use [`exec`](/tools/exec) instead.
 
   </Step>
 
-  <Step title="Restart the Gateway">
-    ```bash
-    openclaw gateway restart
-    ```
+  <Step title="Verify tool availability">
+    <a id="restart-the-gateway" />
 
-    `code_execution` appears in the agent's tool list once the xAI plugin
-    re-registers and the provider, enablement, and auth checks above pass.
+    With the default hybrid reload mode, plugin config changes apply automatically.
+    If the Gateway is offline, start it after configuration. See
+    [Config hot reload](/gateway/configuration/hot-reload).
+
+    Send `/tools` in the target conversation and check for `code_execution` after
+    the provider, enablement, and auth checks above pass. If you changed the
+    Gateway service's process environment, restart that service to load it.
 
   </Step>
 </Steps>
@@ -173,7 +176,7 @@ exception), so the agent can self-correct:
     Grok models, web/x search, and code execution config.
   </Card>
   <Card title="Code Mode" href="/tools/code-mode" icon="code">
-    A separate surface: JavaScript/TypeScript orchestration of enabled tools in
+    A separate surface: JavaScript orchestration of enabled tools in
     OpenClaw's own worker, not this remote Python tool.
   </Card>
 </CardGroup>

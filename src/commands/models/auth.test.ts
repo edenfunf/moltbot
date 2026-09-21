@@ -1,9 +1,11 @@
 // Model auth tests cover provider auth status, expiry, and display helpers.
 
+import { CANCEL_SYMBOL } from "@clack/prompts";
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
+import type { ConfigWriteOptions } from "../../config/io.js";
 import type { ProviderPlugin } from "../../plugins/types.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { ProviderAuthConfigApplyError } from "../../shared/provider-auth-result.js";
@@ -45,7 +47,6 @@ function readMockCallArg(mock: { mock: { calls: unknown[][] } }, index = 0): unk
 const mocks = vi.hoisted(() => ({
   clackCancel: vi.fn(),
   clackConfirm: vi.fn(),
-  clackIsCancel: vi.fn((value: unknown) => value === Symbol.for("clack:cancel")),
   clackPassword: vi.fn(),
   clackSelect: vi.fn(),
   clackText: vi.fn(),
@@ -129,10 +130,10 @@ vi.mock("../../plugins/provider-auth-helpers.js", () => ({
   }),
 }));
 
-vi.mock("@clack/prompts", () => ({
+vi.mock("@clack/prompts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@clack/prompts")>()),
   cancel: mocks.clackCancel,
   confirm: mocks.clackConfirm,
-  isCancel: mocks.clackIsCancel,
   password: mocks.clackPassword,
   select: mocks.clackSelect,
   text: mocks.clackText,
@@ -184,13 +185,14 @@ vi.mock("../../plugins/install-record-commit.js", () => ({
       current: OpenClawConfig,
       context: { snapshot: { valid: boolean } },
     ) => { nextConfig: OpenClawConfig };
-    writeOptions?: { beforeCommit?: () => void };
+    writeOptions?: ConfigWriteOptions;
   }) => {
     const next = await mocks.updateConfig(
       (current: OpenClawConfig) =>
         params.transform(current, { snapshot: { valid: true } }).nextConfig,
       undefined,
       params.writeOptions?.beforeCommit,
+      params.writeOptions,
     );
     return { nextConfig: next, result: next };
   },
@@ -406,9 +408,6 @@ describe("modelsAuthLoginCommand", () => {
     lastUpdatedConfig = null;
     mocks.clackCancel.mockReset();
     mocks.clackConfirm.mockReset();
-    mocks.clackIsCancel.mockImplementation(
-      (value: unknown) => value === Symbol.for("clack:cancel"),
-    );
     mocks.clackPassword.mockReset();
     mocks.clackSelect.mockReset();
     mocks.clackText.mockReset();
@@ -449,8 +448,16 @@ describe("modelsAuthLoginCommand", () => {
       runtimeConfig: structuredClone(currentConfig),
     }));
     mocks.updateConfig.mockImplementation(
-      async (mutator: (cfg: OpenClawConfig) => OpenClawConfig) => {
-        lastUpdatedConfig = mutator(currentConfig);
+      async (
+        mutator: (cfg: OpenClawConfig) => OpenClawConfig,
+        _selectModelRefs: unknown,
+        beforeCommit?: ConfigWriteOptions["beforeCommit"],
+        writeOptions?: ConfigWriteOptions,
+      ) => {
+        const nextConfig = mutator(currentConfig);
+        await beforeCommit?.();
+        writeOptions?.assertCurrent?.();
+        lastUpdatedConfig = nextConfig;
         currentConfig = lastUpdatedConfig;
         return lastUpdatedConfig;
       },
@@ -1614,9 +1621,7 @@ describe("modelsAuthLoginCommand", () => {
       throw new Error(`exit:${String(code ?? "")}`);
     }) as typeof process.exit);
     try {
-      const cancelSymbol = Symbol.for("clack:cancel");
-      mocks.clackPassword.mockResolvedValue(cancelSymbol);
-      mocks.clackIsCancel.mockImplementation((value: unknown) => value === cancelSymbol);
+      mocks.clackPassword.mockResolvedValue(CANCEL_SYMBOL);
 
       await expect(modelsAuthPasteTokenCommand({ provider: "openai" }, runtime)).rejects.toThrow(
         "exit:0",
@@ -1808,6 +1813,9 @@ describe("modelsAuthLoginCommand", () => {
       mode: "api_key",
     });
     expect(runtime.log).toHaveBeenCalledWith("Auth profile: openai:manual (openai/api_key)");
+    expect(runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining("Gateway has not confirmed applying the provider settings"),
+    );
     expect(mocks.callGateway).toHaveBeenCalledWith(
       expect.objectContaining({
         params: { operation: "login", agentId: "coder" },

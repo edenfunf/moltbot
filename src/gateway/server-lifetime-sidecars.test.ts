@@ -2,6 +2,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  getProcessCleanupBudget,
+  runWithProcessCleanupBudget,
+} from "../process/supervisor/cleanup-budget.js";
 import { writeSecretStoreEntry } from "../secrets/store/secret-store.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -11,7 +15,6 @@ import { withEnvAsync } from "../test-utils/env.js";
 import { attachInitialGatewayLifetimeSidecars } from "./server-lifetime-sidecars.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { createGatewaySidecarStopOwner } from "./server-sidecar-owners.js";
-import type { GatewayPostReadySidecarHandle } from "./server-startup-post-attach.js";
 
 const oauth = vi.hoisted(() => ({
   create: vi.fn(),
@@ -77,15 +80,10 @@ describe("gateway lifetime sidecars", () => {
     const sessionChange = { stop: vi.fn(async () => {}) };
     const worker = { stop: vi.fn(async () => {}) };
 
-    let sidecars: GatewayPostReadySidecarHandle[] = [metadataListener, sessionChange];
-    const owner = createGatewaySidecarStopOwner({
-      getRegistered: () => sidecars,
-      setRegistered: (next) => {
-        sidecars = next;
-      },
-    });
-    owner.publish([worker, metadataListener]);
-    expect(sidecars).toEqual([metadataListener, sessionChange, worker]);
+    const owner = createGatewaySidecarStopOwner();
+    owner.publish(metadataListener, sessionChange);
+    owner.publish(worker, metadataListener);
+    expect(owner.snapshot()).toEqual([metadataListener, sessionChange, worker]);
 
     await owner.stop();
     expect(metadataListener.stop).toHaveBeenCalledOnce();
@@ -93,14 +91,22 @@ describe("gateway lifetime sidecars", () => {
     expect(worker.stop).toHaveBeenCalledOnce();
   });
 
+  test("retains the shutdown budget for sidecars published later from startup", async () => {
+    const owner = createGatewaySidecarStopOwner();
+    const budget = { deadline: 10_000, warn: vi.fn() };
+    await runWithProcessCleanupBudget(budget, () => owner.stop());
+    const stopped = vi.fn(async () => {
+      expect(getProcessCleanupBudget()).toBe(budget);
+    });
+    owner.publish({ stop: stopped });
+    await owner.sealAndJoin();
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
   test("owns standalone GitHub publication recovery when worker placement is unavailable", async () => {
     vi.useFakeTimers();
     const reconcileGitHubPublications = vi.fn(async () => {});
-    const sidecars: GatewayPostReadySidecarHandle[] = [];
-    const owner = createGatewaySidecarStopOwner({
-      getRegistered: () => sidecars,
-      setRegistered: (next) => sidecars.splice(0, sidecars.length, ...next),
-    });
+    const owner = createGatewaySidecarStopOwner();
 
     await attachInitialGatewayLifetimeSidecars({
       chatMetadataLifecycle: { attachContext: vi.fn(async () => {}) } as never,
@@ -109,7 +115,7 @@ describe("gateway lifetime sidecars", () => {
       minimalTestGateway: false,
       logWarning: vi.fn(),
       reconcileGitHubPublications,
-      sidecars,
+      publishSidecars: owner.publish,
     });
     vi.runAllTicks();
     expect(reconcileGitHubPublications).toHaveBeenCalledOnce();
@@ -122,11 +128,7 @@ describe("gateway lifetime sidecars", () => {
   });
 
   test("attaches and retires authorization lifecycles with the Gateway", async () => {
-    const sidecars: GatewayPostReadySidecarHandle[] = [];
-    const owner = createGatewaySidecarStopOwner({
-      getRegistered: () => sidecars,
-      setRegistered: (next) => sidecars.splice(0, sidecars.length, ...next),
-    });
+    const owner = createGatewaySidecarStopOwner();
     const context: Pick<
       GatewayRequestContext,
       "getRuntimeConfig" | "githubOAuthService" | "modelAccountConnectService"
@@ -141,7 +143,7 @@ describe("gateway lifetime sidecars", () => {
       flushPendingSessionsChangedEvents: vi.fn(),
       minimalTestGateway: false,
       logWarning: warn,
-      sidecars,
+      publishSidecars: owner.publish,
     });
 
     expect(oauth.create).toHaveBeenCalledWith({
@@ -178,11 +180,7 @@ describe("gateway lifetime sidecars", () => {
         writeStoredSecret(startupHandoff, "temporary-value");
         writeStoredSecret("RETAINED_SECRET", "retained-value");
         vi.setSystemTime(new Date("2026-01-01T00:11:00.000Z"));
-        const sidecars: GatewayPostReadySidecarHandle[] = [];
-        const owner = createGatewaySidecarStopOwner({
-          getRegistered: () => sidecars,
-          setRegistered: (next) => sidecars.splice(0, sidecars.length, ...next),
-        });
+        const owner = createGatewaySidecarStopOwner();
 
         await attachInitialGatewayLifetimeSidecars({
           chatMetadataLifecycle: { attachContext: vi.fn(async () => {}) } as never,
@@ -190,7 +188,7 @@ describe("gateway lifetime sidecars", () => {
           flushPendingSessionsChangedEvents: vi.fn(),
           minimalTestGateway,
           logWarning: vi.fn(),
-          sidecars,
+          publishSidecars: owner.publish,
         });
         expect(countStoredRows(startupHandoff)).toBe(expectedHandoffRows);
 

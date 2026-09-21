@@ -15,12 +15,10 @@ vi.mock("./gateway.js", () => ({
   readGatewayCallOptions: vi.fn(() => ({})),
 }));
 
-vi.mock("../../gateway/server-plugins.js", () => ({
+vi.mock("../../gateway/server-plugin-in-process-dispatch.js", () => ({
   dispatchGatewayMethodInProcess: dispatchMock,
   getInProcessGatewayRequestContext: (resolve?: () => GatewayRequestContext | undefined) =>
     resolve ? resolve() : host.context,
-  hasInProcessGatewayContext: (resolve?: () => GatewayRequestContext | undefined) =>
-    Boolean(resolve ? resolve() : host.context),
 }));
 
 describe("gateway tool", () => {
@@ -128,7 +126,7 @@ describe("gateway update action", () => {
   });
 
   it.each([undefined, 0, "topic-42"])(
-    "uses trusted chat routing and ignores model overrides (thread %s)",
+    "uses trusted chat routing without an update deadline (thread %s)",
     async (threadId) => {
       dispatchMock.mockResolvedValue({
         ok: true,
@@ -180,7 +178,6 @@ describe("gateway update action", () => {
             threadId,
           },
           note: "Requested update",
-          timeoutMs: 1_200_000,
         },
         {
           signal,

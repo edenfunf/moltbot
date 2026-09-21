@@ -4,8 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { coerceConfig, resolveConfigForRead } from "../config/io.read-helpers.js";
+import { setConfigResolutionFacts } from "../config/resolution-facts.js";
 import { writeStateDirDotEnv } from "../config/test-helpers.js";
 import type { OpenClawConfig } from "../config/types.js";
+import type { SecretInput } from "../config/types.secrets.js";
 import {
   buildLaunchAgentPlist,
   readLaunchAgentProgramArgumentsFromFile,
@@ -41,8 +44,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../process/exec.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/exec.js")>()),
   runExec: vi.fn(
-    async (_command: string, _args: string[], options: { input: string | Uint8Array }) =>
-      decodeLaunchAgentPlistFixture(options.input),
+    async (_command: string, args: string[], options: { input: string | Uint8Array }) =>
+      decodeLaunchAgentPlistFixture(options.input, args[1]),
   ),
 }));
 
@@ -862,32 +865,44 @@ describe("buildGatewayInstallPlan", () => {
     },
   );
 
-  it("renders config env SecretRefs as file-backed managed values on Linux", async () => {
+  it.each<{ name: string; token: SecretInput; resolved: boolean; managed: boolean }>([
+    {
+      name: "structured reference",
+      token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" },
+      resolved: false,
+      managed: true,
+    },
+    { name: "raw shorthand", token: "${DISCORD_BOT_TOKEN}", resolved: false, managed: true },
+    { name: "resolved shorthand", token: "${DISCORD_BOT_TOKEN}", resolved: true, managed: true },
+    { name: "pending shorthand", token: "$DISCORD_BOT_TOKEN", resolved: true, managed: true },
+    { name: "escaped literal", token: "$${DISCORD_BOT_TOKEN}", resolved: true, managed: false },
+  ])("renders Linux service env for $name", async ({ token, resolved, managed }) => {
     mockNodeGatewayPlanFixture({
       serviceEnvironment: {
         OPENCLAW_PORT: "3000",
       },
     });
 
+    const env = isolatedPlanEnv({ DISCORD_BOT_TOKEN: "discord-test-token" });
+    let config: OpenClawConfig = { channels: { discord: { token } } };
+    if (resolved) {
+      const read = resolveConfigForRead(config, env);
+      config = coerceConfig(read.resolvedConfigRaw);
+      setConfigResolutionFacts(config, read.resolutionFacts);
+    }
     const plan = await buildGatewayInstallPlan({
-      env: isolatedPlanEnv({
-        DISCORD_BOT_TOKEN: "discord-test-token",
-      }),
+      env,
       port: 3000,
       runtime: "node",
       platform: "linux",
-      config: {
-        channels: {
-          discord: {
-            token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" },
-          },
-        },
-      },
+      config,
     });
 
-    expect(plan.environment.DISCORD_BOT_TOKEN).toBe("discord-test-token");
-    expect(plan.environmentValueSources?.DISCORD_BOT_TOKEN).toBe("file");
-    expect(plan.environment.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe("DISCORD_BOT_TOKEN");
+    expect(plan.environment.DISCORD_BOT_TOKEN).toBe(managed ? "discord-test-token" : undefined);
+    expect(plan.environmentValueSources?.DISCORD_BOT_TOKEN).toBe(managed ? "file" : undefined);
+    expect(plan.environment.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe(
+      managed ? "DISCORD_BOT_TOKEN" : undefined,
+    );
   });
 
   it("retains config env SecretRefs for Windows task scripts", async () => {
@@ -1872,7 +1887,7 @@ describe("buildGatewayInstallPlan — dotenv merge", () => {
     expect(rewritten?.environmentValueSources?.OPENCLAW_GATEWAY_AUTH_TOKEN).toBe("file");
   });
 
-  it.each([
+  const gatewayAuthPersistenceCases = [
     {
       name: "token file-backed match",
       surface: "token",
@@ -1913,17 +1928,21 @@ describe("buildGatewayInstallPlan — dotenv merge", () => {
       name: "token inline-only match",
       surface: "token",
       mode: "token",
-      configuredKey: "OPENCLAW_GATEWAY_AUTH_TOKEN",
-      existingKey: "OPENCLAW_GATEWAY_AUTH_TOKEN",
+      configuredKey: "OPENCLAW_GATEWAY_TOKEN",
+      existingKey: "OPENCLAW_GATEWAY_TOKEN",
       existingSource: "inline",
+      expectedValue: "existing-secret",
+      processValue: "process-secret",
     },
     {
       name: "password inline-only match",
       surface: "password",
       mode: "password",
-      configuredKey: "OPENCLAW_GATEWAY_AUTH_PASSWORD",
-      existingKey: "OPENCLAW_GATEWAY_AUTH_PASSWORD",
+      configuredKey: "OPENCLAW_GATEWAY_PASSWORD",
+      existingKey: "OPENCLAW_GATEWAY_PASSWORD",
       existingSource: "inline",
+      expectedValue: "existing-secret",
+      processValue: "process-secret",
     },
     {
       name: "token ref mismatch",
@@ -1985,7 +2004,12 @@ describe("buildGatewayInstallPlan — dotenv merge", () => {
       configuredKey: "OPENCLAW_GATEWAY_AUTH_PASSWORD",
       processValue: "process-secret",
     },
-  ] as const)("calibrates gateway auth persistence: $name", async (testCase) => {
+  ] as const;
+  it.each(
+    gatewayAuthPersistenceCases.flatMap((testCase) =>
+      (["darwin", "linux", "win32"] as const).map((platform) => ({ platform, testCase })),
+    ),
+  )("preserves $platform gateway auth: $testCase.name", async ({ platform, testCase }) => {
     mockNodeGatewayPlanFixture({
       serviceEnvironment: {
         HOME: "/from-service",
@@ -2011,7 +2035,9 @@ describe("buildGatewayInstallPlan — dotenv merge", () => {
     const existingEnvironment = existingKey
       ? {
           [existingKey]: "existing-secret",
-          OPENCLAW_SERVICE_MANAGED_ENV_KEYS: existingKey,
+          ...(existingSource === "inline"
+            ? {}
+            : { OPENCLAW_SERVICE_MANAGED_ENV_KEYS: existingKey }),
         }
       : undefined;
     const existingEnvironmentValueSources =
@@ -2023,16 +2049,17 @@ describe("buildGatewayInstallPlan — dotenv merge", () => {
       env: { HOME: tmpDir, ...processEnvironment },
       port: 3000,
       runtime: "node",
-      platform: "darwin",
+      platform,
       existingEnvironment,
       existingEnvironmentValueSources,
       config: { gateway: { auth } } as unknown as OpenClawConfig,
     });
 
     if (existingKey) {
-      expect(plan.environment[existingKey]).toBe(
-        "expectedValue" in testCase ? testCase.expectedValue : undefined,
-      );
+      const expectedValue =
+        platform !== "win32" && "expectedValue" in testCase ? testCase.expectedValue : undefined;
+      expect(plan.environment[existingKey]).toBe(expectedValue);
+      expect(plan.environmentValueSources?.[existingKey]).toBe(expectedValue ? "file" : undefined);
     }
     if (configuredKey && configuredKey !== existingKey) {
       expect(plan.environment[configuredKey]).toBeUndefined();

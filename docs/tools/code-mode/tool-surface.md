@@ -28,9 +28,7 @@ Input:
 type CodeModeExecInput = {
   code?: string;
   command?: string;
-  language?: "javascript" | "typescript";
   restartSafe?: boolean;
-  typecheck?: boolean;
 };
 ```
 
@@ -43,14 +41,12 @@ Rules:
   field). Blank caller aliases are treated as absent; a hook or trusted policy
   that invalidates one populated alias (blank or non-string) invalidates both so
   execution fails closed. When both aliases are non-empty, their values must match.
-- `language` defaults to `"javascript"`; the schema exposes it as a flat
-  string enum (`"javascript" | "typescript"`), not a `oneOf`/`anyOf` union,
-  since some providers reject those shapes.
-- If `language` is `"typescript"`, OpenClaw transpiles before evaluation.
-- Set `typecheck: true` with `language: "typescript"` for opt-in preflight against
-  the effective generated tool declarations. Invalid field composition, arguments,
-  or use of unknown outputs fails with `invalid_input` before guest execution or
-  tool dispatch. This is a tool-call option, not a persisted setting.
+- Write plain JavaScript. TypeScript annotations, interfaces, and other
+  TypeScript-only syntax are not accepted. Tool signatures and `API.read`
+  declarations remain available as documentation for composing calls.
+- The retired `language` and `typecheck` fields are rejected with `invalid_input`.
+  Tool arguments are validated when each call reaches its normal execution owner;
+  Code Mode does not typecheck the whole program before execution.
 - Do not set `restartSafe` on a new `exec`. Set it to `true` only when OpenClaw
   explicitly requests replay after a gateway restart, and never for `write`,
   `edit`, `exec`, or any mutation. Every catalog call must be explicitly
@@ -67,7 +63,7 @@ Rules:
   patterns.
 - `exec` never exposes the normal shell `exec` implementation recursively.
 - Outer code-mode `exec` hook events carry `toolKind: "code_mode_exec"` and
-  `toolInputKind: "javascript" | "typescript"` (when known), so policies can
+  `toolInputKind: "javascript"`, so policies can
   distinguish code-mode cells from shell-style `exec` calls that share the
   same tool name.
 
@@ -134,7 +130,7 @@ as text rather than becoming Markdown links.
 
 In the built-in OpenClaw runtime, the JSON Code Mode tool executes the original
 input. Session history preserves computations such as `const API_TOKEN = computeToken();`
-and boolean or null initializers in the outer call's JavaScript or TypeScript
+and boolean or null initializers in the outer call's JavaScript
 `code` and `command` fields, while masking credential literals, recognizable
 tokens, registered secrets, and configured redaction patterns. Credential
 assignments use full masks so repeated storage redaction stays stable.
@@ -202,6 +198,10 @@ initial execution reserves a slot before dispatching host work and retains it
 through live execution and internal parking. A cell with no host work does not
 consume a slot.
 
+Snapshot TTL measures idle time while a cell is parked. An admitted `wait` keeps
+the cell alive under its call deadline while pending tools settle. If that call
+returns `waiting` again, parking starts a fresh snapshot TTL.
+
 `wait` fails (as a `failed` result) when:
 
 - `runId` is unknown or its snapshot already expired.
@@ -236,9 +236,11 @@ because their structured results cannot cross the QuickJS bridge.
 
 MCP entries stay in the run-scoped catalog so policy, approvals, hooks,
 telemetry, transcript projection, and exact tool ids remain shared with
-normal tool execution. Generic guest `catalog.search(...)` and `catalog.all()`
-omit MCP entries. The generated `MCP.<server>.<tool>({ ...input })` namespace
-resolves to its host-only entry and dispatches through the same executor path.
+normal tool execution. `catalog.search(...)` searches native and MCP capabilities
+together and returns callable handles. MCP matches identify their final
+`MCP.<server>.<tool>` path and declaration file; invoking a handle uses that
+same namespace dispatcher. `catalog.all()` lists only native and client handles.
+Remote descriptions and schemas stay out of the trusted quick index.
 
 ## Tool Search interaction
 
@@ -251,9 +253,9 @@ When Code Mode engages through forced `true` or `"auto"` activation:
   or `tool_call` as model-visible tools.
 - The same cataloging idea moves inside the guest runtime.
 - The guest runtime receives bare async globals plus callable search/describe
-  handles for non-MCP tools.
-- MCP calls use the generated `MCP` namespace and its `$api()` headers instead
-  of generic catalog discovery.
+  handles for native tools, plus on-demand MCP search handles.
+- MCP calls use the generated `MCP` namespace, directly or through a search
+  handle; handle `describe()` requests the exact `$api()` header and schema.
 - Nested calls dispatch through the same OpenClaw executor path that Tool
   Search uses.
 

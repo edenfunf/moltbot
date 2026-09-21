@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
 import type { DB as StateDatabase } from "../../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
@@ -8,7 +9,7 @@ import {
   type OpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
 import { drainWorkerSessionPlacement } from "./placement-drain.js";
-import { createPlacementMoveOps } from "./placement-move-intent.js";
+import { createPlacementMoveOps, readWorkerPlacementMove } from "./placement-move-intent.js";
 import { createPlacementPendingFailureOps } from "./placement-pending-failure.js";
 import {
   isCurrentPlacementTurnClaim,
@@ -57,7 +58,7 @@ import {
   createPlacementWorkspaceResultOps,
   hasCurrentWorkspaceResultClaim,
   hasWorkerWorkspacePendingResult,
-  readWorkerWorkspaceReconcilingSessionIds,
+  readWorkerWorkspaceReconciliationFacts,
 } from "./placement-workspace-result.js";
 import { consumePreparedEnvironment } from "./prepared-environment-store.js";
 import type { PreparedEnvironmentSelection } from "./store.js";
@@ -160,17 +161,6 @@ export function createWorkerSessionPlacementStore(
     return conflict ? { ...record, workspaceResultConflict: conflict } : record;
   };
 
-  const requireClaimOwner = (claim: WorkerSessionTurnClaim): void => {
-    const db = read();
-    const current = find(db, required(claim.sessionId, "session id"));
-    if (
-      !current ||
-      (!isCurrentPlacementTurnClaim(current, claim) && !hasCurrentWorkspaceResultClaim(db, claim))
-    ) {
-      throw new Error(`Session ${claim.sessionId} workspace result conflict owner changed`);
-    }
-  };
-
   const store = {
     ...createPlacementWorkspaceReservationOps(runtime),
     ...createPlacementTurnClaimOps(runtime),
@@ -185,6 +175,20 @@ export function createWorkerSessionPlacementStore(
 
     get(sessionId: string): WorkerSessionPlacementRecord | undefined {
       return withWorkspaceResultConflict(find(read(), required(sessionId, "session id")));
+    },
+
+    getProjectionFacts(sessionId: string) {
+      const id = required(sessionId, "session id");
+      const db = read();
+      const move = readWorkerPlacementMove(db, id);
+      const { placements, reconcilingSessionIds } = readWorkerWorkspaceReconciliationFacts(db, [
+        id,
+      ]);
+      return {
+        placement: withWorkspaceResultConflict(placements.get(id)),
+        move,
+        workspaceResultReconciling: reconcilingSessionIds.has(id),
+      };
     },
 
     getMany(sessionIds: readonly string[]): ReadonlyMap<string, WorkerSessionPlacementRecord> {
@@ -213,7 +217,7 @@ export function createWorkerSessionPlacementStore(
       const normalizedIds = [
         ...new Set(sessionIds.map((sessionId) => required(sessionId, "session id"))),
       ];
-      return readWorkerWorkspaceReconcilingSessionIds(read(), normalizedIds);
+      return readWorkerWorkspaceReconciliationFacts(read(), normalizedIds).reconcilingSessionIds;
     },
 
     retireSessionPlacement(input: WorkerSessionPlacementRetirement): void {
@@ -246,9 +250,17 @@ export function createWorkerSessionPlacementStore(
       claim: WorkerSessionTurnClaim,
       conflict: WorkerWorkspaceResultConflict | undefined,
     ): void {
-      requireClaimOwner(claim);
+      const db = read();
+      const current = find(db, required(claim.sessionId, "session id"));
+      if (
+        !current ||
+        (!isCurrentPlacementTurnClaim(current, claim) && !hasCurrentWorkspaceResultClaim(db, claim))
+      ) {
+        throw new Error(`Session ${claim.sessionId} workspace result conflict owner changed`);
+      }
       if (!conflict) {
         workspaceResultConflicts.delete(claim.sessionId);
+        sessionChanges.emit({ agentId: current.agentId, sessionKey: current.sessionKey });
         return;
       }
       const paths = conflict.paths.map(exactConflictPath);
@@ -263,6 +275,7 @@ export function createWorkerSessionPlacementStore(
         claim.sessionId,
         projectWorkspaceResultConflict(paths, stagedResultRef, conflict.totalCount),
       );
+      sessionChanges.emit({ agentId: current.agentId, sessionKey: current.sessionKey });
     },
 
     bindPreparedEnvironment(
@@ -601,16 +614,18 @@ export function createWorkerSessionPlacementStore(
       return current;
     },
 
-    listForReconcile(): WorkerSessionPlacementRecord[] {
+    listForReconcile(sessionKey?: string): WorkerSessionPlacementRecord[] {
       const db = read();
+      let select = query(db)
+        .selectFrom("worker_session_placements")
+        .selectAll()
+        .where("state", "not in", ["local", "reclaimed"]);
+      if (sessionKey !== undefined) {
+        select = select.where("session_key", "=", sessionKey);
+      }
       return executeSqliteQuerySync(
         db,
-        query(db)
-          .selectFrom("worker_session_placements")
-          .selectAll()
-          .where("state", "not in", ["local", "reclaimed"])
-          .orderBy("updated_at_ms")
-          .orderBy("session_id"),
+        select.orderBy("updated_at_ms").orderBy("session_id"),
       ).rows.map((row) => withWorkspaceResultConflict(fromRow(row))!);
     },
 

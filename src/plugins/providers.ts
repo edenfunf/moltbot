@@ -21,6 +21,7 @@ import {
   type PluginRegistrySnapshot,
 } from "./plugin-registry.js";
 import { createPluginIdScopeSet } from "./plugin-scope.js";
+import { pluginOwnsProviderRef } from "./provider-owner-index.js";
 
 type ProviderManifestLoadParams = {
   config?: PluginLoadOptions["config"];
@@ -94,40 +95,6 @@ function resolveProviderSurfacePluginIdSet(
       includeDisabled: true,
     }).plugins.flatMap((plugin) => (plugin.providers.length > 0 ? [plugin.id] : [])),
   );
-}
-
-function pluginOwnsProviderRef(plugin: PluginManifestRecord, normalizedProvider: string): boolean {
-  if (
-    plugin.providers.some((providerId) => normalizeProviderId(providerId) === normalizedProvider)
-  ) {
-    return true;
-  }
-  for (const [rawAlias, target] of Object.entries(plugin.providerAuthAliases ?? {})) {
-    if (typeof target !== "string") {
-      continue;
-    }
-    const alias = normalizeProviderId(rawAlias);
-    const targetProvider = normalizeProviderId(target);
-    if (
-      alias === normalizedProvider &&
-      targetProvider &&
-      plugin.providers.some((providerId) => normalizeProviderId(providerId) === targetProvider)
-    ) {
-      return true;
-    }
-  }
-  for (const [rawAlias, target] of Object.entries(plugin.modelCatalog?.aliases ?? {})) {
-    const alias = normalizeProviderId(rawAlias);
-    const targetProvider = normalizeProviderId(target.provider);
-    if (
-      alias === normalizedProvider &&
-      targetProvider &&
-      plugin.providers.some((providerId) => normalizeProviderId(providerId) === targetProvider)
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function manifestPluginResolvesRuntimeModelCatalogAugment(
@@ -793,10 +760,12 @@ export function resolveUsageHookProviderPluginContracts(params: {
   workspaceDir?: string;
   env?: PluginLoadOptions["env"];
 }): UsageHookProviderPluginContract[] {
-  const registry = loadProviderRegistrySnapshot(params);
+  const { snapshot: registry, manifestRegistry: preparedManifestRegistry } =
+    loadPluginRegistrySnapshotWithMetadata(params);
   const manifestRegistry = resolveManifestRegistry({
     ...params,
     registry,
+    manifestRegistry: preparedManifestRegistry,
     includeDisabled: true,
   });
   const usagePluginIds = new Set(
@@ -804,7 +773,9 @@ export function resolveUsageHookProviderPluginContracts(params: {
       plugin.contracts?.usageProviders?.length ? [plugin.id] : [],
     ),
   );
-  const normalizedConfig = normalizePluginsConfigWithRegistry(params.config?.plugins, registry);
+  const normalizedConfig = normalizePluginsConfigWithRegistry(params.config?.plugins, registry, {
+    manifestRegistry,
+  });
   const enabledPluginIds = listRegistryPluginIds(
     registry,
     (plugin) =>

@@ -7,10 +7,11 @@ import { patchSettings, type ChatWorkspaceDock } from "../../../app/settings.ts"
 import { t } from "../../../i18n/index.ts";
 import { formatUiError } from "../../../lib/format-error.ts";
 import { isGatewayMethodAdvertised } from "../../../lib/gateway-methods.ts";
+import { sessionWorkspaceFileKey } from "../../../lib/sessions/workspace.ts";
+import { openWorkspaceItem } from "./chat-session-workspace-preview.ts";
 import {
   clearWorkspaceTimer,
   getSessionWorkspace,
-  isCurrentSessionWorkspace,
   loadSessionWorkspace,
   openSessionCheckoutSidebar,
   refreshSessionWorkspaceState,
@@ -159,56 +160,6 @@ export function refreshSessionWorkspace(state: SessionWorkspaceHost, refreshFile
   }
 }
 
-function openWorkspaceItem<T>(
-  state: SessionWorkspaceHost,
-  workspace: SessionWorkspaceState,
-  itemId: string,
-  load: () => Promise<T | null | undefined>,
-  render: (result: T) => SidebarContent | null,
-  missingMessage: string,
-) {
-  if (!state.client || !state.connected) {
-    return;
-  }
-  const request = { kind: "loading" } as const;
-  workspace.activeId = itemId;
-  // The Review selection owns completion; Files rows can change independently.
-  openSessionCheckoutSidebar(state, request);
-  const isCurrent = () =>
-    state.sidebarContent === request && isCurrentSessionWorkspace(state, workspace);
-  const fail = (message: string) => {
-    if (!isCurrent()) {
-      return;
-    }
-    workspace.error = message;
-    const unavailable = { kind: "unavailable" as const, message };
-    trackSessionCheckoutSidebar(unavailable);
-    state.sidebarContent = unavailable;
-  };
-  void (async () => {
-    workspace.error = null;
-    try {
-      const result = await load();
-      const content = result == null ? null : render(result);
-      if (!content) {
-        fail(missingMessage);
-        return;
-      }
-      if (isCurrent()) {
-        trackSessionCheckoutSidebar(content);
-        state.sidebarContent = content;
-      }
-    } catch (error) {
-      fail(formatUiError(error));
-    } finally {
-      if (state.sidebarContent === request) {
-        state.sidebarContent = null;
-      }
-      requestWorkspaceUpdate(state);
-    }
-  })();
-}
-
 function openFile(
   state: SessionWorkspaceHost,
   workspace: SessionWorkspaceState,
@@ -219,7 +170,7 @@ function openFile(
   openWorkspaceItem(
     state,
     workspace,
-    `file:${path}`,
+    `file:${requestPath}`,
     () =>
       state.sessions.getFile(workspace.sessionKey, requestPath, {
         agentId: workspace.agentId,
@@ -346,6 +297,7 @@ function openFile(
           file.workspacePath || file.path || path,
         ].join("\u0000"),
         root: result.root ?? null,
+        mimeType: file.mimeType,
         language: languageForFile(name),
         line: opts.line ?? null,
         rawText: file.content,
@@ -353,6 +305,16 @@ function openFile(
       };
     },
     `Failed to load ${path}`,
+    {
+      line: opts.line,
+      label: basenameForPath(path),
+      revalidate: true,
+      resolveLabel: (result) => result.file?.name,
+      resolveKey: (result) => {
+        const canonicalPath = result.file?.workspacePath || result.file?.path;
+        return canonicalPath ? sessionWorkspaceFileKey(result.root, canonicalPath) : undefined;
+      },
+    },
   );
 }
 
@@ -424,6 +386,12 @@ function openArtifact(
             url: result.url,
           }),
     `Failed to load artifact ${artifactId}`,
+    {
+      label:
+        workspace.list?.artifacts?.find((artifact) => artifact.id === artifactId)?.title ||
+        t("chat.workspaceFiles.artifacts"),
+      resolveLabel: (result) => result.artifact?.title,
+    },
   );
 }
 
@@ -451,6 +419,7 @@ export function createSessionWorkspaceProps(
     state.connected &&
     state.agentsList &&
     !workspace.loading &&
+    !workspace.browserSearchTimer &&
     (!workspace.error || workspace.pendingReload) &&
     (workspace.pendingReload || workspace.list?.sessionKey !== state.sessionKey)
   ) {
@@ -467,6 +436,7 @@ export function createSessionWorkspaceProps(
     dock: workspace.dock,
     narrowLayout: options?.narrowLayout === true,
     filter: workspace.filter,
+    browserPath: workspace.browserPath,
     browserSearch: workspace.browserSearch,
     onSetFilter: (filter) => {
       workspace.filter = filter;

@@ -1,8 +1,10 @@
 // Render contract between the transcript projection and the per-session
 // virtualizer host owned by ChatTranscriptController.
 import type { TemplateResult } from "lit";
-import type { AssistantMessageExpansionState } from "../chat-thread.ts";
+import type { AssistantMessageExpansionState } from "../chat-message-recovery.ts";
 import type { ChatSessionScrollPosition } from "../scroll.ts";
+import type { ChatMessageEntryAnimations } from "./chat-message-entry.ts";
+import type { ChatPositionIndex } from "./chat-position-projection.ts";
 import type { TranscriptAnnouncement } from "./chat-transcript-announcement.ts";
 import type { TranscriptRow } from "./chat-transcript-layout.ts";
 
@@ -16,7 +18,9 @@ export type ChatTranscriptPendingScrollOffset = {
 
 export type TranscriptCallbacks = {
   onViewportResize?: () => void;
-  onReaderScroll?: () => void;
+  onReaderScroll?: (towardEnd?: boolean) => void;
+  /** The pane owns reader intent; geometry-only follow must honor that policy. */
+  canFollowEnd?: () => boolean;
 };
 
 export const CHAT_TRANSCRIPT_ESTIMATED_ROW_PX = 120;
@@ -35,6 +39,7 @@ export type TranscriptHeader = {
 };
 
 export type ChatTranscriptSession = {
+  readonly entryAnimations: ChatMessageEntryAnimations;
   readonly expandedAssistantMessages: Map<string, AssistantMessageExpansionState>;
   readonly liveAnnouncementText: string;
   readonly scrollElementRef: (element?: Element) => void;
@@ -60,7 +65,7 @@ export type ChatTranscriptSession = {
 
 /** Presentation contract produced by the chat-item projection. */
 export type ChatTranscriptProjection = {
-  positionMessages: readonly unknown[];
+  positionIndex: ChatPositionIndex;
   isDirectThread: boolean;
   isEmpty: boolean;
   showLoadingSkeleton: boolean;
@@ -78,4 +83,5 @@ export type TranscriptRenderSnapshot<T> = {
   header: TranscriptHeader | null;
   messageRows: ReadonlyMap<string, string>;
   renderKeyRows: ReadonlyMap<string, string>;
+  entryKeys: ChatMessageEntryAnimations["projectedKeys"];
 };

@@ -9,7 +9,6 @@ import {
   createCodeModeNamespaceRuntime,
   type CodeModeNamespaceRuntime,
 } from "./code-mode-namespaces.js";
-import { createPreflightDeclarations } from "./code-mode-preflight-declarations.js";
 import {
   CODE_MODE_WORKER_WATCHDOG_GRACE_MS,
   codeModeFailureCode,
@@ -17,7 +16,6 @@ import {
   createCodeModeApiFilesForRun,
   toToolSearchConfig,
   type CodeModeConfig,
-  type CodeModeLanguage,
   type CodeModeSettlementMode,
   type CodeModeWorkerResult,
   type PendingBridgeRequest,
@@ -27,14 +25,11 @@ import {
   cancelPendingBridgeStates,
   cancelPendingBridgeStatesById,
   codeModeAbortedResult,
-  codeModeWaitingReason,
   createCodeModeBridgeDispatchState,
   createCodeModeRunOwner,
   createPendingBridgeStates,
-  disposeCodeModeRun,
   pendingBridgeRequestsReplaySafe,
   pendingBridgeStatesForSettlement,
-  pendingToolCalls,
   removeExpiredRuns,
   reserveActiveRunSlot,
   resumingRunIds,
@@ -62,8 +57,6 @@ export async function runCodeModeExec(params: {
   resultBudget?: ToolResultBudget;
   code: string;
   assistantTurnId?: string;
-  language?: CodeModeLanguage;
-  typecheck?: boolean;
   restartSafe: boolean;
   signal?: AbortSignal;
   onUpdate?: AgentToolUpdateCallback;
@@ -89,6 +82,7 @@ export async function runCodeModeExec(params: {
   const namespaceRuntime = createCodeModeNamespaceRuntime(namespaceCatalog);
   const catalogProjection = createCodeModeCatalogProjection(runtime.all({ includeMcp: false }), {
     reservedNames: namespaceRuntime.descriptors.map((descriptor) => descriptor.globalName),
+    mcpIds: namespaceRuntime.mcpBindings.keys(),
   });
   const apiFiles = createCodeModeApiFilesForRun(namespaceRuntime, swarmEnabled);
   const owner = createCodeModeRunOwner(params.ctx, config);
@@ -118,15 +112,6 @@ export async function runCodeModeExec(params: {
     releaseReservation ??= reserveActiveRunSlot();
   });
   try {
-    const preflightDeclarations = params.typecheck
-      ? await createPreflightDeclarations(
-          runtime,
-          catalogProjection,
-          apiFiles,
-          namespaceRuntime,
-          config.memoryLimitBytes,
-        )
-      : undefined;
     const remainingMs = budget.deadlineMs - performance.now();
     if (remainingMs <= 0) {
       throw new Error("interrupted");
@@ -134,9 +119,8 @@ export async function runCodeModeExec(params: {
     const result = await runCodeModeWorker(
       {
         kind: "exec",
+        retainFinalValue: !params.restartSafe,
         source: params.code,
-        preflightDeclarations,
-        language: params.language,
         config: { ...config, timeoutMs: remainingMs },
         catalog: catalogProjection.guestBindings,
         apiFiles,
@@ -150,24 +134,10 @@ export async function runCodeModeExec(params: {
     );
     output.append(result.output);
     return await settleCodeModeResult({
-      owner,
+      ...context,
       pending,
       reservedActiveRunSlot: releaseReservation !== undefined,
       result,
-      output,
-      replaySafe: params.restartSafe,
-      budget,
-      parentToolCallId: params.toolCallId,
-      codeModeReplayId,
-      ctx: params.ctx,
-      config,
-      runtime,
-      catalogProjection,
-      namespaceRuntime,
-      bridgeDispatch,
-      approvalWait,
-      signal,
-      onUpdate: params.onUpdate,
     });
   } catch (error) {
     const code = signal.aborted ? ("aborted" as const) : codeModeFailureCode(error);
@@ -312,6 +282,7 @@ function dispatchCodeModeRequests(
     ...createPendingBridgeStates(newPendingRequests, {
       config: params.config,
       inbox: params.owner.inbox,
+      results: params.owner.results,
       runtime: params.runtime,
       catalogProjection: params.catalogProjection,
       namespaceRuntime: params.namespaceRuntime,
@@ -335,6 +306,7 @@ function createInlineHost(
 ): CodeModeWorkerInlineHost {
   return {
     onInputConsumed,
+    onNetworkContent: () => params.runtime.observeNetworkContent(params.parentToolCallId),
     onBoundary: async (boundary, context) => {
       params.output.append(boundary.output);
       cancelPendingBridgeStatesById(pending, boundary.canceledRequestIds);
@@ -485,6 +457,7 @@ async function settleCodeModeResult(params: CodeModeSettlementContext) {
         result = await runCodeModeWorker(
           {
             kind: "resume",
+            retainFinalValue: !params.replaySafe,
             snapshot: result.snapshot,
             config: {
               ...params.config,
@@ -576,7 +549,12 @@ async function settleCodeModeResult(params: CodeModeSettlementContext) {
     replaySafe: params.replaySafe,
     telemetry: telemetry(params.runtime),
   };
-  return output.takeResult(metadata, channels, params.runtime.hasNetworkContent());
+  const networkContent = params.runtime.hasNetworkContent();
+  return output.takeResult(metadata, channels, networkContent, (source) =>
+    params.replaySafe
+      ? { reason: "Not retained in restart-safe mode. Return less data." }
+      : params.owner.results.retain(source, networkContent),
+  );
 }
 
 export async function runWait(params: {
@@ -588,6 +566,9 @@ export async function runWait(params: {
   onRuntime?: (runtime: ToolSearchRuntime) => void;
 }) {
   removeExpiredRuns();
+  if (resumingRunIds.has(params.runId)) {
+    throw new ToolInputError("code mode run is already being resumed.");
+  }
   const state = activeRuns.get(params.runId);
   if (!state) {
     throw new ToolInputError("code mode run is unavailable or expired.");
@@ -602,9 +583,6 @@ export async function runWait(params: {
   ) {
     throw new ToolInputError("code mode run belongs to a different session.");
   }
-  if (resumingRunIds.has(state.runId)) {
-    throw new ToolInputError("code mode run is already being resumed.");
-  }
   params.onRuntime?.(state.runtime);
   resumingRunIds.add(state.runId);
   // One wait call shares a single monotonic deadline across draining the prior
@@ -618,6 +596,8 @@ export async function runWait(params: {
   );
   let releaseActiveRunSlot: (() => void) | undefined;
   try {
+    // Active waits own their slot and call deadline; idle expiry applies only after parking.
+    releaseActiveRunSlot = reserveActiveRunSlot(state.runId);
     const ready = await waitForPending(
       state.pending,
       state.settlementMode,
@@ -629,34 +609,13 @@ export async function runWait(params: {
       ? usableResumeBudgetMs(budget.deadlineMs, state.config)
       : undefined;
     if (!ready || resumeBudgetMs === undefined) {
-      // An aborted wait drops the suspended run: nothing will resume it, and
-      // parking it would pin a process-global active-run slot until TTL expiry.
       if (signal.aborted) {
-        disposeCodeModeRun(state.runId);
         return { ...codeModeAbortedResult(state), failurePhase: "bridge" as const };
       }
-      // Not ready, or ready without a usable resume budget: keep the snapshot
-      // so the next wait can resume with a fresh deadline instead of losing
-      // the run to a restore-only interrupt timeout.
-      const pending = state.pending.filter((entry) => !entry.settled);
-      return state.output.takeResult(
-        {
-          status: "waiting" as const,
-          runId: state.runId,
-          reason: codeModeWaitingReason(pending.length > 0 ? pending : state.pending),
-          pendingToolCalls: pendingToolCalls(pending.length > 0 ? pending : state.pending),
-          replaySafe: state.replaySafe,
-          telemetry: telemetry(state.runtime),
-        },
-        {},
-        state.runtime.hasNetworkContent(),
-      );
+      return storeSnapshotState(state);
     }
 
     const pending = state.pending.filter((entry) => !entry.settled);
-    // Keep the run's existing slot reserved while its live sibling calls and
-    // snapshot move through the worker; a new exec must not claim this slot.
-    releaseActiveRunSlot = reserveActiveRunSlot(state.runId);
     const delivery = takeSettledBridgeRequests(state.pending);
     // The resumed guest inherits only the remaining shared budget as its QuickJS
     // interrupt deadline; the extra host margin is watchdog grace only.
@@ -665,6 +624,7 @@ export async function runWait(params: {
       result = await runCodeModeWorker(
         {
           kind: "resume",
+          retainFinalValue: !state.replaySafe,
           snapshot: state.snapshot,
           config: {
             ...state.config,

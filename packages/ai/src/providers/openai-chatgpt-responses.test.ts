@@ -372,6 +372,28 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(connections).toBe(2);
   });
 
+  it.each([undefined, "default", "priority"] as const)(
+    "sends service tier %s from ChatGPT simple completions",
+    async (serviceTier) => {
+      let capturedPayload: unknown;
+      await streamSimpleOpenAICodexResponses(model, context, {
+        apiKey: createJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
+        serviceTier,
+        transport: "sse",
+        onPayload: (payload) => {
+          capturedPayload = payload;
+          throw new Error("stop after payload");
+        },
+      }).result();
+      expect(capturedPayload).toBeDefined();
+      if (serviceTier) {
+        expect(capturedPayload).toMatchObject({ service_tier: serviceTier });
+      } else {
+        expect(capturedPayload).not.toHaveProperty("service_tier");
+      }
+    },
+  );
+
   it.each([
     { id: "gpt-5.6-sol", withCatalog: true },
     { id: "gpt-5.6-sol", withCatalog: false },
@@ -447,6 +469,71 @@ describe("streamOpenAICodexResponses transport", () => {
       expected ? { effort: expected, summary: "auto" } : undefined,
     );
   });
+
+  it.each<{
+    reasoning: boolean;
+    requested: "off" | "high";
+    supported?: string[];
+    scalar?: boolean;
+    off?: string;
+    expected?: string;
+  }>([
+    { reasoning: true, requested: "off", supported: ["none", "high"], expected: "none" },
+    { reasoning: true, requested: "off", expected: undefined },
+    { reasoning: true, requested: "off", supported: ["high"], expected: undefined },
+    {
+      reasoning: true,
+      requested: "off",
+      supported: ["none", "high"],
+      scalar: false,
+      expected: undefined,
+    },
+    { reasoning: true, requested: "off", supported: ["low", "high"], off: "low", expected: "low" },
+    { reasoning: false, requested: "off", supported: ["none", "high"], expected: undefined },
+    { reasoning: false, requested: "high", supported: ["none", "high"], expected: undefined },
+  ])(
+    "preserves $requested with reasoning=$reasoning supported=$supported scalar=$scalar off=$off in simple ChatGPT requests",
+    async ({ reasoning, requested, supported, scalar, off, expected }) => {
+      let capturedPayload: { reasoning?: { effort?: string } } | undefined;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const body = Buffer.from(await request.arrayBuffer());
+        const decoded =
+          request.headers.get("content-encoding") === "zstd" ? zstdDecompressSync(body) : body;
+        capturedPayload = JSON.parse(decoded.toString("utf8"));
+        return completedSseResponse();
+      });
+
+      const result = await streamSimpleOpenAICodexResponses(
+        {
+          ...model,
+          id: "custom-reasoning",
+          reasoning,
+          thinkingLevelMap: { off: off ?? "none" },
+          compat: { supportedReasoningEfforts: supported, supportsReasoningEffort: scalar },
+        },
+        context,
+        {
+          apiKey: createJwt({
+            "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+          }),
+          reasoning: requested,
+          transport: "sse",
+        },
+      ).result();
+
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.stopReason).toBe("stop");
+      expect(capturedPayload?.reasoning).toEqual(
+        expected === undefined
+          ? undefined
+          : {
+              effort: expected,
+              ...(expected === "none" ? {} : { summary: "auto" }),
+            },
+      );
+    },
+  );
 
   it("sends strict structured output without adding tools", async () => {
     let capturedPayload: Record<string, unknown> | undefined;

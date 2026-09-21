@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Locator, Page } from "playwright";
 import { expect, it } from "vitest";
 import type {
@@ -147,7 +148,6 @@ suite.define(() => {
             __mockError: { code: "UNAVAILABLE", message: "Optional catalog unavailable" },
           },
           "config.get": configResponse("Before"),
-          "config.set": { ok: true, hash: "After" },
           "config.schema": {
             schema: {
               type: "object",
@@ -179,18 +179,23 @@ suite.define(() => {
           },
         },
       });
-      await page.goto(`${suite.server.baseUrl}settings/plugins/workboard#configuration`);
+      await page.goto(`${suite.server.baseUrl}settings/plugins/workboard?view=settings`);
       await gateway.waitForRequest("plugins.catalog.get");
-      await gateway.setMethodResponse("config.get", configResponse("After"));
-      await page.getByRole("textbox", { name: "Greeting", exact: true }).fill("After");
-      await gateway.waitForRequest("config.set");
+      const greeting = page.getByRole("textbox", { name: "Greeting", exact: true });
+      await greeting.fill("After");
+      await greeting.press("Tab");
+      const write = await gateway.waitForRequest("config.set");
+      expect(write.params).toMatchObject({ baseHash: "Before", raw: expect.any(String) });
+      const raw = asNullableRecord(write.params)?.raw;
+      expect.assert(typeof raw === "string");
+      expect(JSON.parse(raw)).toHaveProperty("plugins.entries.workboard.config.greeting", "After");
       await gateway.waitForRequest("plugins.inspect", { after: 1 });
       await gateway.waitForRequest("plugins.catalog.get", { after: 1 });
       await page
-        .locator(".plugin-catalog-detail__tabs")
-        .getByRole("tab", { name: "Skills", exact: true })
+        .locator(".plugins-settings-breadcrumb")
+        .getByRole("link", { name: "Workboard", exact: true })
         .click();
-      const rows = page.locator(".plugin-catalog-detail__row h3");
+      const rows = page.locator(".plugin-capability__copy > strong");
       await expect.poll(() => rows.allTextContents()).toEqual(["Current skill"]);
 
       await gateway.resolveDeferred(

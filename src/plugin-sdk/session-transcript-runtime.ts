@@ -59,6 +59,15 @@ export type {
   TranscriptTurnAdmission,
 } from "../config/sessions/session-accessor.js";
 export { hasPromptImageInput } from "../media/prompt-image-input.js";
+export {
+  readSessionTranscriptCatalogPage,
+  readSessionTranscriptCatalogTitle,
+  type SessionTranscriptCatalogPage,
+} from "../gateway/session-transcript-catalog.js";
+export {
+  createSessionCatalogGitHubLinker,
+  createSessionCatalogSourceActorProjector,
+} from "../gateway/session-catalog-identity.js";
 
 export {
   formatSessionTranscriptMemoryHitKey,
@@ -456,7 +465,10 @@ export async function appendSessionTranscriptMessageByIdentity<TMessage>(
 
 /** Appends one message while preserving distinct suppression and session-rebind outcomes. */
 export async function appendSessionTranscriptMessageByIdentityStrict<TMessage>(
-  params: SessionTranscriptAppendMessageParams<TMessage>,
+  params: SessionTranscriptAppendMessageParams<TMessage> & {
+    runId?: string;
+    updateMode?: SessionTranscriptUpdateMode;
+  },
 ): Promise<SessionTranscriptStrictMessageAppendResult<TMessage>> {
   const expectedSessionId = params.sessionId?.trim();
   if (!expectedSessionId) {
@@ -466,6 +478,7 @@ export async function appendSessionTranscriptMessageByIdentityStrict<TMessage>(
     ...(params.config ? { config: params.config } : {}),
     ...(params.cwd ? { cwd: params.cwd } : {}),
     expectedSessionId,
+    runId: params.runId,
     messages: [
       {
         ...(params.eventId !== undefined ? { eventId: params.eventId } : {}),
@@ -486,7 +499,7 @@ export async function appendSessionTranscriptMessageByIdentityStrict<TMessage>(
           : {}),
       },
     ],
-    updateMode: "none",
+    updateMode: params.updateMode ?? "none",
   });
   if (turn.rejectedReason) {
     return { kind: "rejected", reason: turn.rejectedReason };

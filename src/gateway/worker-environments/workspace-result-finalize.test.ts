@@ -59,7 +59,7 @@ describe("concurrent worker workspace results", () => {
     }
     const inputTurn = {
       ...turn("cleanup-failure"),
-      skillsSnapshot: buildSkillSnapshot(source, {
+      skillsSnapshot: await buildSkillSnapshot(source, {
         entries: loadWorkspaceSkills(source, { workspaceOnly: true }),
       }),
     };
@@ -305,7 +305,7 @@ describe("concurrent worker workspace results", () => {
                     sequence: 1,
                     retain,
                   },
-                  () => [],
+                  async () => [],
                 );
                 retained.resolve();
               } catch (error) {

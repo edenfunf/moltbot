@@ -9,7 +9,7 @@ import {
   setTaskRegistryDeliveryRuntimeForTests,
 } from "./task-registry-query.js";
 
-export { isParentFlowLinkError } from "./task-registry-common.js";
+export { isParentFlowLinkError } from "./task-registry-flow-link.js";
 export { assertTaskCancellationReadyById, cancelTaskById } from "./task-registry-cancel.js";
 export { maybeDeliverTaskTerminalUpdate } from "./task-registry-delivery.js";
 export {
@@ -32,15 +32,15 @@ export {
   listFreshTasksForOwnerKey,
   listTaskRecordPage,
   listTaskRecords,
-  listTaskRecordsUnsorted,
-  listTasksForAgentId,
+  listTaskRecordsForOwnerTree,
+  listTaskSessionActivity,
   listTasksForFlowId,
   listTasksForOwnerKey,
   listTasksForRelatedSessionKey,
   resolveTaskForLookupToken,
 } from "./task-registry-query.js";
 export { publishTaskRecordAfterAtomicStore } from "./task-registry-publication.js";
-export { ensureTaskRegistryReady, reloadTaskRegistryFromStore } from "./task-registry-state.js";
+export { ensureTaskRegistryReady } from "./task-registry-state.js";
 
 if (process.env.VITEST || process.env.NODE_ENV === "test") {
   (globalThis as Record<PropertyKey, unknown>)[Symbol.for("openclaw.taskRegistryTestApi")] = {

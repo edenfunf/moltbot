@@ -3,12 +3,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import { nativeGatewaysCapability } from "../app/native-gateways.runtime.ts";
-import {
-  createGatewayHarness,
-  createSessions,
-  mountSidebar,
-  setupSidebarTest,
-} from "../test-helpers/app-sidebar.ts";
+import { setupSidebarTest } from "../test-helpers/app-sidebar-setup.ts";
+import { createGatewayHarness, createSessions, mountSidebar } from "../test-helpers/app-sidebar.ts";
 import {
   clearNativeGatewayTestState,
   setNativeGatewayTestState,
@@ -79,11 +75,11 @@ describe("AppSidebar native Gateway menu", () => {
     ).toEqual(["Connected", "Unreachable", "Unknown status"]);
     expect(rows.map((row) => row.querySelector('[slot="details"] kbd')?.textContent)).toEqual([
       "⌘1",
-      "⌘2",
+      undefined,
       "⌘3",
     ]);
-    for (const row of rows) {
-      expect(row.querySelector("kbd")?.getAttribute("aria-hidden")).toBe("true");
+    for (const shortcut of menu.querySelectorAll("kbd")) {
+      expect(shortcut.getAttribute("aria-hidden")).toBe("true");
     }
     expect(rows[0]!.querySelector(".sidebar-gateway-primary")?.textContent).toBe("primary");
     expect(rows[1]!.querySelector(".sidebar-gateway-primary")).toBeNull();

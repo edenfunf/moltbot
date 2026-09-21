@@ -2,7 +2,6 @@ import { readSessionMessageIdentity } from "@openclaw/gateway-client/browser";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { SessionObserverDigest } from "../../../../packages/gateway-protocol/src/schema/sessions.js";
 import type { GatewayEventFrame } from "../../api/gateway.ts";
-import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-cache.ts";
 import { extractText } from "../../lib/chat/message-extract.ts";
 import {
   isHiddenAssistantStreamText,
@@ -23,7 +22,7 @@ import {
   resolveUiSelectedGlobalAgentId,
 } from "../../lib/sessions/session-key.ts";
 import { handleChatGatewayEvent, type ChatEventPayload } from "./chat-gateway.ts";
-import { loadChatBranches, retireChatBranchRequests } from "./chat-history-branches.ts";
+import { invalidateChatBranches, loadChatBranches } from "./chat-history-branches.ts";
 import { sleep } from "./chat-history-retry.ts";
 import { chatScopedEventSessionMatches } from "./chat-history-state.ts";
 import { loadChatHistory } from "./chat-history.ts";
@@ -42,6 +41,7 @@ import {
 import { recordChatSendServerTiming } from "./chat-send-timing.ts";
 import { refreshCurrentChatSessionList } from "./chat-session.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
+import { applyChatModelCatalogSnapshot } from "./chat-state-refresh.ts";
 import { requestChatPageUpdate } from "./chat-state-render.ts";
 import { resolveChatAgentId, selectedChatSessionRow } from "./chat-state-route.ts";
 import { handleBackgroundTasksEvent } from "./components/chat-background-tasks.ts";
@@ -51,8 +51,10 @@ import {
 } from "./components/chat-session-workspace.ts";
 import {
   getChatSessionProjection,
+  observeChatRunModel,
   readChatSessionProjectionScope,
   reduceChatSessionProjection,
+  retireChatSubmissionDisplay,
 } from "./history-merge.ts";
 import { captureOutboxPayloadOwner } from "./outbox-payloads.ts";
 import {
@@ -149,12 +151,13 @@ function handleSessionMessageEvent(
 ) {
   const event = readSessionChangedEvent(payload);
   if (!event || !globalSessionEventMatchesChat(state, event)) {
-    return;
+    return false;
   }
   const matchesChat = sessionMessageMatchesChat(state, event);
   const isUserMessage =
     readSessionMessageIdentity(asNullableRecord(payload)?.message)?.role === "user";
   if (matchesChat) {
+    invalidateChatBranches(state);
     // A previous run can persist its final after the next local run starts.
     // Admit that sequenced row now so the later unsequenced chat.final replay
     // replaces it in place instead of appending below the newer user turn.
@@ -180,11 +183,11 @@ function handleSessionMessageEvent(
           supersedeInFlight: true,
         }).finally(() => state.requestUpdate?.());
       }
-      return;
+      return true;
     }
     if (finishSessionMessageRunReconcile(state, event.key, runId, result.row, presentation)) {
       state.pendingSessionMessageReloadSessionKey = null;
-      return;
+      return true;
     }
     void refreshCurrentChatSessionList(state).then(() => {
       if (!state.pendingSessionMessageReloadSessionKey || state.chatRunId !== runIdBeforeApply) {
@@ -202,7 +205,7 @@ function handleSessionMessageEvent(
         state.pendingSessionMessageReloadSessionKey = null;
       }
     });
-    return;
+    return true;
   }
   if (matchesChat) {
     state.pendingSessionMessageReloadSessionKey = null;
@@ -211,6 +214,7 @@ function handleSessionMessageEvent(
       supersedeInFlight: isUserMessage && event.hasActiveRun === true,
     }).finally(() => state.requestUpdate?.());
   }
+  return matchesChat;
 }
 
 function replayPendingSessionMessageReload(
@@ -369,21 +373,16 @@ function handleSessionsChangedEvent(
     state.retireSessionCompanion?.(event.key, event.agentId);
   }
   const resetsSelectedSession = matchesChat && resetsSession;
+  if (matchesChat && (resetsSession || source?.reason === "new")) {
+    const initial = state.chatSubmissions?.readInitial(state.sessionKey, state.client ?? null);
+    if (initial) {
+      retireChatSubmissionDisplay(state, new Set([initial.pendingRunId]));
+    }
+  }
   const changesBranchTopology =
     matchesChat && typeof source?.reason === "string" && BRANCH_TOPOLOGY_REASONS.has(source.reason);
   if (resetsSelectedSession || changesBranchTopology) {
     retirePullRequestRefreshes(state);
-  }
-  if (
-    matchesChat &&
-    state.client &&
-    (resetsSession || source?.reason === "command-metadata" || source?.reason === "patch")
-  ) {
-    // Selection commands and model patches can change the persisted profile without changing credentials.
-    invalidateChatMetadataStore(state.client, {
-      agentId: resolveChatAgentId(state) ?? undefined,
-      sessionKey: state.sessionKey,
-    });
   }
   if (resetsSelectedSession) {
     const scope = readChatSessionProjectionScope(state, { agentId: resolveChatAgentId(state) });
@@ -392,7 +391,7 @@ function handleSessionsChangedEvent(
     reduceChatSessionProjection(state, { type: "sessionReset" }, { scope });
   }
   if (changesBranchTopology) {
-    retireChatBranchRequests(state);
+    invalidateChatBranches(state);
     state.chatBranches = [];
     state.chatBranchesSessionKey = null;
     state.chatBranchesConnectionEpoch = null;
@@ -405,11 +404,29 @@ function handleSessionsChangedEvent(
     state.selectedChatSessionArchived = event.archived;
   }
   const result = reconcileSessionEvent(state, payload);
+  const modelRunId = event?.clientRunId ?? event?.runId;
+  if (
+    matchesChat &&
+    source?.phase === "model" &&
+    modelRunId &&
+    result.admittedRow &&
+    (state.chatSending
+      ? state.chatQueue.some(
+          (item) =>
+            item.sendState === "sending" &&
+            (item.queueMode === "steer" && state.chatRunId
+              ? state.chatRunId === modelRunId
+              : item.sendRunId === modelRunId),
+        )
+      : !state.chatRunId || state.chatRunId === modelRunId)
+  ) {
+    observeChatRunModel(state, modelRunId, result.admittedRow);
+  }
   if (resetsSelectedSession || (matchesChat && source?.reason === "compact")) {
     void loadChatHistory(state, { deferBranches: !presented }).finally(() =>
       state.requestUpdate?.(),
     );
-    return;
+    return true;
   }
   if (
     matchesChat &&
@@ -418,12 +435,13 @@ function handleSessionsChangedEvent(
     source.messageId === undefined &&
     source.messageSeq === undefined
   ) {
+    invalidateChatBranches(state);
     // Legacy multi-message writes cannot prove individual message cursors.
     // One scoped authoritative snapshot recovers them without ending a run.
     void loadChatHistory(state, { deferBranches: !presented }).finally(() =>
       state.requestUpdate?.(),
     );
-    return;
+    return true;
   }
   if (
     matchesChat &&
@@ -448,6 +466,7 @@ function handleSessionsChangedEvent(
       presentation,
     );
   }
+  return matchesChat;
 }
 
 function terminalOwnsActiveChatStream(
@@ -523,6 +542,10 @@ export function handlePageGatewayEvent(
   event: GatewayEventFrame,
   isPresented: ChatPanePresentation = () => true,
 ): void {
+  if (event.event === "models.snapshot") {
+    applyChatModelCatalogSnapshot(state);
+    return;
+  }
   if (event.event === "session.approval") {
     const payload = asNullableRecord(event.payload);
     if (!payload || typeof payload.sessionKey !== "string") {
@@ -610,7 +633,7 @@ export function handlePageGatewayEvent(
         replayPendingSessionMessageReload(state, payload, isPresented);
       }
       if (terminalPayload) {
-        void resumeStoredChatOutboxes(state);
+        void resumeStoredChatOutboxes(state, event);
         if (sessionMatches) {
           if (isPresented()) {
             refreshSessionWorkspace(state, isSidebarSlotVisible(state.sidebarLayout, "workspace"));
@@ -619,7 +642,9 @@ export function handlePageGatewayEvent(
           }
         }
       }
-      requestChatPageUpdate(state, payload?.state === "delta" ? "animation-frame" : "immediate");
+      if (sessionMatches) {
+        requestChatPageUpdate(state, payload?.state === "delta" ? "animation-frame" : "immediate");
+      }
     };
     if (!terminalPayload) {
       apply();
@@ -690,15 +715,19 @@ export function handlePageGatewayEvent(
     return;
   }
   if (event.event === "session.message") {
-    handleSessionMessageEvent(state, event.payload, isPresented);
-    void resumeStoredChatOutboxes(state);
-    requestChatPageUpdate(state, "animation-frame");
+    const scopedChange = handleSessionMessageEvent(state, event.payload, isPresented);
+    void resumeStoredChatOutboxes(state, event);
+    if (scopedChange) {
+      requestChatPageUpdate(state, "animation-frame");
+    }
     return;
   }
   if (event.event === "sessions.changed") {
-    handleSessionsChangedEvent(state, event.payload, isPresented);
-    void resumeStoredChatOutboxes(state);
-    requestChatPageUpdate(state, "animation-frame");
+    const scopedChange = handleSessionsChangedEvent(state, event.payload, isPresented);
+    void resumeStoredChatOutboxes(state, event);
+    if (scopedChange) {
+      requestChatPageUpdate(state, "animation-frame");
+    }
     return;
   }
   if (event.event === "task") {

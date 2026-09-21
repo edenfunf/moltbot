@@ -15,6 +15,7 @@ import { createSkill } from "../skills/view.test-support.ts";
 import {
   createAgentViewTestProps as createProps,
   inertAgentFileControls,
+  primaryModelPicker,
 } from "./agents-view.test-helpers.ts";
 import { renderAgentChannels, renderAgentFiles } from "./panels-status-files.ts";
 import { renderAgents } from "./view.ts";
@@ -116,15 +117,15 @@ describe("renderAgents", () => {
           activePanel: "cron",
           selectedAgentId: "alpha",
           cron: {
-            status: { enabled: true, triggersEnabled: true, jobs: 51, nextWakeAtMs },
-            jobs: [job],
-            jobsTotal: 1,
-            jobsHasMore: false,
-            jobsLoadingMore: false,
-            scopedTotal: 1,
-            scopedNextWakeAtMs,
-            loading: false,
-            error: null,
+            cronStatus: { enabled: true, triggersEnabled: true, jobs: 51, nextWakeAtMs },
+            cronJobs: [job],
+            cronJobsTotal: 1,
+            cronJobsHasMore: false,
+            cronJobsLoadingMore: false,
+            cronScopedTotal: 1,
+            cronScopedNextWakeAtMs: scopedNextWakeAtMs,
+            cronLoading: false,
+            cronError: null,
           },
         }),
       ),
@@ -189,15 +190,15 @@ describe("renderAgents", () => {
             activePanel: "cron",
             selectedAgentId: "alpha",
             cron: {
-              status: { enabled: true, triggersEnabled: true, jobs: 80, nextWakeAtMs: null },
-              jobs: cronState.cronJobs,
-              jobsTotal: cronState.cronJobsTotal,
-              jobsHasMore: cronState.cronJobsHasMore,
-              jobsLoadingMore: cronState.cronJobsLoadingMore,
-              scopedTotal: 51,
-              scopedNextWakeAtMs: null,
-              loading: cronState.cronLoading,
-              error: cronState.cronError,
+              cronStatus: { enabled: true, triggersEnabled: true, jobs: 80, nextWakeAtMs: null },
+              cronJobs: cronState.cronJobs,
+              cronJobsTotal: cronState.cronJobsTotal,
+              cronJobsHasMore: cronState.cronJobsHasMore,
+              cronJobsLoadingMore: cronState.cronJobsLoadingMore,
+              cronScopedTotal: 51,
+              cronScopedNextWakeAtMs: null,
+              cronLoading: cronState.cronLoading,
+              cronError: cronState.cronError,
             },
             onCronLoadMore: () => {
               const nextPage = loadCronJobsPage(cronState, { append: true, tableFilters: true });
@@ -244,28 +245,6 @@ describe("renderAgents", () => {
     expect(panel?.agentId).toBe("beta");
   });
 
-  it("renders the custom agent select with the provided agents and selected label", async () => {
-    const container = document.createElement("div");
-    document.body.append(container);
-
-    try {
-      render(renderAgents(createProps()), container);
-      const select = container.querySelector("openclaw-agent-select") as
-        | (HTMLElement & {
-            options: Array<{ value: string }>;
-            updateComplete: Promise<boolean>;
-          })
-        | null;
-      expect(select).not.toBeNull();
-      await select?.updateComplete;
-
-      expect(select?.options.map((option) => option.value)).toEqual(["alpha", "beta"]);
-      expect(select?.querySelector(".agent-select__label")?.textContent?.trim()).toBe("Beta");
-    } finally {
-      container.remove();
-    }
-  });
-
   it("selects the configured primary model on initial render", async () => {
     const container = document.createElement("div");
     const configForm = {
@@ -286,11 +265,12 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "alpha",
           config: {
-            form: configForm,
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configForm,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
         }),
       ),
@@ -298,9 +278,8 @@ describe("renderAgents", () => {
     );
 
     await updatePickers(container);
-    const defaultSelect = container.querySelector("openclaw-select-picker.model-picker__select");
     expect(
-      defaultSelect
+      primaryModelPicker(container)
         ?.querySelector('[role="option"][aria-selected="true"]')
         ?.getAttribute("data-value"),
     ).toBe("openai/gpt-5.4");
@@ -310,11 +289,12 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "beta",
           config: {
-            form: configForm,
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configForm,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
         }),
       ),
@@ -322,10 +302,10 @@ describe("renderAgents", () => {
     );
 
     await updatePickers(container);
-    const inheritedSelect = container.querySelector("openclaw-select-picker.model-picker__select");
-    expect(
-      inheritedSelect?.querySelector('[role="option"][aria-selected="true"]')?.textContent?.trim(),
-    ).toBe("Inherit default (openai/gpt-5.4)");
+    const inheritedSelection = primaryModelPicker(container)?.querySelector(
+      '[role="option"][aria-selected="true"]',
+    );
+    expect(inheritedSelection?.textContent?.trim()).toBe("Inherit default (openai/gpt-5.4)");
   });
 
   it("shows canonical model names alongside configured aliases in agent options", async () => {
@@ -358,11 +338,12 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "alpha",
           config: {
-            form: configForm,
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configForm,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
           modelCatalog: [
             {
@@ -390,7 +371,7 @@ describe("renderAgents", () => {
     );
 
     await updatePickers(container);
-    const select = container.querySelector("openclaw-select-picker.model-picker__select");
+    const select = primaryModelPicker(container);
     expect(
       select?.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-value"),
     ).toBe("anthropic/claude-opus-4-8");
@@ -422,7 +403,7 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "beta",
           config: {
-            form: {
+            configForm: {
               agents: {
                 defaults: {
                   model: { primary: "openai/gpt-5.4", fallbacks: [fallback] },
@@ -430,10 +411,11 @@ describe("renderAgents", () => {
                 entries: { alpha: {}, beta: { model } },
               },
             },
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
         }),
       ),
@@ -466,11 +448,12 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "beta",
           config: {
-            form: configForm,
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configForm,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
         }),
       ),
@@ -478,7 +461,7 @@ describe("renderAgents", () => {
     );
 
     await updatePickers(container);
-    const betaSelect = container.querySelector("openclaw-select-picker.model-picker__select");
+    const betaSelect = primaryModelPicker(container);
     expect(
       betaSelect?.querySelector('[role="option"][data-value="openai/gpt-5.4"]'),
     ).not.toBeNull();
@@ -488,11 +471,12 @@ describe("renderAgents", () => {
         createProps({
           selectedAgentId: "alpha",
           config: {
-            form: configForm,
-            loading: false,
-            saving: false,
-            dirty: false,
-            error: null,
+            configForm,
+            configSnapshot: null,
+            configLoading: false,
+            configSaving: false,
+            configFormDirty: false,
+            lastError: null,
           },
         }),
       ),
@@ -500,7 +484,7 @@ describe("renderAgents", () => {
     );
 
     await updatePickers(container);
-    const alphaSelect = container.querySelector("openclaw-select-picker.model-picker__select");
+    const alphaSelect = primaryModelPicker(container);
     expect(
       alphaSelect?.querySelector('[role="option"][data-value="anthropic/claude-sonnet-4-6"]'),
     ).not.toBeNull();
@@ -542,15 +526,15 @@ describe("renderAgents", () => {
       renderAgents(
         createProps({
           agentSkills: {
-            report: {
+            agentSkillsReport: {
               workspaceDir: "/tmp/workspace",
               managedSkillsDir: "/tmp/skills",
               skills: [createSkill()],
             },
-            loading: false,
-            error: null,
-            agentId: "alpha",
-            filter: "",
+            agentSkillsLoading: false,
+            agentSkillsError: null,
+            agentSkillsAgentId: "alpha",
+            skillsFilter: "",
           },
         }),
       ),
@@ -566,15 +550,15 @@ describe("renderAgents", () => {
       renderAgents(
         createProps({
           agentSkills: {
-            report: {
+            agentSkillsReport: {
               workspaceDir: "/tmp/workspace",
               managedSkillsDir: "/tmp/skills",
               skills: [createSkill()],
             },
-            loading: false,
-            error: null,
-            agentId: "beta",
-            filter: "",
+            agentSkillsLoading: false,
+            agentSkillsError: null,
+            agentSkillsAgentId: "beta",
+            skillsFilter: "",
           },
         }),
       ),
@@ -599,10 +583,10 @@ describe("renderAgents", () => {
           createProps({
             activePanel: "channels",
             channels: {
-              snapshot: null,
-              loading: false,
-              error: null,
-              lastSuccess: null,
+              channelsSnapshot: null,
+              channelsLoading: false,
+              channelsError: null,
+              channelsLastSuccess: null,
             },
           }),
         ),

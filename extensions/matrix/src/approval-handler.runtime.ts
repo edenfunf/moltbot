@@ -1,4 +1,3 @@
-// Matrix plugin module implements approval handler behavior.
 import {
   createChannelApprovalNativeRuntimeAdapter,
   type ChannelApprovalCapabilityHandlerContext,
@@ -35,7 +34,7 @@ import {
   isMatrixAnyApprovalClientEnabled,
   shouldHandleMatrixApprovalRequest,
 } from "./exec-approvals.js";
-import { resolveMatrixAccount } from "./matrix/accounts.js";
+import { resolveMatrixAccountConfig } from "./matrix/account-config.js";
 import { deleteMatrixMessage, editMatrixMessage } from "./matrix/actions/messages.js";
 import { repairMatrixDirectRooms } from "./matrix/direct-management.js";
 import type { MatrixClient } from "./matrix/sdk.js";
@@ -222,7 +221,7 @@ async function prepareTarget(
   }
   const threadId = normalizeThreadId(params.rawTarget.threadId);
   if (target.kind === "user") {
-    const account = resolveMatrixAccount({
+    const accountConfig = resolveMatrixAccountConfig({
       cfg: params.cfg,
       accountId: resolved.accountId,
     });
@@ -232,7 +231,7 @@ async function prepareTarget(
         await repairDirectRooms({
           client: resolved.context.client,
           remoteUserId: target.id,
-          encrypted: account.config.encryption === true,
+          encrypted: accountConfig.encryption === true,
         }),
     );
     if (!repaired.activeRoomId) {
@@ -517,7 +516,7 @@ export const matrixApprovalNativeRuntime = createChannelApprovalNativeRuntimeAda
         result.primaryMessageId?.trim() ||
         platformMessageIds[0] ||
         result.messageId.trim();
-      registerMatrixApprovalReactionTarget({
+      await registerMatrixApprovalReactionTarget({
         accountId: resolved.accountId,
         roomId: result.roomId,
         eventId: reactionEventId,
@@ -590,7 +589,7 @@ export const matrixApprovalNativeRuntime = createChannelApprovalNativeRuntimeAda
     },
   },
   interactions: {
-    bindPending: (params) => {
+    bindPending: async (params) => {
       const accountId = params.accountId?.trim();
       if (!accountId) {
         return null;
@@ -603,7 +602,7 @@ export const matrixApprovalNativeRuntime = createChannelApprovalNativeRuntimeAda
       if (!target) {
         return null;
       }
-      registerMatrixApprovalReactionTarget({
+      await registerMatrixApprovalReactionTarget({
         accountId: target.accountId,
         roomId: target.roomId,
         eventId: target.eventId,
@@ -614,14 +613,14 @@ export const matrixApprovalNativeRuntime = createChannelApprovalNativeRuntimeAda
       });
       return target;
     },
-    unbindPending: (params) => {
+    unbindPending: async (params) => {
       const target = normalizeReactionTargetRef(params.binding);
       if (!target) {
         return;
       }
-      unregisterMatrixApprovalReactionTarget(target);
+      await unregisterMatrixApprovalReactionTarget(target);
     },
-    cancelDelivered: (params) => {
+    cancelDelivered: async (params) => {
       const accountId = params.accountId?.trim();
       if (!accountId) {
         return;
@@ -634,7 +633,7 @@ export const matrixApprovalNativeRuntime = createChannelApprovalNativeRuntimeAda
       if (!target) {
         return;
       }
-      unregisterMatrixApprovalReactionTarget(target);
+      await unregisterMatrixApprovalReactionTarget(target);
     },
   },
 });

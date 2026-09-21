@@ -100,7 +100,9 @@ async function runUntilCompleted(params: {
   code: string;
 }): Promise<Record<string, unknown>> {
   let details = resultDetails(
-    await params.execTool.execute("code-nodes-call", { code: params.code }),
+    await params.execTool.execute("code-nodes-call", {
+      code: params.code,
+    }),
   );
   for (let index = 0; index < 8 && details.status === "waiting"; index += 1) {
     details = resultDetails(
@@ -155,15 +157,15 @@ describe("Code Mode nodes", () => {
     testing.resumingRunIds.clear();
   });
 
-  it("lists nodes and returns a callable handle with conditional directory sugar", async () => {
+  it("lists nodes and invokes typed handles", async () => {
     const harness = createHarness();
     const details = await runUntilCompleted({
       ...harness,
       code: `
         const listed = await nodes.list();
-        const node = await nodes.get("Desk");
+        const node = await nodes.get(listed.find(entry => entry.connected)?.id ?? "Desk");
         const invoked = await node.invoke("device.status", { detail: true });
-        const directory = await node.listDir("/tmp");
+        const directory = node.listDir ? await node.listDir("/tmp") : undefined;
         return {
           listed,
           id: node.id,

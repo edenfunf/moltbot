@@ -2,6 +2,10 @@
 import type { FlowRecordPatch } from "./task-flow-registry.records.js";
 import type { TaskFlowRecord } from "./task-flow-registry.types.js";
 
+export type TaskFlowRegistryMirroredSync =
+  | { changed: false; flow: TaskFlowRecord | null }
+  | { changed: true; flow: TaskFlowRecord; previous: TaskFlowRecord };
+
 export type TaskFlowRegistryUpdate = {
   flowId: string;
   expectedRevision: number;
@@ -25,7 +29,7 @@ export type TaskFlowRegistryUpdatePublication = {
   publish: () => void;
 };
 
-/** Full task-flow registry snapshot used for persistence restore and replacement writes. */
+/** Task-flow rows for a full restore or an explicitly scoped projection refresh. */
 export type TaskFlowRegistryStoreSnapshot = {
   flows: Map<string, TaskFlowRecord>;
 };

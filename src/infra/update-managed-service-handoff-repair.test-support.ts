@@ -8,10 +8,16 @@ import {
   writeOpenAiResponsesSse,
   writeOpenAiResponsesText,
 } from "../../test/helpers/openai-responses-sse.js";
+import { createDeferred } from "../../test/helpers/promise.js";
+import { updateExecutorNativeEntrypoints } from "../cli/update-cli/update-command-executor-native-runtime.test-support.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withServer } from "../plugin-sdk/test-helpers/http-test-server.js";
-import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
-import { resolveRuntimeWorkerArgv } from "./runtime-worker-url.js";
+import {
+  runtimeProcessEntrypoints,
+  SQLITE_READONLY_CHILD_ARG,
+} from "./runtime-process-entrypoints.js";
+import { resolveRuntimeWorkerArgv, resolveRuntimeWorkerUrl } from "./runtime-worker-url.js";
+import { UPDATE_RUN_ID_ENV } from "./update-control-plane-sentinel.js";
 import type {
   ManagedRepairBoundary,
   ManagedServiceManagerBoundaryRunner,
@@ -19,6 +25,7 @@ import type {
 
 export function readManagedRepairEffects(root: string) {
   return {
+    packagedReadOnly: existsSync(path.join(root, "repair-readonly-packaged")),
     firstSpawn: existsSync(path.join(root, "repair-spawn-first")),
     secondSpawn: existsSync(path.join(root, "repair-spawn-second")),
     firstExec: existsSync(path.join(root, "candidate", "repair-first-exec.txt")),
@@ -85,11 +92,32 @@ export function managedRepairConfig(baseUrl: string): OpenClawConfig {
 
 function managedRepairSpawnPreload(root: string): string {
   const snapshotWorkerArgs = resolveRuntimeWorkerArgv(
-    new URL("./update-candidate-state.worker.ts", import.meta.url),
+    resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.updateCandidateState),
+  );
+  const readOnlyWorkerArgs = resolveRuntimeWorkerArgv(
+    resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.sqliteReadOnly),
   );
   return `const fs = require("node:fs");
     const childProcess = require("node:child_process");
     const spawn = childProcess.spawn;
+    const spawnSync = childProcess.spawnSync;
+    const readOnlyWorkerArgs = ${JSON.stringify(readOnlyWorkerArgs)};
+    childProcess.spawnSync = function(command, args, options) {
+      // Keep each fresh, source-neutral snapshot; only replace its TS loader with this build's worker.
+      if (command !== process.execPath || !Array.isArray(args) ||
+          args.length !== readOnlyWorkerArgs.length + 4 ||
+          !readOnlyWorkerArgs.every((arg, index) => args[index] === arg) ||
+          args[readOnlyWorkerArgs.length] !== ${JSON.stringify(SQLITE_READONLY_CHILD_ARG)} ||
+          args[readOnlyWorkerArgs.length + 1] !== "sync") {
+        return spawnSync.apply(this, arguments);
+      }
+      const result = spawnSync.call(this, command,
+        [${JSON.stringify(path.resolve("dist", runtimeProcessEntrypoints.sqliteReadOnly.distWorkerPath))}, ...args.slice(readOnlyWorkerArgs.length)], options);
+      if (result.status === 0 && result.pid > 0) {
+        fs.writeFileSync(${JSON.stringify(path.join(root, "repair-readonly-packaged"))}, String(result.pid));
+      }
+      return result;
+    };
     const snapshotWorkerArgs = ${JSON.stringify(snapshotWorkerArgs)};
     childProcess.spawn = function(command, args, options) {
       // Rehearsal strips NODE_OPTIONS; carry the recorder only to its owned repair and supervisor workers.
@@ -130,20 +158,19 @@ export async function managedRepairUpdaterScript(params: {
   const candidate = path.join(params.root, "candidate");
   await fs.mkdir(candidate);
   await fs.symlink(path.resolve("dist"), path.join(candidate, "dist"), "dir");
-  const repairModule = new URL("../cli/update-cli/update-command-repair.ts", import.meta.url).href;
-  const admissionModule = new URL("../cli/update-cli/update-command-run.ts", import.meta.url).href;
-  const sentinelModule = new URL("./update-control-plane-sentinel.ts", import.meta.url).href;
+  // Finite runs share compiled entries; standalone/watch still needs the source loader.
+  const repairModule = resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.commandRepair);
+  const admissionModule = resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.commandRun);
   const installRoot = params.phase === "verifying" ? candidate : params.root;
   return `void (async () => {
     // Source workers resolve the checkout's toolchain from the driver cwd.
     process.chdir(${JSON.stringify(path.resolve("."))});
-    ${params.sourceRuntimeImport}
+    ${repairModule.pathname.endsWith(".ts") ? params.sourceRuntimeImport : ""}
     const fs = require("node:fs");
     process.stderr.write("repair-boundary: loading admission\\n");
-    const { runUpdateCommandRepair } = await import(${JSON.stringify(repairModule)});
-    const { admitUpdateCommandRun } = await import(${JSON.stringify(admissionModule)});
-    const { UPDATE_RUN_ID_ENV } = await import(${JSON.stringify(sentinelModule)});
-    if (process.env[UPDATE_RUN_ID_ENV] !== ${JSON.stringify(params.runId)}) {
+    const { runUpdateCommandRepair } = await import(${JSON.stringify(repairModule.href)});
+    const { admitUpdateCommandRun } = await import(${JSON.stringify(admissionModule.href)});
+    if (process.env[${JSON.stringify(UPDATE_RUN_ID_ENV)}] !== ${JSON.stringify(params.runId)}) {
       throw new Error("The helper did not transfer the admitted update run.");
     }
     const run = await admitUpdateCommandRun({ opts: {}, root: ${JSON.stringify(installRoot)} });
@@ -153,12 +180,18 @@ export async function managedRepairUpdaterScript(params: {
     }
     const repair = await runUpdateCommandRepair({
       root: ${JSON.stringify(installRoot)},
-      candidateRoot: ${JSON.stringify(candidate)},
       env: run.env,
       run,
       phase: ${JSON.stringify(params.phase)},
-      onEvent: ({ type }) => process.stderr.write("repair-boundary: " + type + "\\n"),
-      result: { status: "error", mode: "npm", reason: "candidate-validation-failed", steps: [], durationMs: 0 },
+      onEvent: (event) => process.stderr.write("repair-boundary: " + event.type +
+        (event.type === "turn-finished" ? " summary=" + JSON.stringify(event.summary) : "") + "\\n"),
+      ${
+        params.phase === "validating"
+          ? `candidateRoot: ${JSON.stringify(candidate)}, mode: "npm",
+      validation: { status: "error", reason: "runtime-verification-failed", phase: "runtime",
+        steps: [], durationMs: 0, logTail: ["Repair effects pending."] },`
+          : `result: { status: "error", mode: "npm", reason: "candidate-validation-failed", steps: [], durationMs: 0 },`
+      }
       validate: async () => {
         const ok = fs.existsSync(${JSON.stringify(path.join(candidate, "repair-second-exec.txt"))}) &&
           fs.existsSync(${JSON.stringify(path.join(candidate, "repair-second-write.txt"))});
@@ -223,19 +256,13 @@ function writeEffects(response: ServerResponse, second: boolean) {
   ]);
 }
 
-export async function runManagedRepairAuthorityBoundary(
+async function runManagedRepairAuthorityBoundary(
   runBoundary: ManagedServiceManagerBoundaryRunner,
   phase: ManagedRepairBoundary["phase"],
   revoke: boolean,
 ) {
-  let markPending!: () => void;
-  const inferencePending = new Promise<void>((resolve) => {
-    markPending = resolve;
-  });
-  let releaseInference!: () => void;
-  const released = new Promise<void>((resolve) => {
-    releaseInference = resolve;
-  });
+  const { promise: inferencePending, resolve: markPending } = createDeferred();
+  const { promise: released, resolve: releaseInference } = createDeferred();
   const errors: unknown[] = [];
   let toolResponses = 0;
   let result: Awaited<ReturnType<typeof runBoundary>> | undefined;
@@ -294,4 +321,48 @@ export async function runManagedRepairAuthorityBoundary(
     throw new Error("Repair boundary did not run.");
   }
   return result;
+}
+
+export function registerManagedRepairAuthorityTests(
+  runManagedServiceManagerBoundary: ManagedServiceManagerBoundaryRunner,
+  repairPhase: ManagedRepairBoundary["phase"],
+  itUnix: ReturnType<typeof import("vitest").it.runIf>,
+): void {
+  itUnix.each([false, true].map((revoke) => ({ phase: repairPhase, revoke })))(
+    "guards $phase repair effects with the current chat requester (revoked=$revoke)",
+    async ({ phase, revoke }) => {
+      const { commands, parentSignal, repairEffects, helperExitCode, log, run } =
+        await runManagedRepairAuthorityBoundary(runManagedServiceManagerBoundary, phase, revoke);
+      expect(commands).toEqual([]);
+      expect(parentSignal).toBeNull();
+      expect(repairEffects, log).toEqual({
+        packagedReadOnly: true,
+        firstSpawn: true,
+        secondSpawn: !revoke,
+        firstExec: true,
+        secondExec: !revoke,
+        secondWrite: !revoke,
+      });
+      expect(helperExitCode, log).toBe(revoke ? 1 : 0);
+      expect(run?.repair).toHaveLength(1);
+      if (revoke) {
+        expect(run?.steps).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              step: "repairing",
+              status: "failed",
+              detail: expect.stringContaining("requester-revoked"),
+            }),
+          ]),
+        );
+        expect(
+          run?.steps.find((step) => step.step === "repairing" && step.status === "failed")?.detail,
+        ).toContain(phase === "validating" ? "update checks" : "installed version");
+        expect(run?.repair[0]?.reason).toBe("requester-revoked");
+      } else {
+        expect(run?.repair[0]).toMatchObject({ status: "succeeded" });
+      }
+    },
+    120_000,
+  );
 }

@@ -14,6 +14,7 @@ import {
 } from "../../../plugins/install-paths.js";
 import { listManagedPluginNpmRoots } from "../../../plugins/npm-project-roots.js";
 import type { PluginPayloadSmokeFailure } from "../../../plugins/payload-verification.js";
+import { withPluginLifecycleLease } from "../../../plugins/plugin-lifecycle-lease.js";
 import {
   reconcileRegisteredOpenClawHostLinks,
   relinkOpenClawPeerDependenciesInManagedNpmRoot,
@@ -73,10 +74,10 @@ function smokeFailureGuidance(failure: PluginPayloadSmokeFailure): string[] {
   ];
 }
 
-async function repairInstalledNpmOpenClawHostLinks(params: {
+async function repairInstalledOpenClawHostLinks(params: {
   env: NodeJS.ProcessEnv;
   installRecords: Record<string, PluginInstallRecord>;
-  beforePersistentEffect?: () => void | Promise<void>;
+  beforePersistentEffect?: () => void;
 }): Promise<{
   changes: string[];
   warnings: PostCoreConvergenceWarning[];
@@ -85,12 +86,12 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
   const packageReadFailures: Array<{ error: unknown; packageDir: string }> = [];
   let effectFailure: { error: unknown } | undefined;
   const beforePersistentEffect = params.beforePersistentEffect
-    ? async () => {
+    ? () => {
         if (effectFailure) {
           throw effectFailure.error;
         }
         try {
-          await params.beforePersistentEffect?.();
+          params.beforePersistentEffect?.();
         } catch (error) {
           effectFailure ??= { error };
           throw effectFailure.error;
@@ -103,16 +104,16 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
       npmRoots.map((npmRoot) =>
         relinkOpenClawPeerDependenciesInManagedNpmRoot({
           npmRoot,
+          beforePersistentApply: beforePersistentEffect,
           logger: {},
-          beforePersistentEffect,
           onPackageReadError: (error, packageDir) => {
             packageReadFailures.push({ error, packageDir });
           },
         }),
       ),
     );
-    // Join every admitted repair before reporting failure; Promise.all would
-    // leave sibling link mutations running after convergence rejected.
+    // Join every admitted repair before rejecting; siblings must not keep
+    // mutating after convergence has reported authority loss.
     if (effectFailure) {
       throw effectFailure.error;
     }
@@ -123,13 +124,13 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
       }
       repaired += result.value.repaired;
     }
-    // Legacy npm-owned installs live under extensions/, outside every managed npm project root.
+    // Registered npm and ClawHub installs also live under extensions/, outside managed npm roots.
     const registeredRepair = await reconcileRegisteredOpenClawHostLinks({
       installRecords: params.installRecords,
       extensionsDir: resolveDefaultPluginExtensionsDir(params.env),
       env: params.env,
       mode: "repair",
-      beforePersistentEffect,
+      beforePersistentApply: beforePersistentEffect,
       onPackageReadError: (error, packageDir) => {
         packageReadFailures.push({ error, packageDir });
       },
@@ -141,7 +142,7 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
           : []),
         ...(registeredRepair.repaired > 0
           ? [
-              `Repaired OpenClaw host peer link(s) for ${registeredRepair.repaired} registered npm plugin package(s).`,
+              `Repaired OpenClaw host peer link(s) for ${registeredRepair.repaired} registered plugin package(s).`,
             ]
           : []),
       ],
@@ -152,7 +153,8 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
     if (effectFailure) {
       throw effectFailure.error;
     }
-    const message = `Failed to repair managed npm OpenClaw host peer links: ${err instanceof Error ? err.message : String(err)}`;
+    beforePersistentEffect?.();
+    const message = `Failed to repair installed OpenClaw host peer links: ${err instanceof Error ? err.message : String(err)}`;
     return {
       changes: [],
       warnings: [
@@ -168,7 +170,7 @@ async function repairInstalledNpmOpenClawHostLinks(params: {
 }
 
 function formatPeerLinkPackageReadWarning(failure: { error: unknown }): PostCoreConvergenceWarning {
-  const message = `Failed to repair managed npm OpenClaw host peer links: ${failure.error instanceof Error ? failure.error.message : String(failure.error)}`;
+  const message = `Failed to repair installed OpenClaw host peer links: ${failure.error instanceof Error ? failure.error.message : String(failure.error)}`;
   return {
     reason: message,
     message,
@@ -188,6 +190,8 @@ export async function runPostCorePluginConvergence(params: {
   cfg: OpenClawConfig;
   env: NodeJS.ProcessEnv;
   compatibilityHostVersion?: string;
+  timeoutMs?: number;
+  workTimeoutMs?: number | null;
   /**
    * Optional in-memory install records from earlier post-core steps (e.g.
    * `syncPluginsForUpdateChannel`, `updateNpmInstalledPlugins`) whose
@@ -198,8 +202,21 @@ export async function runPostCorePluginConvergence(params: {
    */
   baselineInstallRecords?: Record<string, PluginInstallRecord>;
   onCapabilityConsent?: PluginCapabilityConsentHandler;
-  beforePersistentEffect?: () => void | Promise<void>;
+  beforePersistentEffect?: () => void;
 }): Promise<PostCoreConvergenceResult> {
+  return await withPluginLifecycleLease(
+    { env: params.env, assertCurrent: params.beforePersistentEffect },
+    (lease) =>
+      runPostCorePluginConvergenceWithLease({
+        ...params,
+        beforePersistentEffect: () => lease.assertOwned(),
+      }),
+  );
+}
+
+async function runPostCorePluginConvergenceWithLease(
+  params: Parameters<typeof runPostCorePluginConvergence>[0],
+): Promise<PostCoreConvergenceResult> {
   const env: NodeJS.ProcessEnv = {
     ...params.env,
     OPENCLAW_COMPATIBILITY_HOST_VERSION: params.compatibilityHostVersion ?? VERSION,
@@ -207,7 +224,7 @@ export async function runPostCorePluginConvergence(params: {
   };
   // Retire obsolete managed shadows before relinking or smoke-checking them. A package that
   // became bundled with the new core must not survive into the next startup's contract graph.
-  await params.beforePersistentEffect?.();
+  params.beforePersistentEffect?.();
   const staleManagedNpmBundledPluginRepair = maybeRepairStaleManagedNpmBundledPlugins({
     config: params.cfg,
     env,
@@ -226,6 +243,8 @@ export async function runPostCorePluginConvergence(params: {
   const warnings: PostCoreConvergenceWarning[] = [];
   const repair = await repairMissingConfiguredPluginInstalls({
     cfg: params.cfg,
+    timeoutMs: params.timeoutMs,
+    workTimeoutMs: params.workTimeoutMs,
     env,
     ...(prunedBaseline ? { baselineRecords: prunedBaseline.records } : {}),
     onCapabilityConsent: params.onCapabilityConsent,
@@ -239,12 +258,14 @@ export async function runPostCorePluginConvergence(params: {
     },
     beforePersistentEffect: params.beforePersistentEffect,
   });
+  params.beforePersistentEffect?.();
 
-  const peerLinkRepair = await repairInstalledNpmOpenClawHostLinks({
+  const peerLinkRepair = await repairInstalledOpenClawHostLinks({
     env,
     installRecords: repair.records,
     beforePersistentEffect: params.beforePersistentEffect,
   });
+  params.beforePersistentEffect?.();
   warnings.push(...peerLinkRepair.warnings);
   const notices: PostCoreConvergenceWarning[] = (repair.notices ?? []).map((message) => ({
     reason: message,
@@ -284,8 +305,7 @@ export async function runPostCorePluginConvergence(params: {
     left.packageDir.localeCompare(right.packageDir),
   )) {
     // A typed smoke failure owns this exact package and startup quarantines it.
-    // Re-emitting the repair error without that owner would turn it back into
-    // an unknown warning and incorrectly block gateway readiness.
+    // Keep the typed diagnostic instead of duplicating it as an unowned warning.
     const packageDir = path.resolve(failure.packageDir);
     const hasTypedFailure = smokeFailureInstallPaths.has(packageDir);
     const belongsToInactivePlugin =

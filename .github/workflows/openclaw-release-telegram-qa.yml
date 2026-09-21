@@ -1476,7 +1476,7 @@ jobs:
             signal_name="${1:?}"
             requested_identity="${2:?}"
             case "$signal_name" in
-              SIGCONT|SIGUSR1|SIGUSR2) ;;
+              SIGCONT|SIGUSR2|SIGQUIT) ;;
               *) echo "Unsupported Telegram SUT signal: ${signal_name}" >&2; exit 1 ;;
             esac
             load_process_identity "$requested_identity"

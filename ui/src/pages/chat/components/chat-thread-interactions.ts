@@ -12,17 +12,19 @@ import type { QuestionPrompt } from "../../../app/question-prompt.ts";
 import type { BrowserTabSelection } from "../../../components/browser/browser-target.ts";
 import { copyMarkdownLabel, handleCopyButton } from "../../../components/copy-button.ts";
 import { icons } from "../../../components/icons.ts";
-import type { ImageLightboxItem } from "../../../components/image-lightbox.ts";
+import type { ImageLightboxItem } from "../../../components/image-lightbox.types.ts";
 import type { MarkdownRenderOptions } from "../../../components/markdown-render-options.ts";
 import type { SessionLinkTarget } from "../../../components/markdown-session-links.ts";
 import { releaseMarkdownTables } from "../../../components/markdown-tables.ts";
 import type { PersonActivityRouting } from "../../../components/person-activity-link.ts";
 import "../../../components/tooltip.ts";
 import { t } from "../../../i18n/index.ts";
+import { registerChatMessageMetadataEnglish } from "../../../i18n/locales/en-chat-message-metadata.ts";
 import type { BoardProvider } from "../../../lib/board/provider.ts";
 import type {
   ChatGuardianNotice,
   ChatQueueItem,
+  ChatSelectionSource,
   ChatStreamSegment,
 } from "../../../lib/chat/chat-types.ts";
 import { buildCompanionQuestionPrefill } from "../../../lib/chat/companion-question.ts";
@@ -32,12 +34,15 @@ import type { TurnRecapWatch } from "../chat-progress.ts";
 import { resetChatThreadState } from "../chat-thread.ts";
 import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
 import type { LinkFaviconFetcher } from "../link-favicon-loader.ts";
-import type { RealtimeTalkConversationEntry } from "../realtime-talk-conversation.ts";
 import type { ChatRunUiStatus } from "../run-lifecycle.ts";
+import type { RealtimeTalkConversationEntry } from "../talk/conversation.ts";
 import type { CompactionStatus, RunOutputUsage } from "../tool-stream-contract.ts";
-import type { AsyncQuestionDraft } from "./chat-async-question.ts";
+import type { AsyncQuestionDraft, AsyncQuestionPresentation } from "./chat-async-question.ts";
+import type { ChatAttachmentControlsProps } from "./chat-attachment-controls.types.ts";
 import type { BackgroundTasksProps } from "./chat-background-tasks.types.ts";
+import { resolveChatContextCopy, usesNativeContextMenu } from "./chat-context-copy.ts";
 import type { ChatHistoryBoundaryProps } from "./chat-history-boundary.ts";
+import { isConfirmedActionPopoverFocused } from "./chat-message-confirmation.ts";
 import type { MessageActionDetails } from "./chat-message-markdown.ts";
 import type { ArtifactDownloadResolver } from "./chat-message-media.ts";
 import type { ChatSendStatusActions } from "./chat-message-send-status.ts";
@@ -46,11 +51,18 @@ import {
   openChatRewindConfirmation,
   type MessageReplyTarget,
 } from "./chat-message.ts";
-import { handleChatSelectionPointerUp, removeChatSelectionPopup } from "./chat-selection-popup.ts";
+import {
+  handleChatSelectionPointerUp,
+  isChatSelectionPopupFocused,
+  removeChatSelectionPopup,
+} from "./chat-selection-popup.ts";
 import type { SidebarContent, SidebarFullMessageLoader } from "./chat-sidebar.ts";
+
+registerChatMessageMetadataEnglish();
 
 export type ChatThreadState = {
   asyncQuestionDrafts: Map<string, AsyncQuestionDraft>;
+  asyncQuestionRevision: number;
   asyncQuestionScope?: string;
   turnRecapWatch: TurnRecapWatch | null;
   searchOpen: boolean;
@@ -113,7 +125,7 @@ export type ChatThreadProps = ChatSendStatusActions & {
   startupLabel?: string;
   waitingApproval?: boolean;
   questionPrompts?: readonly QuestionPrompt[];
-  onAsyncQuestionSubmit?: (message: string) => Promise<boolean>;
+  asyncQuestions?: AsyncQuestionPresentation;
   sessions: SessionsListResult | null;
   /** Host context resolving global-alias session keys (scope=global fleets). */
   sessionHost?: UiSessionDefaultsHost | null;
@@ -129,6 +141,7 @@ export type ChatThreadProps = ChatSendStatusActions & {
   userName?: string | null;
   userAvatar?: string | null;
   basePath?: string;
+  sessionPublicOrigin?: string;
   resourceBasePath?: string;
   fullMessageAgentId?: string;
   loadFullAssistantMessage?: SidebarFullMessageLoader | null;
@@ -142,13 +155,13 @@ export type ChatThreadProps = ChatSendStatusActions & {
   fetchLinkFavicon?: LinkFaviconFetcher;
   pluginToolIcons?: PluginToolIcons;
   githubRepo?: MarkdownRenderOptions["githubRepo"];
+  githubRepositories?: MarkdownRenderOptions["githubRepositories"];
   autoExpandToolCalls?: boolean;
   realtimeTalkConversation?: RealtimeTalkConversationEntry[];
   typingActors?: readonly { id: string; label: string; preview?: string }[];
   onOpenSidebar?: (content: SidebarContent) => void;
   onOpenWorkspaceFile?: (target: { path: string; line?: number | null }) => void;
   onOpenSessionLink?: (target: SessionLinkTarget) => void;
-  onOpenSessionCheckpoints?: () => void | Promise<void>;
   onRequestOpenImage?: () => number;
   onOpenImage?: (item: ImageLightboxItem, requestVersion?: number) => void;
   onAssistantAttachmentLoaded?: () => void;
@@ -162,7 +175,8 @@ export type ChatThreadProps = ChatSendStatusActions & {
   onRewindMessage?: (entryId: string) => Promise<boolean> | boolean;
   onForkMessage?: (entryId: string) => Promise<void> | void;
   onFocusComposer?: () => void;
-  onAddToChat?: (question: string) => void;
+  commentAttachments?: ChatAttachmentControlsProps;
+  onAddToChat?: (selection: ChatSelectionSource, anchorRect: DOMRect) => void;
   onCompanionPrefill?: (question: string) => void;
   onOpenSession?: (sessionKey: string) => void;
   modelSetupRequired?: boolean;
@@ -186,6 +200,7 @@ type TranscriptInteractionProps = Pick<
 function createTranscriptState(): ChatThreadState {
   return {
     asyncQuestionDrafts: new Map(),
+    asyncQuestionRevision: 0,
     turnRecapWatch: null,
     searchOpen: false,
     searchQuery: "",
@@ -209,6 +224,18 @@ export function getTranscriptState(paneId: string): ChatThreadState {
   return state;
 }
 
+export function isThreadPresentationFocused(paneId: string, owner: HTMLElement): boolean {
+  const menu = activeReplyContextMenu?.paneId === paneId ? activeReplyContextMenu.element : null;
+  return (
+    owner.contains(owner.ownerDocument.activeElement) ||
+    isChatSelectionPopupFocused(paneId) ||
+    isConfirmedActionPopoverFocused(owner) ||
+    Boolean(
+      menu && (menu.contains(document.activeElement) || isConfirmedActionPopoverFocused(menu)),
+    )
+  );
+}
+
 export function dismissThreadPortals(paneId?: string, owner?: ParentNode): void {
   removeReplyContextMenu(paneId);
   if (owner) {
@@ -216,7 +243,7 @@ export function dismissThreadPortals(paneId?: string, owner?: ParentNode): void 
   }
   // The selection popup is body-portaled; pane teardown/route changes must
   // drop it so it cannot outlive the render that owns its callbacks.
-  removeChatSelectionPopup();
+  removeChatSelectionPopup(paneId);
 }
 
 export function resetTranscriptSession(paneId: string, owner?: ParentNode): void {
@@ -256,7 +283,22 @@ export function renderTranscriptSearch(
     return nothing;
   }
   return html`
-    <div class="agent-chat__search-bar">
+    <div
+      class="agent-chat__search-bar"
+      @keydown=${(event: KeyboardEvent) => {
+        if (
+          event.key !== "Escape" ||
+          event.defaultPrevented ||
+          event.isComposing ||
+          event.keyCode === 229
+        ) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        closeTranscriptSearch(state, requestUpdate);
+      }}
+    >
       ${icons.search}
       <input
         type="text"
@@ -431,15 +473,8 @@ export function handleTranscriptPointerUp(event: PointerEvent, props: Transcript
     return;
   }
   handleChatSelectionPointerUp(event, {
-    onAddToChat: props.onAddToChat
-      ? (selection) => {
-          const question = buildCompanionQuestionPrefill(selection);
-          if (question) {
-            props.onAddToChat?.(question);
-            props.onFocusComposer?.();
-          }
-        }
-      : undefined,
+    paneId: props.paneId,
+    onAddToChat: props.onAddToChat,
     onAskSideChat: (selection) => {
       const question = buildCompanionQuestionPrefill(selection);
       if (question) {
@@ -462,47 +497,45 @@ function selectionIntersectsElement(selection: Selection | null, element: Elemen
 }
 
 export function handleTranscriptContextMenu(event: MouseEvent, props: TranscriptInteractionProps) {
-  if (event.composedPath().some((target) => target instanceof HTMLAnchorElement)) {
+  if (event.defaultPrevented || usesNativeContextMenu(event.composedPath())) {
     return;
   }
-  const bubble = (event.target as HTMLElement).closest<
-    HTMLElement & { messageActions?: MessageActionDetails | null }
-  >(".chat-bubble");
-  if (!bubble) {
+  const target = event.composedPath().find((item): item is Element => item instanceof Element);
+  if (!target) {
     return;
   }
-  const group = bubble.closest<HTMLElement>(".chat-group");
-  if (!group) {
+  const bubble = target.closest<HTMLElement & { messageActions?: MessageActionDetails | null }>(
+    ".chat-bubble",
+  );
+  const group = bubble?.closest<HTMLElement>(".chat-group");
+  if (group?.querySelector(".chat-reading-indicator, .chat-bubble.streaming")) {
     return;
   }
-  if (
-    group.querySelector(".chat-reading-indicator") ||
-    group.querySelector(".chat-bubble.streaming")
-  ) {
-    return;
-  }
+  const contentCopy = resolveChatContextCopy(target);
+  const selection = window.getSelection();
+  const selectedText = selectionIntersectsElement(selection, bubble ?? target)
+    ? selection?.toString()
+    : "";
   // The menu and footer consume the same target, including attachment-only replies.
-  const replyTarget = bubble.messageActions?.replyTarget;
-  const entryId = bubble.dataset.entryId?.trim() ?? "";
-  const messageId = bubble.dataset.messageId?.trim() ?? "";
-  const isUserMessage = group.classList.contains("user") && Boolean(entryId);
+  const replyTarget = bubble?.messageActions?.replyTarget;
+  const entryId = bubble?.dataset.entryId?.trim() ?? "";
+  const messageId = bubble?.dataset.messageId?.trim() ?? "";
+  const isUserMessage = group?.classList.contains("user") && Boolean(entryId);
   // Grouped rows can contain several bubbles. Match the clicked bubble to its
   // own action owner so copy never targets a sibling message.
-  const actionOwner = [...group.querySelectorAll<HTMLElement>("[data-message-actions-for]")].find(
-    (element) => element.dataset.messageActionsFor === messageId,
-  );
+  const actionOwner = [
+    ...(group?.querySelectorAll<HTMLElement>("[data-message-actions-for]") ?? []),
+  ].find((element) => element.dataset.messageActionsFor === messageId);
   const copyButton = actionOwner?.querySelector<HTMLButtonElement>(".chat-copy-btn");
-  const ownsRunFrame = group.dataset.chatRowKey?.startsWith("agent-run:") === true;
+  const ownsRunFrame = group?.dataset.chatRowKey?.startsWith("agent-run:") === true;
   const canReply = Boolean(replyTarget && props.onSetReply && (!ownsRunFrame || actionOwner));
   const canRewind = isUserMessage && typeof props.onRewindMessage === "function";
-  const canCopy = Boolean(copyButton);
+  const copyMarkdown = bubble?.messageActions?.copyMarkdown;
+  const canCopy = Boolean(copyButton || copyMarkdown);
   const canFork = isUserMessage && typeof props.onForkMessage === "function";
-  if (!canReply && !canRewind && !canCopy && !canFork) {
+  if (!canReply && !canRewind && !canCopy && !canFork && !selectedText && !contentCopy?.text) {
     return;
   }
-
-  const selection = window.getSelection();
-  const selectedText = selectionIntersectsElement(selection, bubble) ? selection?.toString() : "";
 
   event.preventDefault();
   event.stopPropagation();
@@ -514,23 +547,30 @@ export function handleTranscriptContextMenu(event: MouseEvent, props: Transcript
   menu.style.left = `${event.clientX}px`;
   menu.style.top = `${event.clientY}px`;
   const focusCandidates: HTMLButtonElement[] = [];
-  if (selectedText) {
+  const appendCopyAction = (label: string, text: string) => {
+    if (!text) {
+      return;
+    }
     const action = createMessageActionContextButton({
-      label: t("chat.messages.copySelection"),
+      label,
       disabled: false,
-      tooltip: t("chat.messages.copySelection"),
+      tooltip: label,
       onClick: (copyEvent) => {
-        void handleCopyButton(copyEvent, selectedText, t("chat.messages.copySelection")).then(
-          (copied) => {
-            if (copied) {
-              removeReplyContextMenu(props.paneId);
-            }
-          },
-        );
+        void handleCopyButton(copyEvent, text, label).then((copied) => {
+          if (copied && activeReplyContextMenu?.element === menu) {
+            removeReplyContextMenu(props.paneId);
+          }
+        });
       },
     });
     menu.append(action.element);
     focusCandidates.push(action.button);
+  };
+  if (selectedText) {
+    appendCopyAction(t("chat.messages.copySelection"), selectedText);
+  }
+  if (contentCopy) {
+    appendCopyAction(contentCopy.label, contentCopy.text);
   }
   if (canReply && replyTarget) {
     const replyButton = createReplyContextMenuButton(() => {
@@ -562,7 +602,9 @@ export function handleTranscriptContextMenu(event: MouseEvent, props: Transcript
     menu.append(action.element);
     focusCandidates.push(action.button);
   }
-  if (canCopy) {
+  if (copyMarkdown && !copyButton) {
+    appendCopyAction(copyMarkdownLabel(), copyMarkdown);
+  } else if (copyButton) {
     const action = createMessageActionContextButton({
       label: copyMarkdownLabel(),
       disabled: false,
@@ -588,7 +630,9 @@ export function handleTranscriptContextMenu(event: MouseEvent, props: Transcript
     menu.append(action.element);
     focusCandidates.push(action.button);
   }
-  document.body.appendChild(menu);
+  // Expanded tables live in a native modal. Its context menu must stay inside
+  // that top layer, otherwise the browser makes the body portal inert.
+  (target.closest("openclaw-modal-dialog, dialog") ?? document.body).appendChild(menu);
   const owner = { element: menu, paneId: props.paneId, listeners: new AbortController() };
   activeReplyContextMenu = owner;
 

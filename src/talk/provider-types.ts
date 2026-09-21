@@ -2,6 +2,7 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { RealtimeVoiceAudioOutputPort } from "./audio-output-port.js";
 import type { TalkTransport } from "./talk-events.js";
 
 export type RealtimeVoiceProviderId = string;
@@ -212,7 +213,7 @@ export type RealtimeVoiceProviderCapabilities = {
   outputAudioFormats: RealtimeVoiceAudioFormat[];
   supportsBrowserSession?: boolean;
   supportsBargeIn?: boolean;
-  /** True when provider VAD reports confirmed interruptions through onClearAudio("barge-in"). */
+  /** True when the provider owns interruption from incoming audio. */
   handlesInputAudioBargeIn?: boolean;
   supportsToolCalls?: boolean;
   /** True when user transcripts are reliable enough to gate responses on a leading wake name. */
@@ -356,6 +357,13 @@ export type RealtimeVoiceBrowserSession =
   | RealtimeVoiceBrowserManagedRoomSession;
 
 export type RealtimeVoiceBridge = {
+  /** Bind before connect: continuous PCM and interruption go to this call-bound worker sink,
+   * not onAudio/onClearAudio. Transcripts, delegation and lifecycle stay on the host. */
+  setAudioOutputPort?(output: RealtimeVoiceAudioOutputPort): void;
+  /** Continuous audio has no response boundaries; the provider owns interruption. */
+  outputAudioMode?: "response" | "continuous";
+  /** Buffers input at its sample rate and supplies silence between microphone writes. */
+  pacesInputAudio?: boolean;
   supportsToolResultContinuation?: boolean;
   /** False when the provider cannot accept a tool result without starting a response. */
   supportsToolResultSuppression?: boolean;

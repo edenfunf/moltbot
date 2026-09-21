@@ -21,6 +21,7 @@ import {
 import { createMockPluginRegistry } from "../../plugins/hooks.test-helpers.js";
 import { createNestedToolActivity } from "../../sessions/nested-tool-activity.js";
 import { closeOpenClawAgentDatabaseByPath } from "../../state/openclaw-agent-db.js";
+import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
 import { toToolDefinitions } from "../agent-tool-definition-adapter.js";
 import { isCodeModeExecTool } from "../code-mode-control-tools.js";
 import { createCodeModeHarness, resetCodeModeTestState } from "../code-mode.test-support.js";
@@ -40,8 +41,15 @@ import { createResourceLoader } from "./agent-session-loop-resource-loader.test-
 import type { MessageEndEvent, ToolDefinition } from "./extensions/types.js";
 import { SessionManager } from "./session-manager.js";
 
+const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
+  afterEach(async () => {
+    for (const stateDir of tempDirs.dirs) {
+      await cleanupSessionStateForTest({ stateDir });
+    }
+    cleanup();
+  }),
+);
 registerAgentSessionLoopTestLifecycle();
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
   resetDiagnosticEventsForTest();
   resetDiagnosticRunActivityForTest();
@@ -60,9 +68,9 @@ describe("AgentSession runtime and transcript projections", () => {
   const sourceCases = [
     { label: "JavaScript code", args: { code: source }, outcome: "completed" },
     {
-      label: "explicit JavaScript",
+      label: "retired JavaScript option",
       args: { code: source, language: "javascript" },
-      outcome: "completed",
+      outcome: "error",
     },
     {
       label: "boolean state",
@@ -77,12 +85,12 @@ describe("AgentSession runtime and transcript projections", () => {
     ...["bash", "", null, 7].map((language) => ({
       label: `invalid language ${JSON.stringify(language)}`,
       args: { code: "API_TOKEN=fixtureUnquotedLiteral;", language },
-      outcome: "validation",
+      outcome: "error",
     })),
     {
-      label: "TypeScript annotation",
-      args: { code: source.replace("API_TOKEN =", "API_TOKEN: number ="), language: "typescript" },
-      outcome: "completed",
+      label: "retired TypeScript option",
+      args: { code: source, language: "typescript" },
+      outcome: "error",
     },
     {
       label: "computed expression",
@@ -237,6 +245,8 @@ describe("AgentSession runtime and transcript projections", () => {
           }
           if (label.startsWith("invalid language")) {
             expect(persistedArgs[field]).not.toContain("fixtureUnquotedLiteral");
+          } else if (label.startsWith("retired")) {
+            expect(persistedArgs[field]).not.toContain("computeToken(); return API_TOKEN");
           } else if (label === "credential masking") {
             expect(persistedArgs[field]).toContain(
               "OTHER_TOKEN = computeToken(); return OTHER_TOKEN;",
@@ -431,11 +441,7 @@ describe("AgentSession runtime and transcript projections", () => {
             if (block.type !== "toolCall") {
               throw new Error("unexpected stored block");
             }
-            if (
-              action === "unchanged" ||
-              action === "default-to-javascript" ||
-              action === "javascript-to-default"
-            ) {
+            if (action === "unchanged") {
               expect(block.arguments.code).toBe(source);
             } else {
               expect(block.arguments.code).not.toContain("API_TOKEN = computeToken()");

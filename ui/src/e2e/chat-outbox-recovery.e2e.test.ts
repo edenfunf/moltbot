@@ -69,17 +69,39 @@ suite.define(() => {
           const firstParams = requireRecord(firstRequest.params);
           const runId = requireString(firstParams.idempotencyKey, "first idempotency key");
 
-          await gateway.closeLatest(1006, "lost ack");
+          await gateway.setOnline(false);
+          const userBubble = page.locator(".chat-group.user").getByText(prompt, { exact: true });
+          const reconnectStatus = page.locator(
+            '.chat-send-status[data-send-state="waiting-reconnect"]',
+          );
+          await userBubble.waitFor();
+          expect(await page.locator(".chat-queue__item").count()).toBe(0);
+          await reconnectStatus.getByText("Waiting for reconnect", { exact: true }).waitFor();
+          expect(await userBubble.count()).toBe(1);
+          expect(await reconnectStatus.getByRole("button", { name: /Retry/ }).count()).toBe(0);
+          await reconnectStatus.getByRole("button", { name: "Discard", exact: true }).waitFor();
+          await captureProof("00-waiting-for-reconnect");
+          await gateway.setOnline(true);
 
           const deliveryStatus = page.locator('.chat-send-status[data-send-state="unconfirmed"]');
           await deliveryStatus.getByText("Delivery unconfirmed").waitFor({ timeout: 10_000 });
           expect(await page.locator(".chat-queue").count()).toBe(0);
-          const userBubble = page.locator(".chat-group.user").getByText(prompt, { exact: true });
           await userBubble.waitFor();
           expect(await gateway.getRequests("chat.send")).toHaveLength(1);
 
           if (action === "exact authoritative history proof") {
             await captureProof("01-delivery-uncertain");
+            const historyReads = (await gateway.getRequests("chat.history")).length;
+            await expectRequestCountStable(gateway, "chat.history", historyReads);
+            for (const event of ["session.message", "sessions.changed"]) {
+              await gateway.emitGatewayEvent(event, {
+                sessionKey: "agent:main:unrelated-conversation",
+                hasActiveRun: true,
+                phase: "message",
+              });
+            }
+            await expectRequestCountStable(gateway, "chat.history", historyReads);
+            await deliveryStatus.getByText("Delivery unconfirmed").waitFor();
 
             await gateway.setHistoryMessages([
               {
@@ -294,10 +316,16 @@ suite.define(() => {
         const composer = page.locator(".agent-chat__composer-combobox textarea");
         await composer.waitFor();
         await gateway.setOnline(false);
-        await page.locator('.agent-chat__composer-underlaps[data-tone="warn"]').waitFor();
+        await page.locator('.agent-chat__composer-status[data-tone="info"]').waitFor();
         await composer.fill(`retain destination ${sessionKey}`);
         await page.getByRole("button", { name: "Send message" }).click();
         await page.locator(".chat-queue").getByText("Waiting for reconnect").waitFor();
+        expect(
+          await page
+            .locator(".chat-group.user")
+            .getByText(`retain destination ${sessionKey}`)
+            .count(),
+        ).toBe(0);
         await page.goto(controlUiSessionUrl(suite.server.baseUrl, otherKey));
         await gateway.setOnline(true);
         await page.locator(".agent-chat__composer-combobox textarea").waitFor();

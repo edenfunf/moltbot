@@ -10,19 +10,36 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { drainGlobalSingletonLifecycleState } from "../shared/global-singleton.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
+import { tryAcquireExclusiveSqliteCoordinator } from "./sqlite-coordinator.js";
+import { captureCoordinatorDatabase } from "./sqlite-coordinator.test-support.js";
 import {
   SQLITE_WORKER_MAX_RESULT_BYTES,
-  SQLITE_WORKER_TRANSFER_FRAME_BYTES,
   type SqliteWorkerReply,
 } from "./sqlite-worker-contract.js";
-import { openSqliteWorkerStore, type SqliteWorkerStore } from "./sqlite-worker-store.js";
+import {
+  openSharedStateSqliteWorkerStore,
+  closeUnclaimedSharedStateSqliteWorkers,
+  hasUnclaimedSharedStateSqliteCleanup,
+  openSqliteWorkerStore,
+  type SqliteWorkerStore,
+} from "./sqlite-worker-store.js";
 import type { FixtureOpenInput, FixtureOperations } from "./sqlite-worker-store.test-support.js";
+import { SQLITE_WORKER_TRANSFER_FRAME_BYTES } from "./sqlite-worker-transfer.js";
+import * as coordinatorOwner from "./state-database-coordinator.js";
+import { getTrackedWorkerCpuSources } from "./worker-cpu.js";
+
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:os")>()),
+  availableParallelism: () => 32,
+}));
 
 const stores = new Set<SqliteWorkerStore<FixtureOperations>>();
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
@@ -74,9 +91,46 @@ function read(store: SqliteWorkerStore<FixtureOperations>) {
   return store.execute({ type: "read", input: undefined });
 }
 
+async function openWithGateway(file: string) {
+  const root = path.dirname(file);
+  const gateway = coordinatorOwner.acquireGatewayLifecycleCoordinator({
+    databasePath: file,
+    runtimeDirectory: root,
+  });
+  try {
+    const store = await openSharedStateSqliteWorkerStore<FixtureOperations>(
+      {
+        moduleUrl: new URL("./sqlite-worker-store.test-support.ts", import.meta.url),
+        databasePath: file,
+      },
+      {
+        environment: { OPENCLAW_STATE_DIR: root },
+        coordinatorRuntime: { directory: root, keepAlive: false },
+      },
+    );
+    if (!store) {
+      throw new Error("Fixture shared-state worker did not open");
+    }
+    stores.add(store);
+    return { store, gateway };
+  } catch (error) {
+    gateway.release();
+    throw error;
+  }
+}
+
 const nodeIt = process.versions.bun ? it.skip : it;
 
 describe("SQLite worker store", () => {
+  it("registers storage-worker CPU sources until native close", async () => {
+    const initial = getTrackedWorkerCpuSources();
+    const store = await open(databasePath());
+    const opened = getTrackedWorkerCpuSources();
+    expect(opened.workers).toHaveLength(initial.workers.length + 1);
+    await store.close();
+    expect(getTrackedWorkerCpuSources().workers).toEqual(initial.workers);
+    expect(getTrackedWorkerCpuSources().revision).toBeGreaterThan(opened.revision);
+  });
   it.each(["read", "client close", "global close", "abort", "failed frame"] as const)(
     "preserves a complete large result through %s",
     async (action) => {
@@ -166,6 +220,15 @@ describe("SQLite worker store", () => {
         expect(frames.every((frame) => frame.backingBytes <= SQLITE_WORKER_MAX_RESULT_BYTES)).toBe(
           true,
         );
+        if (action === "read") {
+          const ownership = await store.execute({ type: "takeReplyOwnership", input: undefined });
+          expect(ownership.some((reply) => reply.kind === "inline")).toBe(true);
+          expect(ownership.filter((reply) => reply.kind === "frame")).toHaveLength(frames.length);
+          for (const reply of ownership) {
+            expect(reply.before).toBeGreaterThan(0);
+            expect.soft(reply.after, `${reply.kind} reply (${reply.before} bytes)`).toBe(0);
+          }
+        }
       } finally {
         messages.mockRestore();
         requests.mockRestore();
@@ -179,6 +242,184 @@ describe("SQLite worker store", () => {
       }
     },
   );
+
+  it("retains failed-factory custody for explicit cleanup when no Store escapes", async () => {
+    const file = databasePath();
+    const root = path.dirname(file);
+    const modulePath = path.join(root, "failed-open.mjs");
+    await writeFile(
+      modulePath,
+      `
+      import { DatabaseSync } from "node:sqlite";
+      export function createSqliteWorkerBackend(_input, context) {
+        const database = new DatabaseSync(context.databasePath);
+        database.close();
+        throw new Error("Fixture factory failed after creating its database");
+      }
+    `,
+    );
+    const unrelatedPath = databasePath();
+    const unrelated = await openWithGateway(unrelatedPath);
+    const { result: gateway, database } = captureCoordinatorDatabase(() =>
+      coordinatorOwner.acquireGatewayLifecycleCoordinator({
+        databasePath: file,
+        runtimeDirectory: root,
+      }),
+    );
+    const close = vi.spyOn(database, "close").mockImplementationOnce(() => {
+      throw new Error("Fixture native close remains open");
+    });
+    let requests = vi.spyOn(Worker.prototype, "postMessage").mockImplementationOnce(function (
+      this: Worker,
+      ...args
+    ) {
+      requests.mockRestore();
+      const result = this.postMessage(...args);
+      gateway.release();
+      return result;
+    });
+    try {
+      await expect(
+        openSharedStateSqliteWorkerStore(
+          {
+            moduleUrl: pathToFileURL(modulePath),
+            databasePath: file,
+          },
+          {
+            environment: { OPENCLAW_STATE_DIR: root },
+            coordinatorRuntime: { directory: root, keepAlive: false },
+          },
+        ),
+      ).rejects.toThrow();
+      expect(database.isOpen).toBe(true);
+      expect(hasUnclaimedSharedStateSqliteCleanup(file)).toBe(true);
+      await expect(open(file)).rejects.toThrow("close the existing store first");
+      requests = vi.spyOn(Worker.prototype, "postMessage");
+      await closeUnclaimedSharedStateSqliteWorkers(file);
+      await closeUnclaimedSharedStateSqliteWorkers(unrelatedPath);
+      expect(requests).not.toHaveBeenCalled();
+      expect(database.isOpen).toBe(false);
+      expect(hasUnclaimedSharedStateSqliteCleanup(file)).toBe(false);
+      expect(close).toHaveBeenCalledTimes(2);
+      await expect(append(unrelated.store, "unrelated actor remains open")).resolves.toMatchObject({
+        writes: 1,
+      });
+      await expect(append(await open(file), "after orphan cleanup")).resolves.toMatchObject({
+        writes: 1,
+      });
+    } finally {
+      requests.mockRestore();
+      close.mockRestore();
+      await closeUnclaimedSharedStateSqliteWorkers(file);
+      gateway.release();
+      unrelated.gateway.release();
+    }
+  });
+
+  it.each(["store", "host"] as const)(
+    "retries an open native Gateway pin through explicit %s cleanup after worker exit",
+    async (owner) => {
+      const file = databasePath();
+      const { result, database } = captureCoordinatorDatabase(() => openWithGateway(file));
+      const { store, gateway } = await result;
+      gateway.release();
+      const close = vi.spyOn(database, "close").mockImplementationOnce(() => {
+        throw new Error("Fixture native close remains open");
+      });
+      const cleanup = () =>
+        owner === "store" ? store.close() : drainGlobalSingletonLifecycleState();
+      const requests = vi.spyOn(Worker.prototype, "postMessage");
+      try {
+        await expect(cleanup()).rejects.toThrow();
+        expect(database.isOpen).toBe(true);
+        expect(close).toHaveBeenCalledTimes(1);
+        await expect(read(store)).rejects.toMatchObject({ code: "closed" });
+        await expect(open(file)).rejects.toThrow("cleanup is pending");
+        requests.mockClear();
+        await expect(cleanup()).resolves.toBeUndefined();
+        expect(database.isOpen).toBe(false);
+        expect(close).toHaveBeenCalledTimes(2);
+        expect(requests).not.toHaveBeenCalled();
+        await expect(store.close()).resolves.toBeUndefined();
+        const recovered = await open(file);
+        await expect(append(recovered, "after cleanup retry")).resolves.toMatchObject({
+          writes: 1,
+        });
+      } finally {
+        requests.mockRestore();
+        close.mockRestore();
+        await Promise.allSettled([cleanup(), store.close()]);
+        stores.delete(store);
+        gateway.release();
+      }
+    },
+  );
+
+  it("releases delegated Gateway pins when a rejected async command retires its worker", async () => {
+    const file = databasePath();
+    const { store, gateway } = await openWithGateway(file);
+    gateway.release();
+    try {
+      const failed = store.execute({
+        type: "illegalAsync",
+        input: { value: "unused", gatePath: file, reject: true },
+      });
+      const queued = read(store);
+      expect(await Promise.allSettled([failed, queued])).toEqual([
+        { status: "rejected", reason: expect.objectContaining({ code: "outcome-unknown" }) },
+        { status: "rejected", reason: expect.objectContaining({ code: "unavailable" }) },
+      ]);
+      const next = tryAcquireExclusiveSqliteCoordinator(gateway.path);
+      expect(next).not.toBeNull();
+      next?.release();
+    } finally {
+      await Promise.allSettled([store.close()]);
+      stores.delete(store);
+      gateway.release();
+    }
+  });
+
+  it("retires an empty worker even when its Gateway pin reports a cleanup failure", async () => {
+    const createDelegate = coordinatorOwner.tryCreateGatewaySchemaFenceDelegate;
+    const delegation = vi
+      .spyOn(coordinatorOwner, "tryCreateGatewaySchemaFenceDelegate")
+      .mockImplementationOnce((params) => {
+        const original = createDelegate(params);
+        if (!original) {
+          throw new Error("Fixture Gateway delegate was not acquired");
+        }
+        return {
+          port: original.port,
+          get closed() {
+            return original.closed;
+          },
+          release() {
+            original.release();
+            throw new Error("Fixture Gateway pin cleanup failed");
+          },
+        };
+      });
+    const file = databasePath();
+    const { store, gateway } = await openWithGateway(file);
+    gateway.release();
+    const events = vi.spyOn(Worker.prototype, "emit");
+    try {
+      await expect(store.close()).rejects.toThrow("Fixture Gateway pin cleanup failed");
+      expect(events.mock.calls.some(([event]) => event === "exit")).toBe(true);
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(append(await open(file), "after completed cleanup")).resolves.toMatchObject({
+        writes: 1,
+      });
+    } finally {
+      const worker = events.mock.contexts.find((context) => context instanceof Worker);
+      await worker?.terminate();
+      events.mockRestore();
+      delegation.mockRestore();
+      await Promise.allSettled([store.close()]);
+      stores.delete(store);
+      gateway.release();
+    }
+  });
 
   it.each(["memory", "absolute memory", "memory URI", "incognito", "empty"] as const)(
     "rejects a %s locator before creating a file or dispatching a worker request",
@@ -506,7 +747,7 @@ describe("SQLite worker store", () => {
     expect(await read(survivor)).toEqual(["write before close", "after failed admission"]);
   });
 
-  nodeIt("rejects an overloaded admission without retiring healthy workers or writes", async () => {
+  nodeIt("times out a waiting open without retiring healthy workers or writes", async () => {
     const active: SqliteWorkerStore<FixtureOperations>[] = [];
     for (let index = 0; index < 4; index += 1) {
       active.push(await open(databasePath()));
@@ -541,7 +782,19 @@ describe("SQLite worker store", () => {
     try {
       await repliesReady.promise;
       const pendingFile = databasePath();
-      await expectRejectedOpen(pendingFile, undefined, "overloaded");
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const opening = expectRejectedOpen(pendingFile, undefined, "overloaded");
+      try {
+        await vi.waitFor(() => {
+          expect(timeout.mock.calls.some(([, ms]) => ms === 10_000)).toBe(true);
+        });
+        const expire = timeout.mock.calls.find(([, ms]) => ms === 10_000)?.[0];
+        expect(expire).toBeDefined();
+        expire?.();
+        await opening;
+      } finally {
+        timeout.mockRestore();
+      }
       releaseReplies();
       const results = await outcomes;
       expect(results.find((result) => result.status === "rejected")).toBeUndefined();
@@ -564,16 +817,27 @@ describe("SQLite worker store", () => {
     }
   });
 
-  it("bounds outstanding requests and accepts work again after the queue drains", async () => {
-    const store = await open(databasePath());
-    // The burst is admitted in one main-thread turn, before worker replies can drain it.
+  it("waits at capacity, preserves FIFO, and drains accepted waiters on client close", async () => {
+    const file = databasePath();
+    const store = await open(file);
+    // One main-thread turn fills admission before worker replies can drain it.
     const accepted = Array.from({ length: 128 }, (_, index) => append(store, String(index)));
-    await expect(append(store, "overflow")).rejects.toMatchObject({ code: "overloaded" });
-    await Promise.all(accepted);
-    expect(await append(store, "after drain")).toMatchObject({ writes: 129 });
-    expect(await read(store)).toEqual([
-      ...Array.from({ length: 128 }, (_, i) => String(i)),
-      "after drain",
+    let settled = false;
+    const waiting = Promise.all([
+      append(store, "first waiter"),
+      append(store, "second waiter"),
+    ]).finally(() => {
+      settled = true;
+    });
+    const outcomes = Promise.allSettled([...accepted, waiting]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await store.close();
+    expect((await outcomes).every((result) => result.status === "fulfilled")).toBe(true);
+    expect(await read(await open(file))).toEqual([
+      ...Array.from({ length: 128 }, (_, index) => String(index)),
+      "first waiter",
+      "second waiter",
     ]);
   });
 
@@ -594,18 +858,63 @@ describe("SQLite worker store", () => {
     expect(await read(recovered)).toEqual(["preserved", "after recovery"]);
   });
 
-  it.each([false, true])(
-    "awaits delayed native cleanup before close settles (reject: %s)",
-    async (reject) => {
+  it.each([
+    { reject: false, owner: "client" },
+    { reject: true, owner: "client" },
+    { reject: false, owner: "host" },
+  ] as const)(
+    "awaits delayed native cleanup before $owner close settles (reject: $reject)",
+    async ({ reject, owner }) => {
       const file = databasePath();
       const markerPath = path.join(path.dirname(file), "closed");
       const store = await open(file);
+      const peer = owner === "host" ? await open(file) : undefined;
       await append(store, "preserved");
       await store.execute({ type: "delayClose", input: { markerPath, reject } });
       stores.delete(store);
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply preserves the emitting worker below.
+      const originalEmit = Worker.prototype.emit;
       const events = vi.spyOn(Worker.prototype, "emit");
+      const replyHeld = createDeferredCore();
+      let resumeReply: (() => void) | undefined;
+      if (peer) {
+        events.mockImplementation(function (this: Worker, ...args: Parameters<Worker["emit"]>) {
+          const [event, reply] = args;
+          if (event === "message" && isRecord(reply) && reply.ok === true && !resumeReply) {
+            let delivered = false;
+            resumeReply = () => {
+              if (delivered) {
+                return;
+              }
+              delivered = true;
+              Reflect.apply(originalEmit, this, args);
+            };
+            replyHeld.resolve();
+            return true;
+          }
+          return Reflect.apply(originalEmit, this, args);
+        });
+      }
+      const cleanup = Promise.allSettled([
+        peer ? drainGlobalSingletonLifecycleState("restart") : store.close(),
+      ]);
+      let clientCleanup: Promise<PromiseSettledResult<void>[]> | undefined;
       try {
-        const [result] = await Promise.allSettled([store.close()]);
+        if (peer) {
+          await replyHeld.promise;
+          let clientClosed = false;
+          clientCleanup = Promise.allSettled([store.close()]).then((results) => {
+            clientClosed = true;
+            return results;
+          });
+          await new Promise<void>((resolve) => {
+            setImmediate(resolve);
+          });
+          expect(clientClosed).toBe(false);
+          resumeReply?.();
+          expect(await clientCleanup).toEqual([{ status: "fulfilled", value: undefined }]);
+        }
+        const [result] = await cleanup;
         expect(events.mock.calls.filter(([event]) => event === "error")).toEqual([]);
         expect(await readFile(markerPath, "utf8")).toBe("native database closed");
         if (reject) {
@@ -622,6 +931,10 @@ describe("SQLite worker store", () => {
         }
       } finally {
         events.mockRestore();
+        resumeReply?.();
+        await cleanup;
+        await clientCleanup;
+        await peer?.close();
       }
       const recovered = await open(file);
       expect(await read(recovered)).toEqual(["preserved"]);
@@ -708,12 +1021,13 @@ describe("SQLite worker store", () => {
     const file = databasePath();
     const store = await open(file);
     const lost = store.execute({ type: "commitThenExit", input: { value: "committed" } });
-    const queued = append(store, "never dispatched");
-    const results = await Promise.allSettled([lost, queued]);
-    expect(results).toEqual([
-      { status: "rejected", reason: expect.objectContaining({ code: "outcome-unknown" }) },
-      { status: "rejected", reason: expect.objectContaining({ code: "unavailable" }) },
-    ]);
+    const queued = Array.from({ length: 128 }, () => append(store, "never dispatched"));
+    const [result, ...followers] = await Promise.allSettled([lost, ...queued]);
+    expect(result).toMatchObject({ status: "rejected", reason: { code: "outcome-unknown" } });
+    expect(followers).toHaveLength(128);
+    for (const follower of followers) {
+      expect(follower).toMatchObject({ status: "rejected", reason: { code: "unavailable" } });
+    }
     await expect(store.close()).rejects.toMatchObject({ code: "unavailable" });
     stores.delete(store);
 

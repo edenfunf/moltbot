@@ -75,7 +75,6 @@ import { createOverlayHandlers } from "./tui-overlays.js";
 import { createTuiPluginApprovalController } from "./tui-plugin-approvals.js";
 import { createTuiQuestionController } from "./tui-questions.js";
 import { createSessionActions } from "./tui-session-actions.js";
-import { TUI_SESSION_LOOKUP_LIMIT } from "./tui-session-list-policy.js";
 import { createTuiRunIdTracker } from "./tui-session-run-coordinator.js";
 import {
   createEditorSubmitHandler,
@@ -906,7 +905,17 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
   const statusContainer = new Container();
   const footer = new Text("", 1, 0);
   const questionStatus = new Text("", 1, 0);
-  const chatLog = new ChatLog();
+  const loadImage = client.loadImage?.bind(client);
+  const chatLog = new ChatLog(
+    180,
+    loadImage
+      ? {
+          loadImage,
+          getScope: () => ({ sessionKey: state.currentSessionKey, agentId: state.currentAgentId }),
+          requestRender: () => tui.requestRender(),
+        }
+      : undefined,
+  );
   const connectionNotices: string[] = [];
   const addConnectionNotice = (text: string) => {
     connectionNotices.push(text);
@@ -1053,6 +1062,31 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
   // Initial selection predates controller construction, so it intentionally does not notify.
   state.sessionIdentity.sessionKey = resolveSessionSelection(initialSessionInput).key;
 
+  // Presentation-only label shown before the remembered session is remotely
+  // validated. Cleared once restoreRememberedSession confirms or rejects it.
+  let provisionalSessionLabel: string | null = null;
+
+  // Shared candidate resolution so the pre-connect label and the post-connect
+  // restore flow read the same SQLite key and apply the same eligibility rules.
+  const resolveRememberedCandidate = async (): Promise<{ key: string } | null> => {
+    const remembered = await readTuiLastSessionKey({
+      scopeKey: buildLastSessionScopeKeyFor(),
+    });
+    if (!remembered) {
+      return null;
+    }
+    const selection = resolveSessionSelection(remembered);
+    const key = selection?.key ?? null;
+    if (!key || key === state.currentSessionKey) {
+      return null;
+    }
+    const agentId = selection?.agentId;
+    if (agentId && normalizeAgentId(agentId) !== state.currentAgentId) {
+      return null;
+    }
+    return { key };
+  };
+
   const buildLastSessionScopeKeyFor = (sessionKey = state.currentSessionKey) => {
     const parsed = parseAgentSessionKey(sessionKey);
     return buildTuiLastSessionScopeKey({
@@ -1075,33 +1109,29 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     if (initialSessionInput || rememberedSessionApplied) {
       return;
     }
-    const remembered = await readTuiLastSessionKey({
-      scopeKey: buildLastSessionScopeKeyFor(),
-    });
+    const candidate = await resolveRememberedCandidate();
     if (expectedConnectionGeneration !== connectionGeneration || exitRequested) {
       return;
     }
-    const rememberedSelection = remembered ? resolveSessionSelection(remembered) : null;
-    const rememberedKey = rememberedSelection?.key ?? null;
-    if (!rememberedKey || rememberedKey === state.currentSessionKey) {
+    if (!candidate) {
+      provisionalSessionLabel = null;
       rememberedSessionApplied = true;
       return;
     }
-    const rememberedAgent = rememberedSelection?.agentId;
-    if (rememberedAgent && normalizeAgentId(rememberedAgent) !== state.currentAgentId) {
-      rememberedSessionApplied = true;
-      return;
-    }
-    const sessions = await client
-      .listSessions({
-        limit: TUI_SESSION_LOOKUP_LIMIT,
-        search: rememberedKey,
-        includeGlobal: rememberedKey === "global",
-        includeUnknown: false,
+    const rememberedKey = candidate.key;
+    const description = await client
+      .describeSession({
+        sessionKey: rememberedKey,
         agentId: state.currentAgentId,
       })
       .catch(() => null);
-    if (!sessions || expectedConnectionGeneration !== connectionGeneration || exitRequested) {
+    if (expectedConnectionGeneration !== connectionGeneration || exitRequested) {
+      return;
+    }
+    if (!description) {
+      // A failed lookup clears the preview, but leaves restoration eligible
+      // for a later connection to validate the remembered session.
+      provisionalSessionLabel = null;
       return;
     }
     // An abandoned connection must leave restoration eligible for the next handshake.
@@ -1109,18 +1139,21 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     const restored = resolveRememberedTuiSessionKey({
       rememberedKey,
       currentAgentId: state.currentAgentId,
-      sessions: sessions.sessions,
+      sessions:
+        description.session && description.session.key !== "unknown" ? [description.session] : [],
     });
     if (!restored || restored === state.currentSessionKey) {
+      provisionalSessionLabel = null;
       return;
     }
     state.currentSessionKey = restored;
+    provisionalSessionLabel = null;
     updateHeader();
     updateFooter();
   };
 
   const updateHeader = () => {
-    const sessionLabel = formatSessionKey(state.currentSessionKey);
+    const sessionLabel = provisionalSessionLabel ?? formatSessionKey(state.currentSessionKey);
     const agentLabel = formatAgentLabel(state.currentAgentId);
     const title = opts.title ?? "openclaw tui";
     const text = `${title} - ${client.connection.url} - agent ${agentLabel} - session ${sessionLabel}`;
@@ -1392,7 +1425,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     : undefined;
 
   const updateFooter = () => {
-    const sessionKeyLabel = formatSessionKey(state.currentSessionKey);
+    const sessionKeyLabel = provisionalSessionLabel ?? formatSessionKey(state.currentSessionKey);
     const sessionLabel = state.sessionInfo.displayName
       ? `${sessionKeyLabel} (${state.sessionInfo.displayName})`
       : sessionKeyLabel;
@@ -1588,6 +1621,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     pluginApprovals?.dispose();
     questions.dispose();
     taskSuggestions?.dispose();
+    chatLog.dispose();
     beginTuiShutdown({
       stopCommandScopes: () => localShell.shutdown(),
       stopClient: () => client.stop(),
@@ -1702,7 +1736,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     state.lastCtrlCAt = decision.nextLastCtrlCAt;
     if (decision.action === "clear") {
       editor.setText("");
-      setActivityStatus("cleared input; press ctrl+c again to exit");
+      chatLog.addSystem("cleared input; press ctrl+c again to exit");
       tui.requestRender();
       return;
     }
@@ -1710,7 +1744,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
       requestExit();
       return;
     }
-    setActivityStatus("press ctrl+c again to exit");
+    chatLog.addSystem("press ctrl+c again to exit");
     tui.requestRender();
   };
   editor.onCtrlC = () => {
@@ -1972,6 +2006,21 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     })();
     tui.requestRender();
   };
+
+  if (!initialSessionInput && !rememberedSessionApplied) {
+    // Pre-render read is best-effort: a corrupt or inaccessible state DB must
+    // not reject runTui() before the terminal UI and its startup-failure path
+    // are active. The post-connect restoreRememberedSession flow re-reads the
+    // key and owns the established error-handling path.
+    try {
+      const candidate = await resolveRememberedCandidate();
+      if (candidate) {
+        provisionalSessionLabel = formatSessionKey(candidate.key);
+      }
+    } catch {
+      provisionalSessionLabel = null;
+    }
+  }
 
   updateHeader();
   setConnectionStatus(isLocalMode ? "starting local runtime" : "connecting");

@@ -12,13 +12,17 @@ import type {
   ChannelPlugin,
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.public.js";
-import type { InternalChannelThreadingToolContext } from "../../channels/threading-tool-context-internal.js";
+import type { ChannelProgressDraftCompositorSnapshot } from "../../channels/progress-draft-compositor.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { MessageActionAuthorization } from "../../gateway/message-action-turn-capability.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
 import type { GatewayClientMode, GatewayClientName } from "../../utils/message-channel.js";
 import type { OutboundDeliveryResult } from "./deliver-types.js";
 import type { OutboundSendDeps } from "./deliver.js";
-import type { DurableDeliveryCompletion } from "./delivery-completion.js";
+import type {
+  ConversationDeliveryTarget,
+  DurableDeliveryCompletion,
+} from "./delivery-completion.js";
 import type { MessageBroadcastAccountPlan } from "./message-account-selection.js";
 import type { MessageActionDeniedError } from "./message-action-denial.js";
 import type { OutboundMessageGatewayOptionsInput } from "./message-gateway-options.js";
@@ -44,6 +48,8 @@ export type MessageActionInput = {
   cfg: OpenClawConfig;
   action: ChannelMessageActionName;
   params: Record<string, unknown>;
+  /** @internal Host-prepared display state for an existing progress message edit. */
+  progressSnapshot?: ChannelProgressDraftCompositorSnapshot;
   /** @internal Identifies model-authored calls for lossy input normalization. */
   actionOrigin?: "message-tool";
   defaultAccountId?: string;
@@ -61,11 +67,7 @@ export type MessageActionInput = {
    * Authorization facts resolved from the host-issued current-turn capability.
    * Presence means ambient routing fields must not be used as identity.
    */
-  messageActionAuthorization?: {
-    requesterAccountId?: string;
-    requesterSenderId?: string;
-    toolContext?: InternalChannelThreadingToolContext;
-  };
+  messageActionAuthorization?: MessageActionAuthorization;
   sessionId?: string;
   /** @internal Admitted run correlation carried into owner-native delivery audit. */
   runId?: string;
@@ -98,6 +100,8 @@ export type MessageActionInput = {
   deliveryIntentId?: string;
   /** @internal Serializable owner state finalized by live send or recovery. */
   deliveryCompletion?: DurableDeliveryCompletion;
+  /** @internal Captured conversation storage facts, excluded from plugins and durable payloads. */
+  conversationDeliveryTarget?: ConversationDeliveryTarget;
   /** @internal Runs after queue persistence and before platform I/O. */
   onDeliveryIntent?: (intent: DurableMessageSendIntent) => void;
   /** @internal Revalidates caller-owned authority before each durable adapter attempt. */
@@ -158,6 +162,7 @@ export type MessageActionResult =
           to: string;
           ok: boolean;
           error?: string;
+          attempted?: false;
           sentBeforeError?: true;
           payload?: unknown;
           result?: MessageSendResult;
@@ -198,9 +203,14 @@ function resolveMessageSendOutcome(
       return {
         ok: false,
         error: `${action} send suppressed: ${sendResult.suppressionReason ?? "unknown reason"}.`,
+        ...(sendResult.sentBeforeError ? { sentBeforeError: true } : {}),
       };
     case "failed":
-      return { ok: false, error: sendResult.error ?? `${action} send failed.` };
+      return {
+        ok: false,
+        error: sendResult.error ?? `${action} send failed.`,
+        ...(sendResult.sentBeforeError ? { sentBeforeError: true } : {}),
+      };
     case "partial_failed":
       return {
         ok: false,

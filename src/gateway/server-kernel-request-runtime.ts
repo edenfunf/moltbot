@@ -1,11 +1,14 @@
+import { listAgentIds } from "../agents/agent-scope-config.js";
 import { getRuntimeConfig } from "../config/io.js";
 import { retireQuestionChannelGateway } from "../infra/question-channel-runtime.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
 import { bindLegacyPluginSdkResourceHost } from "../plugins/legacy-sdk-resource-host.js";
 import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
+import { closeGatewayDeviceRevocation } from "./device-revocation.js";
 import { createGatewayChatMetadataLifecycle } from "./server-chat-metadata-lifecycle.js";
 import type { startGatewayCoreRuntime } from "./server-core-runtime.js";
 import { attachInitialGatewayLifetimeSidecars } from "./server-lifetime-sidecars.js";
+import { readPreparedServerMethodModelCatalogs } from "./server-methods/optional-model-catalog.js";
 import type { GatewayHostLifecycle } from "./server-public.js";
 
 type GatewayCoreRuntime = Awaited<ReturnType<typeof startGatewayCoreRuntime>>;
@@ -31,7 +34,6 @@ export async function prepareGatewayKernelRequestRuntime(params: {
     gatewayInstanceRuntimeRef,
     lifecycle,
     startupState,
-    kernel,
     shutdownRuntime,
   } = runtime;
   const chatMetadataLifecycle = await createGatewayChatMetadataLifecycle({
@@ -56,14 +58,40 @@ export async function prepareGatewayKernelRequestRuntime(params: {
       logHealth,
     });
   });
-  kernel.addGatewayLifetimeSidecar({
+  const projectionReady = startupTrace.measure("sessions.projection", async () => {
+    const { createSessionRowProjection } = await import("./session-row-projection.js");
+    return createSessionRowProjection({
+      cfg: getRuntimeConfig(),
+      getConfig: getRuntimeConfig,
+      getModelCatalog: () =>
+        readPreparedServerMethodModelCatalogs(
+          gatewayRequestContext,
+          listAgentIds(getRuntimeConfig()),
+        ),
+      context: gatewayRequestContext,
+      placementFactsReader: runtime.workerEnvironmentStartup?.placementStore,
+    });
+  });
+  const projectionLifetime: { closing: boolean; detach?: () => void } = { closing: false };
+  runtime.registerGatewayLifetimeSidecars({
     stop: async () => {
+      projectionLifetime.closing = true;
       // Received mutations and their finalizers join before lifetime sidecars stop.
       // Retire this exact context too when no request ever bound its coordinator.
       retireQuestionChannelGateway(runtime.connectionWork.signal);
+      closeGatewayDeviceRevocation(gatewayRequestContext);
       await gatewayRequestContext.scopeUpgradeCoordinator?.close();
+      const projection = await projectionReady.catch(() => undefined);
+      await shutdownRuntime.flushPendingSessionsChangedEvents(gatewayRequestContext);
+      projectionLifetime.detach?.();
+      projection?.dispose();
     },
   });
+  const projection = await projectionReady;
+  if (projectionLifetime.closing) {
+    throw new Error("Gateway closed during session projection startup");
+  }
+  projectionLifetime.detach = runtime.attachSessionRowProjection(projection);
   gatewayRequestContext.requestEntryLifetime = runtime.requestEntryLifetime;
   bindApprovalPublicationContext(gatewayRequestContext);
   await attachInitialGatewayLifetimeSidecars({
@@ -75,7 +103,7 @@ export async function prepareGatewayKernelRequestRuntime(params: {
     ...(!workerPlacementRuntime && githubPublicationRuntime
       ? { reconcileGitHubPublications: githubPublicationRuntime.reconcilePublications }
       : {}),
-    sidecars: runtimeState.gatewayLifetimeSidecars,
+    publishSidecars: runtimeState.gatewayLifetimeSidecars.publish,
   });
   pluginGatewayContext.current = gatewayRequestContext;
   gatewayRequestContext.dispatchHookAgentTurn = async (pluginId, hookParams) => {
@@ -109,6 +137,7 @@ export async function prepareGatewayKernelRequestRuntime(params: {
   if (hostLifecycle) {
     gatewayRequestContext.hostLifecycle = {
       externalRestart: hostLifecycle.externalRestart,
+      getShutdownBudget: () => hostLifecycle.getShutdownBudget?.(),
       request: (action, assertCaller) =>
         hostLifecycle.request(action, () => {
           if (!gatewayInstanceRuntime.isAvailable()) {

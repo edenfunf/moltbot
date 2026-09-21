@@ -2,13 +2,13 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { expect, it } from "vitest";
 import {
   createOpenClawTestInstance,
   type OpenClawTestInstance,
 } from "../../../test/helpers/openclaw-test-instance.ts";
 import { runQaGatewayFixture } from "../../../test/helpers/qa-gateway-cleanup.ts";
+import { createRequireRecord } from "../../../test/helpers/record.js";
 import { waitForControlUiGatewayReady } from "../test-helpers/control-ui-e2e-readiness.ts";
 import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { pickerValue } from "../test-helpers/select-picker-e2e.ts";
@@ -185,6 +185,10 @@ suite.define(() => {
           await page.goto(url.href);
           await waitForControlUiGatewayReady(page);
           const settings = page.locator("openclaw-model-providers-page");
+          const refreshButton = settings.locator(".model-providers__refresh-button");
+          const catalogProgress = settings.locator(
+            '.model-providers__catalog-progress[role="status"]',
+          );
           const pickers = settings.locator(".model-providers__defaults openclaw-select-picker");
           const primary = pickers.first();
           const trigger = primary.locator(".picker-select__trigger");
@@ -198,17 +202,6 @@ suite.define(() => {
           };
           await trigger.waitFor({ state: "visible" });
           await expect.poll(() => pickerValue(primary)).toBe("fixture/anchor");
-          await expect
-            .poll(() =>
-              requests.some(
-                ({ params }) =>
-                  params.view === "configured" &&
-                  params.agentId === "main" &&
-                  params.preparedOnly === undefined &&
-                  params.refresh === undefined,
-              ),
-            )
-            .toBe(true);
           expect(acquisitions()).toBe(initialAcquisitions);
           stages.push({ stage: "initial", acquisitions: acquisitions() });
 
@@ -223,14 +216,31 @@ suite.define(() => {
             expect(request.params).toEqual({
               view: "configured",
               agentId: "main",
-              includeDefaultModels: true,
               refresh: true,
             });
             expect(replies.get(request.id)?.ok).toBe(true);
             return requireRecord(replies.get(request.id)?.payload);
           };
+          const catalogIdle = async () =>
+            (await refreshButton.isEnabled()) &&
+            (await catalogProgress.count()) === 0 &&
+            requests.every(({ id }) => replies.has(id));
+          const waitForCatalogIdle = async () => {
+            await expect
+              .poll(async () => {
+                const requestCount = requests.length;
+                if (!(await catalogIdle())) {
+                  return false;
+                }
+                await page.evaluate(() => {
+                  return new Promise(requestAnimationFrame);
+                });
+                return requests.length === requestCount && (await catalogIdle());
+              })
+              .toBe(true);
+          };
           const open = async () => {
-            await expect.poll(() => requests.every(({ id }) => replies.has(id))).toBe(true);
+            await waitForCatalogIdle();
             const requestsBeforeOpen = requests.length;
             const acquisitionsBeforeOpen = acquisitions();
             if ((await trigger.getAttribute("aria-expanded")) === "true") {
@@ -591,8 +601,8 @@ suite.define(() => {
           await page.keyboard.press("ControlOrMeta+K");
           await input.fill("palette");
           await status.waitFor({ state: "visible" });
-          expect(catalogParams.length).toBeGreaterThan(requestsBeforeOpen);
-          expect(catalogParams.at(-1)).toEqual({
+          // The selected Chat can issue its session-scoped read on this connection too.
+          expect(catalogParams.slice(requestsBeforeOpen)).toContainEqual({
             view: "configured",
             agentId: "reviewer",
           });

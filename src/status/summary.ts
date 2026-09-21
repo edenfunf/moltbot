@@ -2,9 +2,11 @@
 // It aggregates sessions, tasks, heartbeat, channel summary, and model/runtime metadata.
 
 import { expectDefined } from "@openclaw/normalization-core";
+import type { SystemInfoResult } from "../../packages/gateway-protocol/src/schema/system-info.js";
 import { withAgentRosterFactsBatch } from "../agents/agent-scope-config.js";
 import { resolveAgentConfig } from "../agents/agent-scope.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
+import { readStartupRecoveryWarning } from "../agents/main-session-recovery/main-session-restart-recovery-diagnostics.js";
 import { areRuntimeModelRefsEquivalent } from "../agents/model-runtime-aliases.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { resolveProjectedSessionContextTokens } from "../config/sessions/context-token-provenance.js";
@@ -24,10 +26,13 @@ import {
 } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { listGatewayAgentsBasic } from "../gateway/agent-list.js";
+import type { SessionRowProjection } from "../gateway/session-row-projection.js";
+import { getGatewayInstallationReplacement } from "../gateway/stale-install.js";
 import { resolveHeartbeatSessionKey } from "../infra/heartbeat-runner-session.js";
 import { resolveHeartbeatSummariesForAgents } from "../infra/heartbeat-summary-projection.js";
 import { hasResolvableHeartbeatOwnerRoute } from "../infra/outbound/targets.js";
 import { readStartupMigrationWarning } from "../infra/state-migrations.messages.js";
+import { resolveSystemEventQueueKey } from "../infra/system-event-ownership.js";
 import { peekSystemEvents } from "../infra/system-events.js";
 import {
   listActiveDegradedPlugins,
@@ -42,16 +47,16 @@ import {
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
 import { sortAndLimitBy } from "../shared/sort-and-limit.js";
-import {
-  summarizeActionableTaskAuditFindings,
-  summarizeRetainedLostTaskAuditFindings,
-} from "../tasks/task-registry.audit.js";
+import { readOpenClawStateWalHealth } from "../state/openclaw-state-db-cache.js";
 import { deliveryContextFromSession } from "../utils/delivery-context.shared.js";
 import { resolveRuntimeServiceVersion } from "../version.js";
-import { readStatusSessionStores } from "./session-stores.js";
-import type { HeartbeatStatus, SessionStatus, StatusSummary } from "./types.js";
-
-const RECENT_SESSION_LIMIT = 10;
+import { buildStatusCliProjection } from "./cli-projection.js";
+import {
+  readStatusSessionStores,
+  STATUS_RECENT_SESSION_LIMIT,
+  type StatusSessionStores,
+} from "./session-stores.js";
+import type { HeartbeatStatus, SessionStatus } from "./types.js";
 
 const channelSummaryModuleLoader = createLazyImportLoader(
   () => import("../infra/channel-summary.js"),
@@ -117,20 +122,6 @@ const buildFlags = (entry?: SessionEntry): string[] => {
   }
   return flags;
 };
-
-function discountRetainedLostTaskFailures(
-  tasks: StatusSummary["tasks"],
-  retainedLostCount: number,
-): StatusSummary["tasks"] {
-  // Retained lost tasks are reported separately; avoid double-counting them as active failures.
-  if (retainedLostCount <= 0 || tasks.failures <= 0) {
-    return tasks;
-  }
-  return {
-    ...tasks,
-    failures: Math.max(0, tasks.failures - retainedLostCount),
-  };
-}
 
 function compareSessionCandidatesByUpdatedAt(
   left: SessionEntrySummary,
@@ -367,11 +358,14 @@ export async function getStatusSummary(
   options: {
     includeSensitive?: boolean;
     includeChannelSummary?: boolean;
+    includeCliProjection?: boolean;
     config?: OpenClawConfig;
     sourceConfig?: OpenClawConfig;
     hostDesktopStatus?: import("../gateway/desktop/host-source.js").HostDesktopStatus;
+    sessionStores?: StatusSessionStores;
+    sessionRowProjection?: SessionRowProjection;
   } = {},
-): Promise<StatusSummary> {
+) {
   const { includeSensitive = true, includeChannelSummary = true } = options;
   const cfg = options.config ?? getRuntimeConfig();
   const channelScopeConfig =
@@ -454,30 +448,26 @@ export async function getStatusSummary(
         }),
       )
     : [];
-  // Fleet status reads every main queue without selecting an ambient execution owner.
-  // Global session scope shares one queue, so include it only once.
-  const mainSessionKeys = new Set(
-    agentList.agents.map(({ id: agentId }) =>
-      resolveCanonicalMainSessionKey({
+  const queuedSystemEvents = agentList.agents.flatMap(({ id: agentId }) =>
+    peekSystemEvents(
+      resolveSystemEventQueueKey(
+        resolveCanonicalMainSessionKey({
+          agentId,
+          mainKey: cfg.session?.mainKey,
+          sessionScope: cfg.session?.scope,
+        }),
         agentId,
-        mainKey: cfg.session?.mainKey,
-        sessionScope: cfg.session?.scope,
-      }),
+      ),
     ),
   );
-  const queuedSystemEvents = [...mainSessionKeys].flatMap(peekSystemEvents);
   const taskMaintenanceModule = await taskRegistryMaintenanceModuleLoader.load();
   // Status may overlap a live Gateway, so task inspection must not initialize
   // the writable process registry or its schema-owning shared-state handle.
-  const taskInspection = taskMaintenanceModule.inspectTasksReadOnly();
-  const inspectableTasks = taskInspection.tasks;
-  const rawTasks = taskMaintenanceModule.getInspectableTaskRegistrySummary(inspectableTasks);
-  const taskAuditFindings = taskMaintenanceModule.getInspectableTaskAuditFindings(inspectableTasks);
+  const taskInspection = await taskMaintenanceModule.getInspectableTaskStatusSummaryReadOnly();
   const now = Date.now();
-  const taskAudit = summarizeActionableTaskAuditFindings(taskAuditFindings, { now });
-  const taskAuditRetainedLost = summarizeRetainedLostTaskAuditFindings(taskAuditFindings, { now });
-  const tasks: StatusSummary["tasks"] = {
-    ...discountRetainedLostTaskFailures(rawTasks, taskAuditRetainedLost.count),
+  const { taskAudit, taskAuditRetainedLost } = taskInspection;
+  const tasks = {
+    ...taskInspection.tasks,
     ...(taskInspection.state === "migration-required"
       ? {
           warning:
@@ -488,11 +478,14 @@ export async function getStatusSummary(
 
   const sessionDetails = includeSensitive ? await prepareSessionStatusDetails(cfg, now) : undefined;
 
-  const sessionStores = readStatusSessionStores(
-    cfg,
-    agentList.agents,
-    includeSensitive ? RECENT_SESSION_LIMIT : 0,
-  );
+  const sessionStores =
+    options.sessionStores ??
+    (await readStatusSessionStores(
+      cfg,
+      agentList.agents,
+      includeSensitive ? STATUS_RECENT_SESSION_LIMIT : 0,
+      options.sessionRowProjection,
+    ));
   const byAgent = await Promise.all(
     sessionStores.byAgent.map(async ({ agent, path, count, recent }) => ({
       agentId: agent.id,
@@ -509,7 +502,7 @@ export async function getStatusSummary(
     ? await sessionDetails.buildSessionRows(
         sortAndLimitBy(
           sessionStores.recent,
-          RECENT_SESSION_LIMIT,
+          STATUS_RECENT_SESSION_LIMIT,
           compareSessionCandidatesByUpdatedAt,
         ),
       )
@@ -521,8 +514,13 @@ export async function getStatusSummary(
         await import("../gateway/desktop/host-source.js")
       ).inspectHostDesktop({ config: cfg.desktop?.host })
     ).status;
+  const sqliteWal = readOpenClawStateWalHealth();
   return {
     runtimeVersion: resolveRuntimeServiceVersion(process.env),
+    ...(options.includeCliProjection
+      ? { cliProjection: buildStatusCliProjection(cfg, agentList) }
+      : {}),
+    sqliteWal: sqliteWal && !includeSensitive ? { ...sqliteWal, error: undefined } : sqliteWal,
     hostDesktop: hostDesktopStatus,
     linkChannel: linkContext
       ? {
@@ -539,6 +537,8 @@ export async function getStatusSummary(
     channelSummary,
     queuedSystemEvents,
     startupMigrationWarning: readStartupMigrationWarning(includeSensitive),
+    startupRecoveryWarning: readStartupRecoveryWarning(includeSensitive),
+    installationReplacementWarning: getGatewayInstallationReplacement()?.message,
     secretEgressProxy: getSecretEgressCertificateStatus(),
     degradedSecretOwners: listActiveDegradedSecretOwners().map(
       ({ ownerKind, ownerId, state, degradationState, paths: ownerPaths, reason }) => {
@@ -570,3 +570,25 @@ export async function getStatusSummary(
     },
   };
 }
+
+type GatheredStatusSummary = Awaited<ReturnType<typeof getStatusSummary>>;
+
+/** Aggregate status summary, including cold-start and Gateway health compatibility fields. */
+export type StatusSummary = Omit<
+  Partial<GatheredStatusSummary>,
+  "runtimeVersion" | "degradedSecretOwners"
+> &
+  Pick<
+    GatheredStatusSummary,
+    "heartbeat" | "channelSummary" | "queuedSystemEvents" | "tasks" | "taskAudit" | "sessions"
+  > & {
+    runtimeVersion?: string | null;
+    eventLoop?: NonNullable<SystemInfoResult["eventLoop"]>;
+    processMemory?: NonNullable<SystemInfoResult["processMemory"]>;
+    degradedSecretOwners?: Array<
+      Omit<
+        NonNullable<GatheredStatusSummary["degradedSecretOwners"]>[number],
+        "degradationState"
+      > & { degradationState?: "cold" | "stale" }
+    >;
+  };

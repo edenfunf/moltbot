@@ -22,6 +22,8 @@ pnpm ci:full-release \
   --sha "$VALIDATION_SHA" \
   --target-ref "$CONTEXT_REF" \
   --workflow-sha "$TOOLING_SHA" \
+  -f validation_purpose=publish \
+  -f publication_selection_json='{"route":"extended-stable","npmDistTag":"extended-stable","publishOpenclawNpm":true,"pluginPublishScope":"all-publishable","plugins":[]}' \
   -f release_profile=stable \
   -f run_release_soak=true \
   -f fail_fast=false \
@@ -66,7 +68,7 @@ validation. See [Releasing](/reference/RELEASING) for the publication sequence.
 The conceptual phases map to current inputs:
 
 - `beta-publish`: `release_profile=beta`, `run_release_soak=false`
-- `postpublish-confidence`: exact published package plus
+- `postpublish-confidence`: `validation_purpose=postpublish-confidence`, no publication selection, exact published package plus
   `run_release_soak=true` or explicit focused groups
 - `stable-publish`: `release_profile=stable`
 
@@ -174,3 +176,9 @@ that selects Telegram, conflicts with the waiver and is rejected. The declaratio
 target version bind the immutable execution plan, manifest, and reuse identity;
 the publisher carries the waiver into release verification notes. The beta-only
 package deferral above remains unchanged.
+
+Source Telegram QA uses the release checks' shared context check: an exact candidate
+SHA must remain an ancestor of its canonical branch, or equal its release tag.
+Both build and execution admission independently repeat that check and retain
+candidate-version, signature/merge-attribution, and live maintainer checks.
+Advancing a release branch does not select a new candidate or invalidate the old one.

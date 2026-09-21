@@ -1,10 +1,9 @@
 // Subagent control tests cover listing, killing, and admin cleanup of
 // child runs recorded in the subagent registry and session store.
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
+import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
 import { stopSubagentsForRequester } from "../../../auto-reply/reply/abort-operation.js";
 import { tryFastAbortFromMessage } from "../../../auto-reply/reply/abort.js";
 import { createReplyOperation } from "../../../auto-reply/reply/reply-run-registry.js";
@@ -24,6 +23,7 @@ import {
   getActiveSessionLifecycleMutationCount,
   SESSION_WORK_ADMISSION_DRAIN_TIMEOUT_MS,
 } from "../../../sessions/session-lifecycle-admission.js";
+import { closeOpenClawAgentDatabasesAsync } from "../../../state/openclaw-agent-db.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "../../../tasks/detached-task-runtime-contract.js";
 import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import {
@@ -131,16 +131,14 @@ function mockSessionPatchForStore(storePath: string, implementation: typeof patc
   );
 }
 
-let tempRoot = "";
+const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
+  afterAll(async () => {
+    await closeOpenClawAgentDatabasesAsync(tempRoot);
+    cleanup();
+  }),
+);
+const tempRoot = tempDirs.make("openclaw-subagent-control-");
 let tempStoreIndex = 0;
-
-beforeAll(() => {
-  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-subagent-control-"));
-});
-
-afterAll(() => {
-  fs.rmSync(tempRoot, { recursive: true, force: true });
-});
 
 function nextSessionStorePath(label: string) {
   tempStoreIndex += 1;
@@ -375,7 +373,6 @@ describe("killSubagentRunAdmin", () => {
         previousRunId: source.runId,
         nextRunId: recoveryRunId,
         expected: source,
-        restartRecovery: receipt,
         persistenceFailure: "return-false",
       }),
     ).toBe(true);
@@ -1718,109 +1715,6 @@ describe("controlled subagent cancellation races", () => {
       }
     },
   );
-
-  it("adopts the receipt-matched recovery successor and kills its descendants", async () => {
-    const controllerSessionKey = "agent:main:main";
-    const childSessionKey = "agent:main:subagent:kill-remapped-recovery";
-    const descendantSessionKey = `${childSessionKey}:subagent:leaf`;
-    const sessionId = "sess-kill-remapped-recovery";
-    const recoveryRunId = "recovery-run-kill-remapped";
-    const receipt = {
-      sessionId,
-      sessionMarker: `${sessionId}:1`,
-      idempotencyKey: recoveryRunId,
-      phase: "accepted" as const,
-    };
-    const source = createSubagentRunRecord({
-      runId: "source-run-kill-remapped",
-      childSessionKey,
-      controllerSessionKey,
-      requesterSessionKey: controllerSessionKey,
-      requesterDisplayKey: "main",
-      task: "source recovery task",
-      cleanup: "keep",
-      generation: 1,
-      createdAt: Date.now() - 2_000,
-      execution: {
-        status: "interrupted",
-        startedAt: Date.now() - 1_000,
-        restartRecovery: receipt,
-      },
-    });
-    addSubagentRunForTests(source);
-    const storePath = await writeSessionStoreFixture("kill-remapped-recovery", {
-      [childSessionKey]: { sessionId, updatedAt: Date.now(), abortedLastRun: true },
-      [descendantSessionKey]: {
-        sessionId: "sess-kill-remapped-recovery-leaf",
-        updatedAt: Date.now(),
-      },
-    });
-    const admission = await beginSessionWorkAdmission({
-      scope: storePath,
-      identities: [childSessionKey, sessionId],
-      assertAllowed: () => {},
-    });
-    const handoffId = admission.createHandoff();
-    setSubagentControlDepsForTest({
-      isEmbeddedAgentRunActive: () => true,
-      abortEmbeddedAgentRun: () => true,
-      clearSessionQueues: () => ({ followupCleared: 0, laneCleared: 0, keys: [] }),
-    });
-
-    const pendingKill = killAllControlledSubagentRuns({
-      cfg: cfgWithSessionStore(storePath),
-      controller: {
-        controllerSessionKey,
-        callerSessionKey: controllerSessionKey,
-        callerIsSubagent: false,
-        controlScope: "children",
-      },
-      runs: [source],
-    });
-    await vi.waitFor(() => expect(getActiveSessionLifecycleMutationCount()).toBeGreaterThan(0));
-    const adopted = consumeSessionWorkAdmissionHandoff({
-      handoffId,
-      scope: storePath,
-      identities: [childSessionKey, sessionId],
-      onInterrupt: () => undefined,
-    });
-    expect(
-      replaceSubagentRunAfterSteerCore({
-        previousRunId: source.runId,
-        nextRunId: recoveryRunId,
-        expected: source,
-        restartRecovery: receipt,
-        persistenceFailure: "return-false",
-      }),
-    ).toBe(true);
-    addSubagentRunForTests({
-      runId: "run-kill-remapped-leaf",
-      childSessionKey: descendantSessionKey,
-      controllerSessionKey: childSessionKey,
-      requesterSessionKey: childSessionKey,
-      requesterDisplayKey: childSessionKey,
-      task: "remapped leaf",
-      cleanup: "keep",
-      createdAt: Date.now(),
-      startedAt: Date.now(),
-    });
-    adopted?.release();
-
-    await expect(pendingKill).resolves.toMatchObject({
-      status: "ok",
-      killed: 2,
-      labels: ["source recovery task", "remapped leaf"],
-    });
-    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
-      runId: recoveryRunId,
-      endedReason: SUBAGENT_ENDED_REASON_KILLED,
-      execution: { status: "terminal", restartRecovery: undefined },
-    });
-    expect(getSubagentRunByChildSessionKey(descendantSessionKey)).toMatchObject({
-      endedReason: SUBAGENT_ENDED_REASON_KILLED,
-      execution: { status: "terminal" },
-    });
-  });
 
   it("leaves restart recovery disabled when the kill tombstone cannot persist", async () => {
     const controllerSessionKey = "agent:main:main";

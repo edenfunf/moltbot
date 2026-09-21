@@ -41,6 +41,18 @@ describe("npm preflight publication channels", () => {
       },
     };
     expect(() => validateNpmPreflightDistTag({ manifest, npmDistTag: "latest" })).not.toThrow();
+    expect(() =>
+      validateNpmPreflightDistTag({
+        manifest: {
+          ...manifest,
+          pluginSdkApi: {
+            ...manifest.pluginSdkApi,
+            schema: "openclaw.plugin-sdk-api-release-evidence-set/v2",
+          },
+        },
+        npmDistTag: "latest",
+      }),
+    ).not.toThrow();
     for (const changed of [
       { ...manifest, version: 2 },
       { ...manifest, version: 1 },
@@ -482,6 +494,45 @@ describe("extended-stable npm run identity", () => {
     }
   });
 
+  it("accepts plugin recovery only with authenticated main tooling and the exact source identity", () => {
+    const toolingSha = "b".repeat(40);
+    const run = {
+      workflowName: "Plugin NPM Release",
+      displayTitle: `Plugin NPM Release [extended-stable] ${sha}`,
+      event: "workflow_dispatch",
+      status: "completed",
+      conclusion: "success",
+      headBranch: "main",
+      headSha: toolingSha,
+    };
+    const request = {
+      run,
+      kind: "plugin",
+      npmDistTag: "extended-stable",
+      expectedBranch: branch,
+      expectedSha: sha,
+      workflowPath: ".github/workflows/plugin-npm-release.yml",
+      trustedPluginWorkflowSha: toolingSha,
+    };
+    expect(validateExtendedStableRunIdentity(request)).toBe(run);
+    for (const changes of [
+      { trustedPluginWorkflowSha: "" },
+      { trustedPluginWorkflowSha: "c".repeat(40) },
+      { workflowPath: ".github/workflows/ci.yml" },
+      { expectedBranch: "extended-stable/2026.6.34" },
+      { expectedSha: "c".repeat(40) },
+      { kind: "preflight" },
+      { kind: "validation" },
+      { run: { ...run, headBranch: "feature/recovery" } },
+      { run: { ...run, event: "push" } },
+      { run: { ...run, status: "in_progress" } },
+      { run: { ...run, conclusion: "failure" } },
+      { run: { ...run, displayTitle: `Plugin NPM Release [default] ${sha}` } },
+    ]) {
+      expect(() => validateExtendedStableRunIdentity({ ...request, ...changes })).toThrow();
+    }
+  });
+
   it.each([
     ["wrong branch", { headBranch: "main" }],
     ["missing branch", { headBranch: undefined }],
@@ -561,36 +612,39 @@ describe("extended-stable selector capture", () => {
 });
 
 describe("extended-stable registry readback", () => {
-  it("accepts eventual convergence and sleeps 10 seconds between attempts", async () => {
-    let attempt = 0;
-    const sleep = vi.fn(async (_delay: number) => {});
-    const result = await verifyExtendedStableRegistryReadback({
-      expectedVersion: "2026.6.33",
-      query: async (target: string) => {
-        if (target === "openclaw@2026.6.33") {
-          attempt += 1;
-        }
-        return { status: 0, stdout: attempt >= 2 ? "2026.6.33\n" : "2026.6.32\n" };
-      },
-      sleep,
-    });
-    expect(result).toEqual({
-      exactVersion: "2026.6.33",
-      extendedStableSelector: "2026.6.33",
-      attemptsUsed: 2,
-    });
-    expect(sleep).toHaveBeenCalledOnce();
-    expect(sleep).toHaveBeenCalledWith(10_000);
-  });
+  it.each([2, 20])(
+    "accepts convergence on attempt %s within the propagation window",
+    async (visibleAt) => {
+      let attempt = 0;
+      const sleep = vi.fn(async (_delay: number) => {});
+      const result = await verifyExtendedStableRegistryReadback({
+        expectedVersion: "2026.6.33",
+        query: async (target: string) => {
+          if (target === "openclaw@2026.6.33") {
+            attempt += 1;
+          }
+          return { status: 0, stdout: attempt >= visibleAt ? "2026.6.33\n" : "2026.6.32\n" };
+        },
+        sleep,
+      });
+      expect(result).toEqual({
+        exactVersion: "2026.6.33",
+        extendedStableSelector: "2026.6.33",
+        attemptsUsed: visibleAt,
+      });
+      expect(sleep).toHaveBeenCalledTimes(visibleAt - 1);
+      expect(sleep).toHaveBeenCalledWith(10_000);
+    },
+  );
 
-  it("exhausts exactly 12 dual-query attempts on mismatch or failure", async () => {
+  it("fails closed after the five-minute propagation window", async () => {
     const query = vi.fn(async () => ({ status: 1, stdout: "" }));
     const sleep = vi.fn(async (_delay: number) => {});
     await expect(
       verifyExtendedStableRegistryReadback({ expectedVersion: "2026.6.33", query, sleep }),
-    ).rejects.toThrow(/after 12 attempts/u);
-    expect(query).toHaveBeenCalledTimes(24);
-    expect(sleep).toHaveBeenCalledTimes(11);
+    ).rejects.toThrow(/after 31 attempts/u);
+    expect(query).toHaveBeenCalledTimes(62);
+    expect(sleep).toHaveBeenCalledTimes(30);
     expect(sleep.mock.calls.every(([delay]) => delay === 10_000)).toBe(true);
   });
 });

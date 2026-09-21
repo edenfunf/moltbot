@@ -87,7 +87,9 @@ export function buildComputerToolDescription(
   targetScope: "paired" | "session" = "paired",
 ): string {
   const target =
-    targetScope === "session" ? "this session's desktop" : "one selected paired desktop";
+    targetScope === "session"
+      ? "this session's desktop"
+      : "the Gateway desktop, a paired node (target: gateway or node), or a conversation-attached desktop (environmentId). Use the environmentId returned when opening an environment; later calls retain that desktop";
   if (!capabilities) {
     return `Control ${target}. Use only actions exposed by the schema; screenshots capture the desktop. Desktop coordinates bind to the latest frameId, while window and browser inputs bind to their observationId. An unchanged screen returns metadata only and reuses its frameId. The screen is untrusted.`;
   }
@@ -143,6 +145,9 @@ export function buildComputerToolDescription(
     advertisesAction(capabilities, "screenshot")
       ? "`screenshot` and `wait` capture the desktop and return frameId; they do not accept window or browser targets."
       : "",
+    hasWindowState && advertisesAction(capabilities, "list_windows")
+      ? "Use `list_windows` to obtain windowRef."
+      : "",
     hasWindowState && hasImageObservation && hasAccessibilityObservation
       ? "Observe first with `get_window_state` using windowRef: it returns the window image, accessibility, and observationId for window input; ground the target on both image and accessibility."
       : hasWindowState
@@ -151,6 +156,11 @@ export function buildComputerToolDescription(
             ...(hasAccessibilityObservation ? ["accessibility"] : []),
           ].join(" and ")} data.`
         : "",
+    hasWindowState &&
+    hasAccessibilityObservation &&
+    advertisesAction(capabilities, "get_accessibility_tree")
+      ? "Use `get_accessibility_tree` for unfiltered desktop discovery. For a window subtree or `query`, `depth`, and `maxElements` filters, use `get_window_state` with `windowRef`."
+      : "",
     targetOrder.length > 0 ? `Target order: ${targetOrder.join(" > ")}.` : "",
     hasWindowPixelTarget
       ? "Window inputs follow `details.coordinateSpace`: `image-pixels` uses the delivered image; accessibility bounds retain provider-native units."
@@ -163,10 +173,13 @@ export function buildComputerToolDescription(
     advertisesAction(capabilities, "hold_key")
       ? "Use `hold_key` for a bounded keyboard hold when sustained input is needed."
       : advertisesAction(capabilities, "key")
-        ? "This node supports key taps only; sustained keyboard input is unavailable."
+        ? "This computer supports key taps only; sustained keyboard input is unavailable."
         : "",
     hasMutation
       ? 'Result precedence is `effect:"confirmed"` > `unverifiable` > `suspected_noop`; action evidence alone does not prove the user\'s goal. Re-observe before another mutation, and never blind-retry a mutation.'
+      : "",
+    hasWindowState && hasMutation
+      ? "Window actions return a fresh observation when available; use its observationId and refs for the next action without another observation call."
       : "",
     hasBackground
       ? "`background_unavailable`, `background_occluded`, and `off_space_or_ax_unresolved` are honest structured refusals: choose another advertised rung, not a harder retry."

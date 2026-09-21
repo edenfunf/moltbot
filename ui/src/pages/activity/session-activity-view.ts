@@ -1,6 +1,8 @@
 import { html, nothing } from "lit";
+import { html as staticHtml, literal } from "lit/static-html.js";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
+import { renderAgentRowChip } from "../../components/agent-row-chip.ts";
 import { icons } from "../../components/icons.ts";
 import "../../components/ip-location.ts";
 import "../../components/viewer-facepile.ts";
@@ -16,17 +18,21 @@ import {
 } from "../../lib/presence-users.ts";
 import { resolveSessionDisplayName } from "../../lib/session-display.ts";
 import {
+  isSessionKeyAddressable,
   resolveSessionNavigationAgentId,
   resolveSessionPreferredFace,
   sessionNavigationTarget,
 } from "../../lib/sessions/route-navigation.ts";
 import {
+  isUiGlobalScopeConfigured,
   parseAgentSessionKey,
   resolveUiConfiguredMainKey,
   scopedSessionArtifactKey,
 } from "../../lib/sessions/session-key.ts";
 import "./session-activity-git.ts";
+import "./session-activity-media.ts";
 import { activityRunInspectorHref } from "./run-inspector-model.ts";
+import { renderSessionActivitySummary } from "./session-activity-summary.ts";
 import {
   ACTIVITY_TIME_FILTERS,
   projectSessionActivity,
@@ -49,6 +55,7 @@ type SessionActivityViewProps = {
   onRetry: () => void;
   onAutomationDayToggle: (dayKey: string) => void;
   onFiltersChange: (filters: SessionActivityFilters) => void;
+  onSummaryRetry?: (row: GatewaySessionRow) => void;
 };
 
 const TIME_LABELS: Record<ActivityTimeFilter, string> = {
@@ -244,23 +251,37 @@ function dayLabel(timestamp: number | null, now = Date.now()): string {
   }).format(timestamp);
 }
 
-function renderSessionLink(context: ApplicationContext, row: GatewaySessionRow) {
+function renderSessionLink(
+  context: ApplicationContext,
+  row: GatewaySessionRow,
+  onSummaryRetry?: (row: GatewaySessionRow) => void,
+) {
   const agentId =
     parseAgentSessionKey(row.key)?.agentId ??
     row.agentId ??
     resolveSessionNavigationAgentId(context);
   const face = resolveSessionPreferredFace(row);
-  const target = sessionNavigationTarget({
-    face,
-    sessionKey: row.key,
-    fallbackAgentId: resolveSessionNavigationAgentId(context),
-    basePath: context.basePath,
-    row,
-    mainKey: resolveUiConfiguredMainKey({
+  const addressable = isSessionKeyAddressable(
+    row.key,
+    isUiGlobalScopeConfigured({
       agentsList: context.agents.state.agentsList,
       hello: context.gateway.snapshot.hello,
     }),
-  });
+  );
+  const target = addressable
+    ? sessionNavigationTarget({
+        face,
+        sessionKey: row.key,
+        fallbackAgentId: row.key === "global" ? agentId : resolveSessionNavigationAgentId(context),
+        basePath: context.basePath,
+        row,
+        mainKey: resolveUiConfiguredMainKey({
+          agentsList: context.agents.state.agentsList,
+          hello: context.gateway.snapshot.hello,
+        }),
+      })
+    : null;
+  const tag = target ? literal`a` : literal`div`;
   const owner = sessionActivityOwner(row);
   const ownerName = presenceViewerLabel(owner);
   const activityAt = sessionActivityTimestamp(row);
@@ -270,19 +291,16 @@ function renderSessionLink(context: ApplicationContext, row: GatewaySessionRow) 
       ? digestRunId
       : undefined;
   const headline = activeObserverRunId ? row.observerDigest?.headline.trim() : "";
-  const scope = row.channel
-    ? t("activityFeed.channelLabel", { value: row.channel })
-    : row.agentId
-      ? t("activityFeed.agentLabel", { value: row.agentId })
-      : null;
+  const scope = row.channel ? t("activityFeed.channelLabel", { value: row.channel }) : null;
+  const showAgent = row.kind !== "global" || Boolean(row.agentId);
   const source = row.createdVia === "cron" ? t("activityFeed.automation") : null;
-  return html`<div class="activity-feed__session-row">
-    <a
+  return staticHtml`<div class="activity-feed__session-row">
+    <${tag}
       class="activity-feed__session"
       data-activity-session=${row.key}
-      href=${target.href}
+      href=${target?.href ?? nothing}
       @click=${(event: MouseEvent) => {
-        if (shouldHandleNavigationClick(event)) {
+        if (target && shouldHandleNavigationClick(event)) {
           event.preventDefault();
           context.navigate(face, target.options);
         }
@@ -318,7 +336,13 @@ function renderSessionLink(context: ApplicationContext, row: GatewaySessionRow) 
           }${
             source
               ? html`<span class="activity-feed__session-source" data-activity-created-via="cron"
-                  >· ${source}${scope ? " ·" : ""}</span
+                  >· ${source}${scope || showAgent ? " ·" : ""}</span
+                >`
+              : nothing
+          }${
+            showAgent
+              ? html`<span class="activity-feed__session-scope"
+                  >${renderAgentRowChip(agentId)}</span
                 >`
               : nothing
           }${scope ? html`<span class="activity-feed__session-scope">${scope}</span>` : nothing}
@@ -332,12 +356,20 @@ function renderSessionLink(context: ApplicationContext, row: GatewaySessionRow) 
             : nothing
         }
       </span>
-    </a>
+    </${tag}>
+    ${renderSessionActivitySummary(row, onSummaryRetry)}
     <openclaw-activity-session-git
       .context=${context}
       .sessionKey=${scopedSessionArtifactKey(row.key, agentId)}
       .agentId=${agentId}
     ></openclaw-activity-session-git>
+    <openclaw-activity-session-media
+      .context=${context}
+      .sessionKey=${scopedSessionArtifactKey(row.key, agentId)}
+      .agentId=${agentId}
+      .revision=${row.updatedAt ?? 0}
+      .session=${row}
+    ></openclaw-activity-session-media>
     ${
       activeObserverRunId
         ? html`<a
@@ -355,19 +387,19 @@ function renderDaySessions(
   day: ReturnType<typeof projectSessionActivity>["days"][number],
 ) {
   if (props.filters.query || props.filters.personId) {
-    return day.sessions.map((row) => renderSessionLink(props.context, row));
+    return day.sessions.map((row) => renderSessionLink(props.context, row, props.onSummaryRetry));
   }
   // GatewaySessionRow.hasAutomation records that an enabled cron job is bound to the session;
   // grouping must consume that fact directly rather than infer automation from titles or keys.
   const automation = day.sessions.filter((row) => row.hasAutomation === true);
   if (automation.length < 2) {
-    return day.sessions.map((row) => renderSessionLink(props.context, row));
+    return day.sessions.map((row) => renderSessionLink(props.context, row, props.onSummaryRetry));
   }
   const expanded = props.expandedAutomationDays.has(day.key);
   return html`
     ${day.sessions
       .filter((row) => row.hasAutomation !== true)
-      .map((row) => renderSessionLink(props.context, row))}
+      .map((row) => renderSessionLink(props.context, row, props.onSummaryRetry))}
     <button
       type="button"
       class="activity-feed__session activity-feed__automation-group"
@@ -381,7 +413,11 @@ function renderDaySessions(
         >${icons.chevronRight}</span
       >
     </button>
-    ${expanded ? automation.map((row) => renderSessionLink(props.context, row)) : nothing}
+    ${
+      expanded
+        ? automation.map((row) => renderSessionLink(props.context, row, props.onSummaryRetry))
+        : nothing
+    }
   `;
 }
 
@@ -459,6 +495,32 @@ function renderIdentityHeader(
   `;
 }
 
+function renderActivityLoading() {
+  return html`<section class="activity-feed__loading" aria-busy="true">
+    <span class="sr-only" role="status">${t("common.loading")}</span>
+    <div class="activity-feed__sessions" aria-hidden="true">
+      ${Array.from(
+        { length: 4 },
+        () => html`
+          <div class="activity-feed__session-row">
+            <div class="activity-feed__session">
+              <span class="skeleton activity-feed__loading-avatar"></span>
+              <div class="activity-feed__session-main">
+                <div class="skeleton skeleton-line skeleton-line--medium"></div>
+                <div class="skeleton skeleton-line activity-feed__loading-meta"></div>
+              </div>
+            </div>
+            <div class="activity-feed__recap activity-feed__recap-skeleton">
+              <div class="skeleton skeleton-line skeleton-line--long"></div>
+              <div class="skeleton skeleton-line skeleton-line--medium"></div>
+            </div>
+          </div>
+        `,
+      )}
+    </div>
+  </section>`;
+}
+
 export function renderSessionActivityView(props: SessionActivityViewProps) {
   const projection = projectSessionActivity(props.result);
   const onlineById = new Map(
@@ -512,14 +574,7 @@ export function renderSessionActivityView(props: SessionActivityViewProps) {
       </div>
       <div class="activity-feed__feedback">
         <span role=${props.error ? "alert" : "status"} title=${props.error ?? nothing}>
-          ${
-            props.error ??
-            (props.retrying
-              ? t("common.refreshing")
-              : props.loading && !props.result
-                ? t("common.loading")
-                : nothing)
-          }
+          ${props.error ?? (props.retrying ? t("common.refreshing") : nothing)}
         </span>
         ${
           props.error || props.retrying
@@ -530,6 +585,7 @@ export function renderSessionActivityView(props: SessionActivityViewProps) {
         }
       </div>
       <div class="activity-feed__main">
+        ${props.loading && !props.result ? renderActivityLoading() : nothing}
         ${
           props.result?.peopleIncomplete
             ? html`<p role="status">${t("activityFeed.partialHistory")}</p>`

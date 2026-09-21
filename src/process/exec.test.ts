@@ -1,8 +1,7 @@
 // Exec tests cover command execution, output capture, and cancellation behavior.
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync } from "node:fs";
-import fs from "node:fs/promises";
+import { closeSync, existsSync, openSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -19,12 +18,39 @@ import {
   runCommandBuffered,
   runCommandWithTimeout,
   runExec,
+  runUtf8CommandWithTimeout,
   shouldSpawnWithShell,
 } from "./exec.js";
 
 const OPENCLAW_CLI_ENV_VALUE = "1";
 
 describe("runCommandWithTimeout", () => {
+  it("inherits a caller-owned stdin descriptor without reading it into JavaScript", async () => {
+    const descriptor = openSync(fileURLToPath(import.meta.url), "r");
+    let running: ReturnType<typeof runCommandWithTimeout>;
+    try {
+      running = runCommandWithTimeout(
+        [process.execPath, "-e", "process.stdin.pipe(process.stdout)"],
+        { stdinFileDescriptor: descriptor, timeoutMs: 3_000 },
+      );
+    } finally {
+      // Spawn duplicates the descriptor before returning to the caller.
+      closeSync(descriptor);
+    }
+    const result = await running;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("// Exec tests cover command execution");
+  });
+
+  it("rejects competing stdin sources before spawning", async () => {
+    await expect(
+      runCommandWithTimeout([process.execPath, "-e", "process.exit(99)"], {
+        input: "buffered",
+        stdinFileDescriptor: 0,
+      }),
+    ).rejects.toThrow("either input or stdinFileDescriptor");
+  });
+
   it("never enables shell execution (Windows cmd.exe injection hardening)", () => {
     expect(
       shouldSpawnWithShell({
@@ -34,7 +60,9 @@ describe("runCommandWithTimeout", () => {
     ).toBe(false);
   });
 
-  it.skipIf(process.platform === "win32").each(["normal", "cooperative", "forced"] as const)(
+  it
+    .skipIf(process.platform === "win32")
+    .each(["normal", "cooperative", "default-signal", "forced"] as const)(
     "reports invocation cleanup and honors the initial SIGINT signal: %s",
     async (mode) => {
       const controller = new AbortController();
@@ -45,7 +73,9 @@ describe("runCommandWithTimeout", () => {
       const program =
         mode === "normal"
           ? "process.stdout.write('ready'); process.exitCode=17;"
-          : `const timer=setInterval(()=>{},1000); process.on('SIGINT',()=>{${mode === "cooperative" ? "clearInterval(timer);process.stdout.write('interrupted');process.exitCode=17;" : ""}}); process.stdout.write('ready');`;
+          : mode === "default-signal"
+            ? "setInterval(()=>{},1000); process.stdout.write('ready');"
+            : `const timer=setInterval(()=>{},1000); process.on('SIGINT',()=>{${mode === "cooperative" ? "clearInterval(timer);process.stdout.write('interrupted');process.exitCode=17;" : ""}}); process.stdout.write('ready');`;
       const running = runCommandWithTimeout([process.execPath, "-e", program], {
         signal: controller.signal,
         killProcessTree: true,
@@ -61,8 +91,12 @@ describe("runCommandWithTimeout", () => {
         controller.abort();
       }
       const result = await running;
-      expect(result.cleanup).toBe(mode);
-      if (mode !== "forced") {
+      expect(result.cleanup).toBe(mode === "default-signal" ? "cooperative" : mode);
+      expect(result.killIssuedByAbort).toBe(mode === "normal" ? undefined : true);
+      if (mode === "default-signal") {
+        expect(result).toMatchObject({ code: null, signal: "SIGINT", termination: "signal" });
+      }
+      if (mode === "normal" || mode === "cooperative") {
         expect(result.code).toBe(17);
       }
       if (mode === "cooperative") {
@@ -104,6 +138,29 @@ describe("runCommandWithTimeout", () => {
           await waitForPidToExit(descendant);
         }
       }
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each(["SIGKILL", 9] as const)(
+    "reports normal extinction after a successful native-style command with timeout signal %s",
+    async (killSignal) => {
+      const result = await runCommandWithTimeout(
+        [process.execPath, "-e", "process.stdout.write('enabled\\n')"],
+        {
+          killProcessTree: true,
+          requireProcessTreeExtinction: true,
+          killSignal,
+          timeoutMs: 5_000,
+        },
+      );
+      expect(result).toMatchObject({
+        termination: "exit",
+        code: 0,
+        signal: null,
+        stdout: "enabled\n",
+        stderr: "",
+        cleanup: "normal",
+      });
     },
   );
 
@@ -266,7 +323,9 @@ describe("runCommandWithTimeout", () => {
         code: null,
         signal: "SIGTERM",
         termination: "signal",
+        cleanup: "uncertain",
       });
+      expect(result.killIssuedByAbort).toBeUndefined();
     },
   );
 
@@ -307,15 +366,35 @@ describe("runCommandWithTimeout", () => {
     },
   );
 
-  it.runIf(process.platform !== "win32")(
-    "swallows stdin EPIPE when the child exits before input is consumed (#75438)",
+  it.runIf(process.platform !== "win32").each([
+    { admitted: false, exitCode: 0 },
+    { admitted: false, exitCode: 23 },
+    { admitted: true, exitCode: 0 },
+    { admitted: true, exitCode: 23 },
+  ])(
+    "preserves results after early stdin closure (admitted=$admitted, exit=$exitCode)",
     { timeout: 5_000 },
-    async () => {
-      const result = await runCommandWithTimeout([process.execPath, "-e", "process.exit(0)"], {
-        timeoutMs: 3_000,
-        input: "this input will EPIPE because the child ignores stdin\n",
+    async ({ admitted, exitCode }) => {
+      const beforeInput = vi.fn();
+      const result = await runCommandWithTimeout(
+        [
+          process.execPath,
+          "-e",
+          `require('node:fs').closeSync(0);process.stderr.write('stdin closed\\n');process.exitCode=${exitCode};`,
+        ],
+        {
+          timeoutMs: 3_000,
+          // Exceed the pipe buffer so early closure exercises the pending write.
+          input: "x".repeat(8 * 1024 * 1024),
+          ...(admitted ? { beforeInput } : {}),
+        },
+      );
+      expect(result).toMatchObject({
+        code: exitCode,
+        stderr: "stdin closed\n",
+        termination: "exit",
       });
-      expect(result.code).toBe(0);
+      expect(beforeInput).toHaveBeenCalledTimes(admitted ? 1 : 0);
     },
   );
 
@@ -360,7 +439,7 @@ describe("runCommandWithTimeout", () => {
     ["long unterminated", "x".repeat(10_000), "x".repeat(24)],
     ["UTF-8 boundary", `😀${"x".repeat(22)}`, "x".repeat(22)],
   ])("bounds preserved %s line tails", async (_name, input, expected) => {
-    const result = await runCommandWithTimeout(
+    const result = await runUtf8CommandWithTimeout(
       [process.execPath, "-e", "process.stdin.pipe(process.stdout)"],
       {
         input,
@@ -520,7 +599,7 @@ describe("runCommandWithTimeout", () => {
   ] as const)(
     "preserves truncated UTF-8 %s output (%#)",
     async (outputCapture, input, maxOutputBytes, expected, truncatedBytes) => {
-      const result = await runCommandWithTimeout(
+      const result = await runUtf8CommandWithTimeout(
         [process.execPath, "-e", "process.stdin.pipe(process.stdout)"],
         {
           input,
@@ -538,7 +617,7 @@ describe("runCommandWithTimeout", () => {
   it.each([1, 2, 3])(
     "discards an entirely partial UTF-8 head at %i bytes",
     async (maxOutputBytes) => {
-      const result = await runCommandWithTimeout(
+      const result = await runUtf8CommandWithTimeout(
         [process.execPath, "-e", "process.stdout.write('😀')"],
         {
           maxOutputBytes,
@@ -848,17 +927,19 @@ describe("runExec", () => {
   });
 
   it("supports an inherited file descriptor as stdin", async () => {
-    const handle = await fs.open(fileURLToPath(import.meta.url), "r");
+    const descriptor = openSync(fileURLToPath(import.meta.url), "r");
+    let running: ReturnType<typeof runExec>;
     try {
-      const { stdout } = await runExec(
-        process.execPath,
-        ["-e", "process.stdin.pipe(process.stdout)"],
-        { stdinFileDescriptor: handle.fd, timeoutMs: 3_000 },
-      );
-      expect(stdout).toContain("// Exec tests cover command execution");
+      running = runExec(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], {
+        stdinFileDescriptor: descriptor,
+        timeoutMs: 3_000,
+      });
     } finally {
-      await handle.close();
+      // The child must own stdin before control returns to the caller.
+      closeSync(descriptor);
     }
+    const { stdout } = await running;
+    expect(stdout).toContain("// Exec tests cover command execution");
   });
 
   it("can keep sensitive output out of verbose logs", async () => {
@@ -917,48 +998,94 @@ describe("attachChildProcessBridge", () => {
 });
 
 describe("child input admission", () => {
-  it("publishes input only after binding the actual spawned PID", async () => {
+  it("publishes input only after binding the actual spawned PID and argv", async () => {
     let admittedPid: number | undefined;
+    let admittedArgv: readonly string[] | undefined;
     const result = await runCommandWithTimeout(
       [
         process.execPath,
         "-e",
-        "let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>process.stdout.write(JSON.stringify({pid:process.pid,input})))",
+        "let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>process.stdout.write(JSON.stringify({pid:process.pid,argv:[process.argv0,...process.execArgv,...process.argv.slice(1)],input})))",
       ],
       {
         input: "owned",
         timeoutMs: 5_000,
-        beforeInput: (pid) => {
+        beforeInput: (pid, argv) => {
           admittedPid = pid;
+          admittedArgv = argv;
         },
       },
     );
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ pid: admittedPid, input: "owned" });
+    expect(admittedArgv).toBeDefined();
+    expect(JSON.parse(result.stdout)).toEqual({
+      pid: admittedPid,
+      argv: admittedArgv,
+      input: "owned",
+    });
   });
 
-  it("joins the child without delivering input when admission rejects", async () => {
-    let pid: number | undefined;
-    const refusal = new Error("authority lost before input");
-    const work = runCommandWithTimeout(
-      [
-        process.execPath,
-        "-e",
-        "process.stdin.on('data',()=>process.stdout.write('effect'));setInterval(()=>{},1000)",
-      ],
-      {
-        input: "forbidden",
-        timeoutMs: 5_000,
-        killProcessTree: true,
-        beforeInput: (childPid) => {
-          pid = childPid;
-          throw refusal;
+  it.each([undefined, "EPIPE"])(
+    "joins the child without delivering input when admission rejects (%s)",
+    async (code) => {
+      let pid: number | undefined;
+      const refusal = Object.assign(new Error("authority lost before input"), { code });
+      const work = runCommandWithTimeout(
+        [
+          process.execPath,
+          "-e",
+          "process.stdin.on('data',()=>process.stdout.write('effect'));setInterval(()=>{},1000)",
+        ],
+        {
+          input: "forbidden",
+          timeoutMs: 5_000,
+          killProcessTree: true,
+          beforeInput: (childPid) => {
+            pid = childPid;
+            throw refusal;
+          },
         },
-      },
-    );
-    await expect(work).rejects.toBe(refusal);
-    expect(pid).toBeTypeOf("number");
-    expect(isPidAlive(pid!)).toBe(false);
+      );
+      await expect(work).rejects.toBe(refusal);
+      expect(refusal).toMatchObject({
+        cleanup: process.platform === "win32" ? "forced" : "cooperative",
+      });
+      expect(pid).toBeTypeOf("number");
+      expect(isPidAlive(pid!)).toBe(false);
+    },
+  );
+
+  it("cancels and joins the child after a non-EPIPE input fault", async () => {
+    const spawn = execSpawn.spawnCommandWithInvocation;
+    let child: ChildProcess | undefined;
+    const observeSpawn = vi
+      .spyOn(execSpawn, "spawnCommandWithInvocation")
+      .mockImplementation((...args) => {
+        const spawned = spawn(...args);
+        child = spawned.child.nodeChildProcess;
+        return spawned;
+      });
+    const failure = Object.assign(new Error("synthetic stdin failure"), { code: "EIO" });
+    const controller = new AbortController();
+    let running: ReturnType<typeof runCommandWithTimeout> | undefined;
+    try {
+      running = runCommandWithTimeout([process.execPath, "-e", "setInterval(()=>{},1000)"], {
+        input: "x".repeat(8 * 1024 * 1024),
+        beforeInput: () => {
+          queueMicrotask(() => child!.stdin!.destroy(failure));
+        },
+        signal: controller.signal,
+        killProcessTree: true,
+        timeoutMs: 3_000,
+      });
+      await expect(running).rejects.toBe(failure);
+      expect(child?.pid).toBeTypeOf("number");
+      expect(isPidAlive(child!.pid!)).toBe(false);
+    } finally {
+      controller.abort();
+      await running?.catch(() => {});
+      observeSpawn.mockRestore();
+    }
   });
 
   it("rejects asynchronous admission and drains its rejection before returning", async () => {

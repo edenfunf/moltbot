@@ -105,6 +105,7 @@ describe("navigationIconForRoute", () => {
       channels: "link",
       connection: "radio",
       sessions: "fileText",
+      systems: "monitor",
       usage: "coins",
       cron: "calendarClock",
       tasks: "listChecks",
@@ -173,13 +174,18 @@ describe("formatDocumentTitle", () => {
   });
 
   it("names the disconnected gateway without implying internet loss", () => {
-    expect(
-      formatDocumentTitle({ context: "Usage", gatewayDisconnected: true, queuedCount: 0 }),
-    ).toBe("(Disconnected) Usage — OpenClaw");
+    expect(formatDocumentTitle({ context: "Usage", gatewayDisconnected: true })).toBe(
+      "(Disconnected) Usage — OpenClaw",
+    );
   });
 
-  it("ignores a queued count while online", () => {
-    expect(formatDocumentTitle({ context: "Usage", queuedCount: 3 })).toBe("Usage — OpenClaw");
+  it("shows attention separately from the disconnected state", () => {
+    expect(formatDocumentTitle({ context: "Usage", attentionCount: 3 })).toBe(
+      "(3) Usage — OpenClaw",
+    );
+    expect(
+      formatDocumentTitle({ context: "Usage", attentionCount: 3, gatewayDisconnected: true }),
+    ).toBe("(Disconnected) Usage — OpenClaw");
   });
 });
 
@@ -211,6 +217,7 @@ describe("titleForRoute", () => {
       channels: "Channels",
       connection: "Gateway",
       sessions: "Sessions",
+      systems: "Systems",
       usage: "Usage",
       cron: "Automations",
       tasks: "Tasks",
@@ -267,6 +274,7 @@ describe("subtitleForRoute", () => {
       channels: "Channels and settings.",
       connection: "Gateway endpoint, credentials, and handshake status.",
       sessions: "Active sessions and defaults.",
+      systems: "Machines and desktops.",
       usage: "API usage and costs.",
       cron: "Scheduled tasks and recurring agent runs.",
       tasks: "Background tasks: subagents, automation runs, CLI.",
@@ -615,6 +623,7 @@ describe("SIDEBAR_NAV_ROUTES", () => {
       "cron",
       "tasks",
       "sessions",
+      "systems",
       "activity",
       "meetings",
       "plugins",

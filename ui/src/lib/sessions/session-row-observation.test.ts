@@ -37,7 +37,11 @@ const workRow: GatewaySessionRow = {
   activeRunIds: ["work-run"],
 };
 
-async function descriptorOwner(initial: GatewaySessionRow, primary = mainRow) {
+async function descriptorOwner(
+  initial: GatewaySessionRow,
+  primary = mainRow,
+  onInvalidate?: () => void,
+) {
   vi.useFakeTimers();
   const replies: Array<{ method: string; params: Record<string, unknown>; result: unknown }> = [];
   const requestErrors: unknown[] = [];
@@ -108,7 +112,9 @@ async function descriptorOwner(initial: GatewaySessionRow, primary = mainRow) {
   const primaryResult = sessions.state.result;
   const revision = sessions.canonicalListRevision;
   const changed = vi.fn<(row: GatewaySessionRow | null) => void>();
-  const observation = sessions.observeRow({ key: "global", agentId: "work" }, changed);
+  const observation = sessions.observeRow({ key: "global", agentId: "work" }, changed, {
+    onInvalidate,
+  });
   disposers.push(observation.dispose);
   expect(observation.row).toBeNull();
   reply("sessions.describe", { key: "global", agentId: "work" }, { session: initial });
@@ -153,6 +159,100 @@ async function descriptorOwner(initial: GatewaySessionRow, primary = mainRow) {
 }
 
 describe("session row observations", () => {
+  it("keeps completed Swarm details while an invalidated list settles before the fresh descriptor", async () => {
+    const swarm: NonNullable<GatewaySessionRow["swarm"]> = {
+      groups: [
+        {
+          groupId: "completed-swarm",
+          createdAt: 1,
+          queued: 0,
+          running: 0,
+          done: 1,
+          failed: 0,
+          children: [{ sessionKey: "agent:work:child", status: "done" }],
+        },
+      ],
+      otherActiveGroups: 0,
+    };
+    const initial: GatewaySessionRow = { ...workRow, swarm };
+    const invalidated = vi.fn();
+    const h = await descriptorOwner(initial, mainRow, invalidated);
+    const list = h.holdWorkList();
+    h.emitEvent({
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: initial.key, agentId: "work", reason: "swarm" },
+    });
+    expect(invalidated).toHaveBeenCalledOnce();
+    const fresh = h.holdDescribe();
+    h.changed.mockClear();
+
+    // List summaries omit the members supplied by the detailed descriptor read.
+    const listed = {
+      ...initial,
+      swarm: {
+        ...swarm,
+        groups: swarm.groups.map(({ children: _children, ...group }) => group),
+      },
+    };
+    list.response.resolve(sessionsResult([structuredClone(listed)], 200));
+    await list.settled;
+    expect(h.observation.row).toEqual(initial);
+    expect(h.changed).not.toHaveBeenCalledWith(null);
+
+    const settled: GatewaySessionRow = {
+      ...structuredClone(initial),
+      updatedAt: 201,
+      status: "done",
+      hasActiveRun: false,
+      activeRunIds: [],
+    };
+    fresh.response.resolve({ session: settled });
+    expect(await fresh.settled).toMatchObject({ status: "current", row: settled });
+    expect(h.observation.row).toEqual(settled);
+    expect(h.changed).toHaveBeenLastCalledWith(settled);
+  });
+
+  it("invalidates descriptor reads only for the observed target and current connection", async () => {
+    vi.useFakeTimers();
+    const { gateway, emitEvent, publish } = createGatewayHarness(
+      createTestGatewayClient(async () => sessionsResult([], 1)),
+    );
+    const sessions = createTestSessionCapability(gateway);
+    const invalidated = vi.fn();
+    const observation = sessions.observeRow({ key: "global", agentId: "work" }, () => undefined, {
+      onInvalidate: invalidated,
+    });
+    try {
+      expect(observation.captureReconcile()(workRow)).toMatchObject({ status: "current" });
+      const pending = observation.captureReconcile();
+      const event = (agentId: string, key = "global") => ({
+        type: "event" as const,
+        event: "sessions.changed",
+        payload: { agentId, key, reason: "patch" },
+      });
+      emitEvent(event("main"));
+      emitEvent(event("work", "agent:work:unrelated"));
+      expect(invalidated).not.toHaveBeenCalled();
+      await sessions.refresh({ agentId: "main", force: true });
+      expect(invalidated).not.toHaveBeenCalled();
+      emitEvent(event("work"));
+      expect(invalidated).toHaveBeenCalledTimes(1);
+      emitEvent(event("work", "agent:work:unrelated"));
+      expect(observation.row).toEqual(workRow);
+      expect(invalidated).toHaveBeenCalledTimes(1);
+      expect(pending(workRow)).toEqual({ status: "invalidated" });
+      expect(observation.captureReconcile()(workRow)).toMatchObject({ status: "current" });
+      publish(false);
+      emitEvent(event("work"));
+      expect(invalidated).toHaveBeenCalledTimes(1);
+    } finally {
+      observation.dispose();
+      sessions.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["primary", "managed", "supplemental", "event"] as const)(
     "notifies a retired descriptor after its admitted %s successor is published",
     async (source) => {

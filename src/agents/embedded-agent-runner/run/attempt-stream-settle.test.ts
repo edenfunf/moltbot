@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +16,10 @@ import { createCodexNativeWebSearchWrapper } from "../../../llm/providers/stream
 import { createAssistantMessageEventStream } from "../../../llm/utils/event-stream.js";
 import { attachRuntimePromptMediaFacts } from "../../../media/media-facts.js";
 import { withPluginRuntimeGenerationScope } from "../../../plugins/runtime/generation-scope.js";
+import { createDeferredCore } from "../../../shared/deferred.js";
+import { runOpenClawAgentWorkerWrite } from "../../../state/openclaw-agent-write-admission.js";
+import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
+import { createOperationalRunInstanceRef } from "../../admitted-run-context.js";
 import type { StreamFn } from "../../runtime/index.js";
 import {
   createAssistant,
@@ -27,6 +32,7 @@ import { SessionManager } from "../../sessions/index.js";
 import { castAgentMessage } from "../../test-helpers/agent-message-fixtures.js";
 import { readLastCacheTtlTimestamp } from "../cache-ttl.js";
 import { testing as extraParamsTesting } from "../extra-params.test-support.js";
+import { log } from "../logger.js";
 import {
   clearEmbeddedSessionPromptStates,
   createToolResultPromptProjectionState,
@@ -41,6 +47,7 @@ import {
   prepareEmbeddedAttemptTransport,
   settleEmbeddedAttemptStream,
 } from "./attempt-stream-settle.js";
+import { prepareEmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle-prepare.js";
 
 const registerProviderStreamForModel = vi.hoisted(() => vi.fn());
 
@@ -52,6 +59,9 @@ vi.mock("../../provider-stream.js", async (importOriginal) => ({
 type SettleInput = Parameters<typeof settleEmbeddedAttemptStream>[0];
 type PrepareTransportInput = Parameters<typeof prepareEmbeddedAttemptTransport>[0];
 const MP4 = Buffer.from("0000001c6674797069736f6d0000000069736f6d0000000000000000", "hex");
+const admittedRunContext = {
+  operationalRunInstance: createOperationalRunInstanceRef("test-run"),
+};
 
 function createSettleFixture(overrides?: Partial<SettleInput>): SettleInput {
   const sessionManager = SessionManager.inMemory();
@@ -169,6 +179,122 @@ describe("settleEmbeddedAttemptStream liveness", () => {
     const result = await settleEmbeddedAttemptStream(input);
     expect(flushed).toHaveBeenCalledWith({ reason: "pre_compaction", attemptAccepted: false });
     expect(result.sessionIdUsed).toBe("sess-settle-1");
+  });
+
+  it.each([
+    "active provider failure",
+    "aborted before settlement",
+    "aborted during admission",
+    "storage failure",
+  ] as const)("records prompt errors only while its writer is live: %s", async (scenario) => {
+    await withOpenClawTestState({ label: "prompt-error-settle" }, async (state) => {
+      const target = {
+        agentId: "main",
+        sessionId: "prompt-error-settle",
+        sessionKey: "agent:main:prompt-error-settle",
+        storePath: path.join(state.agentDir(), "openclaw-agent.sqlite"),
+      };
+      await upsertSessionEntryCore(target, { sessionId: target.sessionId, updatedAt: 1 });
+      const sessionManager = SessionManager.open(target, state.workspaceDir);
+      sessionManager.appendMessage({ role: "user", content: "test prompt", timestamp: 1 });
+      const originalEntries = sessionManager.getEntries();
+      const controller = new AbortController();
+      const promptError = new Error("synthetic provider failure");
+      const input = createSettleFixture({
+        sessionManager,
+        runAbortSignal: controller.signal,
+        readLifecycleState: () => ({
+          aborted: controller.signal.aborted,
+          timedOut: false,
+          timedOutDuringCompaction: false,
+        }),
+      });
+      input.attempt = {
+        ...input.attempt,
+        ...target,
+        sessionTarget: target,
+        sessionManager,
+        abortSignal: controller.signal,
+      };
+      input.state = {
+        ...input.state,
+        promptError,
+        promptErrorSource: "prompt",
+        sessionIdUsed: target.sessionId,
+      };
+      const prepared = await prepareEmbeddedAttemptTranscriptLifecycle({
+        attempt: input.attempt,
+        externalAbortController: {
+          arm: () => {},
+          throwIfFiredAfterPrepCleanup: async () => controller.signal.throwIfAborted(),
+        },
+      });
+      input.withOwnedTranscriptWrite = prepared.withOwnedTranscriptWrite;
+      const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+      const append =
+        scenario === "storage failure"
+          ? vi.spyOn(sessionManager, "appendCustomEntry").mockImplementation(() => {
+              throw new Error("synthetic storage failure");
+            })
+          : undefined;
+      const entered = createDeferredCore();
+      const release = createDeferredCore();
+      let heldWriter: Promise<void> | undefined;
+      let settlement: ReturnType<typeof settleEmbeddedAttemptStream> | undefined;
+      try {
+        if (scenario === "aborted before settlement") {
+          controller.abort();
+        } else if (scenario === "aborted during admission") {
+          heldWriter = runOpenClawAgentWorkerWrite(
+            { agentId: target.agentId, path: target.storePath },
+            async () => {
+              entered.resolve();
+              await release.promise;
+            },
+          );
+          await entered.promise;
+        }
+        let settled = false;
+        settlement = settleEmbeddedAttemptStream(input).then((result) => {
+          settled = true;
+          return result;
+        });
+        if (heldWriter) {
+          await setImmediate();
+          expect(settled).toBe(false);
+          controller.abort();
+          release.resolve();
+          await heldWriter;
+        }
+        const result = await settlement;
+        expect(result.promptError).toBe(promptError);
+        expect(result.promptErrorSource).toBe("prompt");
+        const entries = SessionManager.open(target, state.workspaceDir).getEntries();
+        if (scenario === "active provider failure") {
+          expect(entries).toHaveLength(originalEntries.length + 1);
+          expect(entries.at(-1)).toMatchObject({
+            type: "custom",
+            customType: "openclaw:prompt-error",
+            data: { error: "synthetic provider failure", runId: input.attempt.runId },
+          });
+        } else {
+          expect(entries).toEqual(originalEntries);
+        }
+        if (scenario === "storage failure") {
+          expect(warn).toHaveBeenCalledExactlyOnceWith(
+            "failed to persist prompt error entry: Error: synthetic storage failure",
+          );
+        } else {
+          expect(warn).not.toHaveBeenCalled();
+        }
+      } finally {
+        release.resolve();
+        await Promise.allSettled([heldWriter, settlement]);
+        await prepared.transcriptLifecycle.dispose();
+        append?.mockRestore();
+        warn.mockRestore();
+      }
+    });
   });
 
   it("persists the active projection after session-state eviction", async () => {
@@ -390,6 +516,7 @@ function createTransportFixture(testCase: {
       resolvedApiKey: undefined,
       authStorage: { getApiKey: async () => testCase.apiKey },
       runId: "run-transport-1",
+      admittedRunContext,
       runtimePlan: {
         auth: { forwardedAuthProfileId: undefined },
         transport: {
@@ -580,6 +707,7 @@ describe("prepareEmbeddedAttemptTransport", () => {
           modelId: model.id,
           provider: model.provider,
           runId: "run-native-video",
+          admittedRunContext,
           runtimePlan: {
             auth: { forwardedAuthProfileId: undefined },
             transport: { resolveExtraParams: () => ({}) },
@@ -642,6 +770,7 @@ describe("prepareEmbeddedAttemptTransport", () => {
         modelId: model.id,
         provider: model.provider,
         runId: "run-native-image-failure",
+        admittedRunContext,
         runtimePlan: {
           auth: { forwardedAuthProfileId: undefined },
           transport: { resolveExtraParams: () => ({}) },

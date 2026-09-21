@@ -7,6 +7,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { persistClawPackageRef } from "../claws/provenance.js";
 import type { ClawAddPlan } from "../claws/types.js";
 import type { OpenClawConfig } from "../config/config.js";
+import { resolveStateDir } from "../config/paths.js";
 import { recordInstalledPluginIndexInstallOwner } from "../plugins/installed-plugin-index-install-owner.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import {
@@ -33,7 +34,7 @@ import {
   writePersistedInstalledPluginIndexInstallRecordsWithLeaseMock,
 } from "./plugins-cli-test-helpers.js";
 
-const CLI_STATE_ROOT = "/tmp/openclaw-state";
+const CLI_STATE_ROOT = resolveStateDir();
 let alphaInstallPath: string;
 let readInstallRecords: (typeof import("../plugins/installed-plugin-index-record-reader.js"))["loadInstalledPluginIndexInstallRecordsSync"];
 const ORIGINAL_OPENCLAW_NIX_MODE = process.env.OPENCLAW_NIX_MODE;
@@ -640,7 +641,7 @@ describe("plugins cli uninstall", () => {
       });
       const { runPluginUninstallCommand } = await import("./plugins-uninstall-command.js");
       await expect(
-        runPluginUninstallCommand("alpha", {
+        runPluginUninstallCommand(["alpha"], {
           force: true,
           beforePersistentApply: () => {
             if (
@@ -877,7 +878,33 @@ describe("plugins cli uninstall", () => {
       diagnostics: [],
     });
 
-    await runPluginsCommand(["plugins", "uninstall", pluginId, "--force", "--keep-files"]);
+    const installedIndex = await import("../plugins/installed-plugin-index.js");
+    const indexSpy = vi.spyOn(installedIndex, "loadInstalledPluginIndex").mockReturnValue(
+      createTestInstalledPluginIndex({
+        policyHash: "manifest-channel-ownership",
+        installRecords,
+        plugins: [
+          recordInstalledPluginIndexInstallOwner(
+            {
+              pluginId,
+              rootDir: installRecords[pluginId].installPath,
+              manifestPath: path.join(installRecords[pluginId].installPath, "openclaw.plugin.json"),
+              manifestHash: "custom-plugin",
+              origin: "global" as const,
+              enabled: status === "loaded",
+              startup: { sidecar: false, memory: false, agentHarnesses: [] },
+              compat: [],
+            },
+            pluginId,
+          ),
+        ],
+      }),
+    );
+    try {
+      await runPluginsCommand(["plugins", "uninstall", pluginId, "--force", "--keep-files"]);
+    } finally {
+      indexSpy.mockRestore();
+    }
 
     expectInstallRecordsWrittenWithLease(
       {},

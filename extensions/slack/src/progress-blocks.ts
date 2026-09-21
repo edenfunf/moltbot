@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import type { AnyChunk, TaskUpdateChunk } from "@slack/types";
 import type { Block, KnownBlock } from "@slack/web-api";
 import {
@@ -38,6 +38,35 @@ function buildSessionSources(url: string): NonNullable<TaskUpdateChunk["sources"
 
 function field(text: string) {
   return { type: "mrkdwn" as const, text: truncateSlackText(text, SLACK_PROGRESS_FIELD_MAX) };
+}
+
+type SlackProgressText = { text: string; format?: "plain" };
+
+function progressTextSection(value: SlackProgressText, style?: "italic"): Block | KnownBlock {
+  if (value.format === "plain") {
+    return {
+      type: "section",
+      text: {
+        type: "plain_text",
+        text: truncateSlackText(value.text, SLACK_PROGRESS_FIELD_MAX),
+        emoji: false,
+      },
+    };
+  }
+  const rendered = renderProgressCardText(value.text, style);
+  const marker = style === "italic" ? "_" : "";
+  return { type: "section", text: field(`${marker}${rendered}${marker}`) };
+}
+
+export function buildSlackProgressTextBlocks(
+  blocks: NonNullable<ChannelProgressDraftCompositorSnapshot["preparedBlocks"]>,
+): (Block | KnownBlock)[] {
+  return blocks.map((block) =>
+    progressTextSection({
+      text: block.text,
+      format: block.format === "plain" ? "plain" : undefined,
+    }),
+  );
 }
 
 function resolveMaxLineChars(value: number | undefined, fallback: number): number {
@@ -159,7 +188,7 @@ function stableTaskIdPart(value: string, slugValue = value): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  const suffix = createHash("sha256").update(value).digest("hex").slice(0, 8);
+  const suffix = hash("sha256", value, "hex").slice(0, 8);
   return `${(slug || "task").slice(0, 48)}_${suffix}`;
 }
 
@@ -352,9 +381,10 @@ function buildActivityText(lines: readonly ChannelProgressDraftLine[], maxLineCh
 export function buildSlackProgressCardBlocks(params: {
   state: SlackProgressCardState;
   title: string;
+  titleFormat?: "plain";
   lines: readonly ChannelProgressDraftLine[];
   plan?: readonly AgentPlanStep[];
-  narration?: string;
+  narration?: string | readonly SlackProgressText[];
   maxLineChars?: number;
   toolCalls?: number;
   elapsedSeconds?: number;
@@ -369,7 +399,14 @@ export function buildSlackProgressCardBlocks(params: {
     maxLines: SLACK_MAX_BLOCKS,
     maxLineChars,
   });
-  const narration = params.narration?.replace(/\s+/g, " ").trim();
+  const narration = (
+    typeof params.narration === "string" ? [{ text: params.narration }] : (params.narration ?? [])
+  )
+    .map(({ text, format }: SlackProgressText) => ({
+      text: text.replace(/\s+/g, " ").trim(),
+      format,
+    }))
+    .filter((part) => part.text);
   const diffStat = formatChannelProgressDraftDiffStat(params.diffStat);
   const workingFooter = [
     ...(params.toolCalls && params.toolCalls > 0 ? [`🛠️ ${params.toolCalls} tools`] : []),
@@ -387,8 +424,6 @@ export function buildSlackProgressCardBlocks(params: {
     return title === undefined ? [] : [escapeSlackMrkdwn(title)];
   });
   const sections = [
-    `${icon} *${renderProgressCardText(params.title.trim() || "Working", "bold")}*`,
-    narration ? `_${renderProgressCardText(narration, "italic")}_` : "",
     planLines.map((line) => renderProgressCardText(line)).join("\n"),
     buildActivityText(
       params.lines.filter((line) => line.kind !== "approval" && lineTaskStatus(line) !== "error"),
@@ -397,9 +432,14 @@ export function buildSlackProgressCardBlocks(params: {
     // Attention has its own bounded section so activity truncation cannot hide it.
     joinRecentProgressRows(attention),
   ];
-  const blocks: (Block | KnownBlock)[] = sections
-    .filter(Boolean)
-    .map((text) => ({ type: "section", text: field(text) }));
+  const title = params.title.trim() || "Working";
+  const blocks: (Block | KnownBlock)[] = [
+    params.titleFormat === "plain"
+      ? progressTextSection({ text: `${icon} ${title}`, format: "plain" })
+      : { type: "section", text: field(`${icon} *${renderProgressCardText(title, "bold")}*`) },
+    ...narration.map((part) => progressTextSection(part, "italic")),
+    ...sections.filter(Boolean).map((text) => ({ type: "section" as const, text: field(text) })),
+  ];
   if (footer) {
     blocks.push({ type: "context", elements: [field(footer)] });
   }

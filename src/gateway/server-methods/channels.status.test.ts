@@ -4,6 +4,7 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import type {
   ChannelAccountSnapshot,
   ChannelPlugin,
@@ -17,24 +18,18 @@ import {
   createChannelTestPluginBase,
   createTestRegistry,
 } from "../../test-utils/channel-plugins.js";
+import type { CallGatewayOptions } from "../call.js";
+import { createChannelManager } from "../server-channels.js";
 import type { GatewayEventLoopHealth } from "../server/event-loop-health.js";
 import { requireGatewayRecord } from "../test-helpers.assertions.js";
+import {
+  channelAccounts,
+  createChannelPlugin,
+  firstChannelAccount,
+  requireFirstCallArg,
+  requireRespondPayload,
+} from "./channels.status.test-helpers.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
-
-type ChannelTestPlugin = {
-  id: string;
-  config: {
-    listAccountIds: () => string[];
-    resolveAccount: () => Record<string, never>;
-    isEnabled: () => boolean;
-    isConfigured: () => boolean;
-  };
-  status?: {
-    probeAccount?: (params?: unknown) => unknown;
-    buildChannelSummary?: () => unknown;
-    collectStatusIssues?: () => ChannelStatusIssue[];
-  };
-};
 
 const mocks = vi.hoisted(() => ({
   getRuntimeConfig: vi.fn(() => ({})),
@@ -44,7 +39,16 @@ const mocks = vi.hoisted(() => ({
   buildChannelUiCatalog: vi.fn(),
   buildChannelAccountSnapshotFromAccount: vi.fn(),
   getChannelActivity: vi.fn(),
+  callGateway: vi.fn(),
+  note: vi.fn(),
 }));
+
+vi.mock("../call.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../call.js")>()),
+  callGateway: mocks.callGateway,
+}));
+
+vi.mock("../../../packages/terminal-core/src/note.js", () => ({ note: mocks.note }));
 
 vi.mock("../../config/config.js", () => ({
   getRuntimeConfig: mocks.getRuntimeConfig,
@@ -101,38 +105,6 @@ function createOptions(
   } as unknown as GatewayRequestHandlerOptions;
 }
 
-function createChannelPlugin(
-  params: {
-    id?: string;
-    probeAccount?: (params?: unknown) => unknown;
-    buildChannelSummary?: () => unknown;
-    collectStatusIssues?: () => ChannelStatusIssue[];
-  } = {},
-): ChannelTestPlugin {
-  return {
-    id: params.id ?? "whatsapp",
-    config: {
-      listAccountIds: () => ["default"],
-      resolveAccount: () => ({}),
-      isEnabled: () => true,
-      isConfigured: () => true,
-    },
-    ...(params.probeAccount || params.buildChannelSummary || params.collectStatusIssues
-      ? {
-          status: {
-            ...(params.probeAccount ? { probeAccount: params.probeAccount } : {}),
-            ...(params.buildChannelSummary
-              ? { buildChannelSummary: params.buildChannelSummary }
-              : {}),
-            ...(params.collectStatusIssues
-              ? { collectStatusIssues: params.collectStatusIssues }
-              : {}),
-          },
-        }
-      : {}),
-  };
-}
-
 async function runChannelsStatus(
   params: Record<string, unknown>,
   overrides?: Partial<GatewayRequestHandlerOptions>,
@@ -143,45 +115,6 @@ async function runChannelsStatus(
     'channelsHandlers["channels.status"] test invariant',
   )(createOptions(params, { respond, ...overrides }));
   return requireRespondPayload(respond);
-}
-
-function channelAccounts(
-  payload: Record<string, unknown>,
-  channel: string,
-): Record<string, unknown>[] {
-  const accounts = requireGatewayRecord(payload.channelAccounts, "channel accounts")[
-    channel
-  ] as unknown[];
-  expect(Array.isArray(accounts)).toBe(true);
-  return accounts.map((account) => requireGatewayRecord(account, "channel account"));
-}
-
-function firstChannelAccount(
-  payload: Record<string, unknown>,
-  channel: string,
-): Record<string, unknown> {
-  return expectDefined(
-    channelAccounts(payload, channel)[0],
-    "channelAccounts(payload, channel)[0] test invariant",
-  );
-}
-
-function requireFirstCallArg(mock: { mock: { calls: readonly (readonly unknown[])[] } }) {
-  const call = mock.mock.calls[0];
-  if (!call) {
-    throw new Error("Expected first mock call");
-  }
-  return call[0];
-}
-
-function requireRespondPayload(respond: ReturnType<typeof vi.fn>): Record<string, unknown> {
-  const call = respond.mock.calls[0];
-  if (!call) {
-    throw new Error("Expected respond call");
-  }
-  expect(call[0]).toBe(true);
-  expect(call[2]).toBeUndefined();
-  return requireGatewayRecord(call[1], "respond payload");
 }
 
 describe("channelsHandlers channels.status", () => {
@@ -211,6 +144,78 @@ describe("channelsHandlers channels.status", () => {
       outboundAt: null,
     });
     mocks.listChannelPlugins.mockReturnValue([createChannelPlugin()]);
+  });
+
+  it("keeps filtered account diagnostics without inspecting unrelated channels", async () => {
+    const resolveAccount = vi.fn(() => {
+      throw new Error("unavailable account must not resolve credentials");
+    });
+    const selected = createChannelTestPluginBase({
+      id: "whatsapp",
+      config: {
+        listAccountIds: () => ["disabled", "unavailable"],
+        resolveAccount,
+        inspectAccount: () => ({ enabled: false, configured: true, name: "Disabled account" }),
+      },
+    });
+    const inspectUnrelated = vi.fn(() => {
+      throw new Error("unrelated channel inspection failed");
+    });
+    const unrelated = createChannelTestPluginBase({
+      id: "discord",
+      config: { inspectAccount: inspectUnrelated },
+    });
+    const registry = createTestRegistry(
+      [selected, unrelated].map((plugin) => ({
+        pluginId: plugin.id,
+        plugin,
+        source: "test",
+      })),
+    );
+    setActivePluginRegistry(registry);
+    setActiveDegradedSecretOwners([
+      {
+        ownerKind: "account",
+        ownerId: "whatsapp:unavailable",
+        state: "unavailable",
+        paths: ["channels.whatsapp.accounts.unavailable.token"],
+        refKeys: [],
+        reason: "secret reference was not found",
+      },
+    ]);
+    mocks.listChannelPlugins.mockReturnValue([selected, unrelated]);
+    const manager = createChannelManager({
+      getRuntimeConfig: mocks.getRuntimeConfig,
+      getPluginRegistry: () => registry,
+      channelLogs: {},
+      channelRuntimeEnvs: {},
+    });
+    const options = createOptions({ channel: "whatsapp", probe: false });
+    options.context.getRuntimeSnapshot = manager.getRuntimeSnapshot;
+
+    const payload = await runChannelsStatus(options.params, { context: options.context });
+
+    expect(payload.partial).toBeUndefined();
+    expect(channelAccounts(payload, "whatsapp")).toMatchObject([
+      {
+        accountId: "disabled",
+        enabled: false,
+        configured: true,
+        running: false,
+        name: "Disabled account",
+      },
+      {
+        accountId: "unavailable",
+        running: false,
+        lifecycle: "blocked",
+        lastError: expect.stringContaining("configured but unavailable"),
+      },
+    ]);
+    expect(Object.keys(requireGatewayRecord(payload.channelAccounts, "channel accounts"))).toEqual([
+      "whatsapp",
+    ]);
+    expect(inspectUnrelated).not.toHaveBeenCalled();
+    expect(resolveAccount).not.toHaveBeenCalled();
   });
 
   it.each([undefined, true, false])(
@@ -849,6 +854,100 @@ describe("channelsHandlers channels.status", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each([100, 2_000, 7_000])(
+    "delivers partial channel results to Doctor after a %i ms round-trip",
+    async (roundTripMs) => {
+      const { checkGatewayHealth } = await import("../../commands/doctor-gateway-health.js");
+      await import("../../agents/tools/in-process-gateway.js");
+      vi.useFakeTimers();
+      try {
+        const statusStarted = createDeferred();
+        const channelsStarted = createDeferred();
+        mocks.listChannelPlugins.mockReturnValue([
+          createChannelPlugin({
+            id: "hanging",
+            probeAccount: () => new Promise(() => {}),
+          }),
+          createChannelPlugin({
+            id: "healthy",
+            probeAccount: async () => ({ ok: true }),
+            collectStatusIssues: () => [
+              {
+                channel: "healthy",
+                accountId: "default",
+                kind: "config",
+                message: "Check routing",
+              },
+            ],
+          }),
+        ]);
+        mocks.buildChannelAccountSnapshotFromAccount.mockImplementation(
+          async ({ accountId, probe }) => ({ accountId, configured: true, probe }),
+        );
+        let channelPayload: Record<string, unknown> | undefined;
+        mocks.callGateway.mockImplementation(
+          ({ method, params, timeoutMs }: CallGatewayOptions) => {
+            if (timeoutMs == null) {
+              throw new Error("Doctor requests must have a deadline");
+            }
+            if (method === "diagnostics.stability") {
+              return Promise.resolve({});
+            }
+            return new Promise((resolve, reject) => {
+              const deadline = setTimeout(
+                () => reject(new Error(`gateway timeout after ${timeoutMs}ms`)),
+                timeoutMs,
+              );
+              const response = async () => {
+                await new Promise((resume) => {
+                  setTimeout(resume, roundTripMs);
+                });
+                if (method === "status") {
+                  return { ok: true };
+                }
+                channelPayload = await runChannelsStatus(
+                  requireGatewayRecord(params, "request params"),
+                );
+                return channelPayload;
+              };
+              void response()
+                .then(resolve, reject)
+                .finally(() => {
+                  clearTimeout(deadline);
+                });
+              (method === "status" ? statusStarted : channelsStarted).resolve();
+            });
+          },
+        );
+        const result = checkGatewayHealth({
+          runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+          cfg: {},
+          timeoutMs: roundTripMs < 3_000 ? 3_000 : 10_000,
+        });
+        await statusStarted.promise;
+        await vi.advanceTimersByTimeAsync(roundTripMs);
+        await channelsStarted.promise;
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        await expect(result).resolves.toMatchObject({ healthOk: true, authenticated: true });
+        const payload = expectDefined(channelPayload, "channel response");
+        expect(payload.partial).toBe(true);
+        expect(firstChannelAccount(payload, "hanging").probe).toMatchObject({ timedOut: true });
+        expect(firstChannelAccount(payload, "healthy").probe).toEqual({ ok: true });
+        expect(mocks.note).toHaveBeenCalledWith(
+          expect.stringContaining("Check routing"),
+          "Channel warnings",
+        );
+        expect(mocks.note).not.toHaveBeenCalledWith(
+          expect.stringContaining("host may be slow"),
+          expect.anything(),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("falls back to account-derived channel summaries when summary building fails", async () => {
     mocks.buildChannelAccountSnapshotFromAccount.mockResolvedValue({

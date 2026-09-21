@@ -2,11 +2,14 @@
 
 install_update_restart_systemctl_shim() {
   local shim_dir="$npm_config_prefix/bin"
+  export XDG_RUNTIME_DIR="$shim_dir/runtime"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   local manager_env
   manager_env="$(node <<'MANAGER_ENV'
 const keys = [
   "CI", "OPENCLAW_NO_ONBOARD", "OPENCLAW_NO_PROMPT", "OPENCLAW_SKIP_PROVIDERS",
   "OPENCLAW_SKIP_CHANNELS", "OPENCLAW_DISABLE_BONJOUR",
+  "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
 ];
 const captured = Object.fromEntries(keys.map((key) => [key, process.env[key] ?? null]));
 const registry = process.env.NPM_CONFIG_REGISTRY || process.env.npm_config_registry || null;
@@ -72,6 +75,12 @@ if [ "${#filtered[@]}" -gt 2 ] ||
   echo "systemctl shim unsupported unit or arguments: $*" >&2
   exit 1
 fi
+
+case "$command" in
+  stop | start | restart | enable | disable)
+    node "$manager_script" record-caller "${log_file}.callers" "$PPID" "$command"
+    ;;
+esac
 
 is_running() {
   [ -s "$pid_file" ] || return 1

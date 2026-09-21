@@ -60,6 +60,7 @@ import {
   isPluginInstallRecordUpdateSource,
   pluginInstallRecordMayMigrateConfigId,
   updateNpmInstalledPlugins,
+  type PluginUpdateIntegrityDriftParams,
 } from "../plugins/update.js";
 import { defaultRuntime } from "../runtime.js";
 import { VERSION } from "../version.js";
@@ -76,6 +77,20 @@ import { promptYesNo } from "./prompt.js";
 
 const DEPRECATED_DANGEROUS_FORCE_UNSAFE_UPDATE_WARNING =
   "--dangerously-force-unsafe-install is deprecated and no longer affects plugin updates because built-in install-time dangerous-code scanning has been removed. Configure security.installPolicy for operator-owned install decisions.";
+
+async function confirmUpdateIntegrityDrift(
+  item: string,
+  drift: Omit<PluginUpdateIntegrityDriftParams, "pluginId">,
+): Promise<boolean> {
+  defaultRuntime.log(
+    theme.warn(
+      `Integrity drift detected for ${item} (${drift.resolvedSpec ?? drift.spec})` +
+        `\nExpected: ${drift.expectedIntegrity}` +
+        `\nActual:   ${drift.actualIntegrity}`,
+    ),
+  );
+  return drift.dryRun || (await promptYesNo(`Continue updating ${item} with this artifact?`));
+}
 
 function mayMutatePluginInstallRecord(
   record: PluginInstallRecord | undefined,
@@ -185,7 +200,7 @@ async function assertRecordsOnlyUpdateConfigFresh(params: {
 }
 
 type RunPluginUpdateCommandParams = {
-  id?: string;
+  ids: string[];
   opts: {
     all?: boolean;
     acceptCapabilities?: boolean;
@@ -197,6 +212,11 @@ type RunPluginUpdateCommandParams = {
 
 /** Run plugin/hook-pack updates, persist changed install records, and refresh runtime registry. */
 export async function runPluginUpdateCommand(params: RunPluginUpdateCommandParams) {
+  if (params.opts.all && params.ids.length > 0) {
+    defaultRuntime.error("Use either plugin or hook-pack ids or --all, not both.");
+    defaultRuntime.exit(1);
+    return;
+  }
   if (params.opts.dryRun) {
     const exitCode = await runPluginUpdateCommandUnlocked(params);
     if (exitCode !== 0) {
@@ -347,11 +367,30 @@ async function runPluginUpdateCommandUnlocked(
     installs: pluginInstallRecords,
     installOwnerByPluginId,
     rejectedPluginIds,
-    rawId: params.id,
+    rawIds: params.ids,
     all: params.opts.all,
   });
   if (pluginSelection.error) {
     defaultRuntime.error(pluginSelection.error);
+    return 1;
+  }
+  const selectedHooks = readHookInstalls();
+  const hookSelection = resolveHookPackUpdateSelection({
+    installs: selectedHooks,
+    rawIds: params.ids,
+    all: params.opts.all,
+  });
+  if (hookSelection.error) {
+    defaultRuntime.error(hookSelection.error);
+    return 1;
+  }
+  const unmatchedId = pluginSelection.unmatchedIds?.find((id) =>
+    hookSelection.unmatchedIds?.includes(id),
+  );
+  if (unmatchedId !== undefined) {
+    defaultRuntime.error(
+      `No tracked plugin or hook pack found for "${unmatchedId}". Run "${formatCliCommand("openclaw plugins list")}" or "${formatCliCommand("openclaw hooks list")}" to inspect installed packages.`,
+    );
     return 1;
   }
   // Dormant records still reach the updater for notices, but no package mutation.
@@ -371,23 +410,12 @@ async function runPluginUpdateCommandUnlocked(
       [...ownership.pluginIds],
     ]),
   );
-  const selectedHooks = readHookInstalls();
-  const hookSelection = resolveHookPackUpdateSelection({
-    installs: selectedHooks,
-    rawId: params.id,
-    all: params.opts.all,
-  });
-
   if (pluginSelection.pluginIds.length === 0 && hookSelection.hookIds.length === 0) {
     if (params.opts.all) {
       defaultRuntime.log("No tracked plugins or hook packs to update.");
       return 0;
     }
-    defaultRuntime.error(
-      params.id
-        ? `No tracked plugin or hook pack found for "${params.id}". Run "${formatCliCommand("openclaw plugins list")}" or "${formatCliCommand("openclaw hooks list")}" to inspect installed packages.`
-        : "Provide a plugin or hook-pack id, or use --all.",
-    );
+    defaultRuntime.error("Provide plugin or hook-pack ids, or use --all.");
     return 1;
   }
 
@@ -487,9 +515,10 @@ async function runPluginUpdateCommandUnlocked(
     allowPrompt: !params.opts.dryRun,
   });
   const deferredInstallTransactions: PluginInstallTransaction[] = [];
-  let pluginResult: Awaited<ReturnType<typeof updateNpmInstalledPlugins>>;
+  let packageUpdatePersisted = false;
+  let updateFailure: { error: unknown } | undefined;
   try {
-    pluginResult =
+    let pluginResult =
       pluginSelection.pluginIds.length > 0
         ? await updateNpmInstalledPlugins(
             requestDeferredPluginInstall(
@@ -510,34 +539,14 @@ async function runPluginUpdateCommandUnlocked(
                   allowPrompt: !params.opts.dryRun,
                 }),
                 logger,
-                onIntegrityDrift: async (drift) => {
-                  const specLabel = drift.resolvedSpec ?? drift.spec;
-                  defaultRuntime.log(
-                    theme.warn(
-                      `Integrity drift detected for "${drift.pluginId}" (${specLabel})` +
-                        `\nExpected: ${drift.expectedIntegrity}` +
-                        `\nActual:   ${drift.actualIntegrity}`,
-                    ),
-                  );
-                  if (drift.dryRun) {
-                    return true;
-                  }
-                  return await promptYesNo(
-                    `Continue updating "${drift.pluginId}" with this artifact?`,
-                  );
-                },
+                onIntegrityDrift: (drift) =>
+                  confirmUpdateIntegrityDrift(`"${drift.pluginId}"`, drift),
               },
               deferredInstallTransactions,
               assertOwned,
             ),
           )
         : { config: cfgWithPluginInstallRecords, changed: false, outcomes: [] };
-  } catch (error) {
-    await settlePluginInstallTransactions(deferredInstallTransactions, "rollback");
-    throw error;
-  }
-  let packageUpdatePersisted = false;
-  try {
     if (pluginSelection.pluginIds.length > 0 && pluginResult.changed && !params.opts.dryRun) {
       const nextInstallRecords = pluginResult.config.plugins?.installs ?? {};
       // The installer may restore or replace bytes at a previously observed path.
@@ -573,22 +582,8 @@ async function runPluginUpdateCommandUnlocked(
                 dryRun: params.opts.dryRun,
                 ...installPolicyWarningAcknowledgement,
                 logger,
-                onIntegrityDrift: async (drift) => {
-                  const specLabel = drift.resolvedSpec ?? drift.spec;
-                  defaultRuntime.log(
-                    theme.warn(
-                      `Integrity drift detected for hook pack "${drift.hookId}" (${specLabel})` +
-                        `\nExpected: ${drift.expectedIntegrity}` +
-                        `\nActual:   ${drift.actualIntegrity}`,
-                    ),
-                  );
-                  if (drift.dryRun) {
-                    return true;
-                  }
-                  return await promptYesNo(
-                    `Continue updating hook pack "${drift.hookId}" with this artifact?`,
-                  );
-                },
+                onIntegrityDrift: (drift) =>
+                  confirmUpdateIntegrityDrift(`hook pack "${drift.hookId}"`, drift),
               },
               deferredInstallTransactions,
               assertOwned,
@@ -691,9 +686,12 @@ async function runPluginUpdateCommandUnlocked(
       error: defaultRuntime.error,
     });
     return outcomeSummary.hasErrors ? 1 : 0;
+  } catch (error) {
+    updateFailure = { error };
+    throw error;
   } finally {
     if (!packageUpdatePersisted) {
-      await settlePluginInstallTransactions(deferredInstallTransactions, "rollback");
+      await settlePluginInstallTransactions(deferredInstallTransactions, "rollback", updateFailure);
     }
   }
 }

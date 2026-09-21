@@ -381,7 +381,7 @@ export function createCodexAppServerConfig({
  */
 export function resolveCodexAppServerStartOptionsForAgent(params: {
   startOptions: CodexAppServerStartOptions;
-  agentDir: string;
+  agentDir?: string;
   codexConfigToml?: string | null;
   env?: NodeJS.ProcessEnv;
 }): CodexAppServerStartOptions {
@@ -396,8 +396,12 @@ export function resolveCodexAppServerStartOptionsForAgent(params: {
   if (startOptions.homeScope === "user") {
     return { ...startOptions, managedCommandOrder: "desktop-first" };
   }
+  if (!params.agentDir) {
+    throw new Error("Agent-scoped Codex requires an OpenClaw agent directory");
+  }
   const nativeComputerUseEnabled = codexConfigEnablesNativeComputerUse({
     agentDir: params.agentDir,
+    codexHome: startOptions.codexHome,
     codexConfigToml: params.codexConfigToml,
     env: params.env,
     homeScope: "agent",
@@ -552,7 +556,10 @@ export function codexAppServerStartOptionsKey(
     headers: Object.entries(options.headers)
       .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, hashSecretForKey(value, `header:${key}`)]),
-    env: Object.entries(options.env ?? {})
+    env: Object.entries({
+      ...options.env,
+      ...(options.codexHome ? { CODEX_HOME: options.codexHome } : {}),
+    })
       .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, hashSecretForKey(value, `env:${key}`)]),
     clearEnv: [...(options.clearEnv ?? [])].toSorted(),

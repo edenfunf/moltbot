@@ -45,8 +45,45 @@ title: "Thinking levels"
 1. Inline directive on the message (applies only to that message).
 2. Session override (set by sending a directive-only message).
 3. Per-agent default (`agents.entries.*.thinkingDefault` in config).
-4. Global default (`agents.defaults.thinkingDefault` in config).
-5. Fallback: provider-declared default when available; otherwise reasoning-capable models resolve to `medium` or the nearest supported non-`off` level for that model, and non-reasoning models stay `off`.
+4. Per-agent model default (`agents.entries.*.models["<provider>/<model>"].params.thinking` in config).
+5. Shared model default (`agents.defaults.models["<provider>/<model>"].params.thinking` in config).
+6. Global default (`agents.defaults.thinkingDefault` in config).
+7. Fallback: provider-declared default when available; otherwise reasoning-capable models resolve to `medium` or the nearest supported non-`off` level for that model, and non-reasoning models stay `off`.
+
+## Setting a model default
+
+Use `params.thinking` to set the default for one configured model without changing
+the default for your other models. The key must match the provider and model you
+actually select, including any model path exposed by a custom provider.
+
+Replace `<provider>/<model>` with a configured model's full ID, then merge this
+entry into your existing model configuration:
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "<provider>/<model>": {
+          params: { thinking: "high" },
+        },
+      },
+    },
+  },
+}
+```
+
+The provider must already be configured, and the model must support the selected
+thinking level.
+
+To change that model's default for one agent, put the same entry under
+`agents.entries.<agent>.models`. This overrides the shared model setting.
+Model `params.thinking` accepts the same aliases as `/think`; `false` and
+`"disabled"` also select `off`.
+
+An inline directive, a saved session override, or a per-agent `thinkingDefault`
+still takes precedence. Send `/think default` to clear a saved session override;
+check the per-agent setting if the model default still does not take effect.
 
 ## Setting a session default
 
@@ -135,6 +172,8 @@ Malformed local-model reasoning tags are handled conservatively. Closed `<think>
 
 ## Web chat UI
 
+- Model, thinking-level, and fast-mode overrides can be changed in an existing session with `operator.write`; administrator access is not required for these three controls. Read-only clients cannot change them.
+- These are session preferences for subsequent turns, not a promise to change an already-running model call. The composer disables the controls while a reply is running and while a model change is being applied.
 - The web chat thinking selector shows the explicit session override, or the inherited configured/provider default when no override is stored.
 - Refreshing, reloading, or compacting a conversation keeps an inherited choice inherited; it does not store the resolved level as an override. While model metadata is loading, refreshes retain the known thinking profile for the same model and runtime.
 - Selecting a level on the effort slider writes an explicit session override immediately via `sessions.patch`; it does not wait for the next send and it is not a one-shot `thinkingOnce` override.
@@ -149,7 +188,7 @@ Malformed local-model reasoning tags are handled conservatively. Closed `<think>
 - Provider plugins can expose `resolveThinkingProfile(ctx)` to define the model's supported levels and default.
 - Provider plugins that proxy Claude models should reuse `resolveClaudeThinkingProfile(modelId)` from `openclaw/plugin-sdk/provider-model-shared` so direct Anthropic and proxy catalogs stay aligned.
 - Each profile level has a stored canonical `id` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `adaptive`, `max`, or `ultra`) and may include a display `label`. Binary providers use `{ id: "low", label: "on" }`.
-- Profile hooks receive merged catalog facts when available, including `reasoning`, `compat.thinkingFormat`, and `compat.supportedReasoningEfforts`. Use those facts to expose binary or custom profiles only when the configured request contract supports the matching payload.
+- Profile hooks receive merged catalog facts when available, including `reasoning`, `thinkingLevelMap`, `compat.thinkingFormat`, `compat.supportsReasoningEffort`, and `compat.supportedReasoningEfforts`. Use those facts to expose binary or custom profiles only when the configured request contract supports the matching payload. A `null` entry in `thinkingLevelMap` removes that level before choosing a default.
 - Tool plugins that need to validate an explicit thinking override should use `api.runtime.agent.resolveThinkingPolicy({ provider, model, agentRuntime })` plus `api.runtime.agent.normalizeThinkingLevel(...)`; they should not keep their own provider/model level lists. Pass `agentRuntime` when the tool owns the execution path, such as an always-embedded run.
 - Tool plugins with access to configured custom model metadata can pass `catalog` into `resolveThinkingPolicy` so `compat.supportedReasoningEfforts` opt-ins are reflected in plugin-side validation.
 - Published legacy hooks (`supportsXHighThinking`, `isBinaryThinking`, and `resolveDefaultThinkingLevel`) remain as compatibility adapters, but new custom level sets should use `resolveThinkingProfile`.

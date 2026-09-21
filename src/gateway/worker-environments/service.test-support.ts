@@ -11,6 +11,7 @@ import type {
   WorkerSshEndpoint,
 } from "../../plugins/types.js";
 import {
+  closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
   type OpenClawStateDatabase,
@@ -154,6 +155,7 @@ export function setupWorkerEnvironmentServiceSuite() {
     // Shutdown may schedule cleanup after a test leaves fake timers installed.
     vi.useRealTimers();
     await testState.service?.stop();
+    await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
     await fs.rm(testState.root, { recursive: true, force: true });
   });
@@ -169,6 +171,7 @@ export function getDevelopmentProfile() {
 export async function reopenWorkerEnvironmentStore() {
   await testState.service?.stop();
   testState.service = undefined;
+  await closeOpenClawStateDatabaseAsync();
   closeOpenClawStateDatabaseForTest();
   testState.stateDb = openOpenClawStateDatabase({
     env: { OPENCLAW_STATE_DIR: testState.root },
@@ -258,7 +261,7 @@ export function createProvider(overrides: Partial<WorkerProvider> = {}): WorkerP
 
 export function createLiveEvents(overrides: Record<string, unknown> = {}) {
   return {
-    apply: vi.fn(() => LIVE_EVENT_ACK),
+    apply: vi.fn(async () => LIVE_EVENT_ACK),
     bindSession: vi.fn(() => true),
     clear: vi.fn(),
     clearEnvironment: vi.fn(),
@@ -515,7 +518,7 @@ export function successfulTranscriptCommit(entryId: string, beforeCommit?: () =>
 }
 
 export function sequencedLiveEvents(ackedSeq = (seq: number) => seq) {
-  const apply = vi.fn(({ request }: { request: LiveEventRequest }) => ({
+  const apply = vi.fn(async ({ request }: { request: LiveEventRequest }) => ({
     ok: true as const,
     result: { ackedSeq: ackedSeq(request.seq) },
   }));

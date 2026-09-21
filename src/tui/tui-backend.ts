@@ -34,6 +34,19 @@ export type TuiChatSendResult = {
   status?: string;
 };
 
+export type TuiImageRequest = {
+  sessionKey: string;
+  agentId?: string;
+  source: string;
+  artifactId?: string;
+  signal: AbortSignal;
+};
+
+export type TuiImageData = {
+  data: string;
+  mimeType: string;
+};
+
 export type TuiApprovalDecision = "allow-once" | "allow-always" | "deny";
 
 type TuiTaskSuggestionActionCapabilities = {
@@ -108,6 +121,8 @@ export type TuiSessionList = {
       key: string;
       sessionId?: string;
       updatedAt?: number | null;
+      archived?: boolean;
+      incognito?: boolean;
       fastMode?: FastMode;
       sendPolicy?: string;
       responseUsage?: ResponseUsageMode;
@@ -130,6 +145,11 @@ export type TuiSessionList = {
       lastMessagePreview?: string;
     }
   >;
+};
+
+export type TuiSessionDescription = {
+  session: TuiSessionList["sessions"][number] | null;
+  defaults?: TuiSessionList["defaults"];
 };
 
 /** Agent-list payload used by TUI agent switching. */
@@ -198,7 +218,11 @@ export type TuiBackend = {
     runId?: string;
   }) => Promise<{ ok: boolean; aborted: boolean; runIds?: string[] }>;
   loadHistory: (opts: { sessionKey: string; agentId?: string; limit?: number }) => Promise<unknown>;
+  loadImage?: (opts: TuiImageRequest) => Promise<TuiImageData>;
   listSessions: (opts?: SessionsListParams) => Promise<TuiSessionList>;
+  describeSession: (
+    opts: Pick<ChatSendOptions, "sessionKey" | "agentId">,
+  ) => Promise<TuiSessionDescription>;
   listAgents: () => Promise<TuiAgentsList>;
   patchSession: (opts: SessionsPatchParams) => Promise<SessionsPatchResult>;
   createSession: (opts: TuiSessionCreateOptions) => Promise<TuiSessionMutationResult>;

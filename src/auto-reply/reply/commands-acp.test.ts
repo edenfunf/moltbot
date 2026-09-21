@@ -15,6 +15,7 @@ import {
   createChannelTestPluginBase,
   createTestRegistry,
 } from "../../test-utils/channel-plugins.js";
+import { createInMemoryTaskRegistryStore } from "../../test-utils/task-registry-store.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 
 const hoisted = vi.hoisted(() => {
@@ -160,10 +161,7 @@ const { failTaskRunByRunIdCore } = await import("../../tasks/task-executor.js");
 function configureInMemoryTaskRegistryStoreForTests(): void {
   configureTaskRegistryRuntime({
     store: {
-      loadSnapshot: () => ({
-        tasks: new Map(),
-        deliveryStates: new Map(),
-      }),
+      ...createInMemoryTaskRegistryStore(),
       upsertTaskWithDeliveryState: () => {},
       deleteTaskWithDeliveryState: () => {},
       upsertDeliveryState: () => {},
@@ -1105,8 +1103,8 @@ describe("/acp command", () => {
         }
       },
       setSessionRuntimeMode: async (input: { sessionKey: string; runtimeMode: string }) => {
-        await hoisted.setModeMock(input);
-        return { mode: input.runtimeMode };
+        const options = await hoisted.setModeMock(input);
+        return options ?? { runtimeMode: input.runtimeMode };
       },
       setSessionConfigOption: async (input: { key: string; value: string }) => {
         const options = await hoisted.setConfigOptionMock(input);
@@ -2381,6 +2379,14 @@ describe("/acp command", () => {
 
   it.each([
     {
+      action: "set-mode",
+      command: "/acp set-mode plan",
+      effectiveOptions: { runtimeMode: "plan" },
+      managerMock: hoisted.setModeMock,
+      managerInput: { runtimeMode: "plan" },
+      expectedText: `✅ Updated ACP runtime mode for ${defaultAcpSessionKey}: plan. Effective options: runtimeMode=plan`,
+    },
+    {
       action: "cwd",
       command: "/acp cwd /tmp/worktree",
       effectiveOptions: { cwd: "/tmp/worktree" },
@@ -2425,19 +2431,27 @@ describe("/acp command", () => {
       ...testCase.managerInput,
     });
     expect(
-      hoisted.setConfigOptionMock.mock.calls.length +
+      hoisted.setModeMock.mock.calls.length +
+        hoisted.setConfigOptionMock.mock.calls.length +
         hoisted.updateSessionRuntimeOptionsMock.mock.calls.length,
     ).toBe(1);
   });
 
-  it("preserves the dedicated runtime-option failure boundary", async () => {
+  it.each([
+    {
+      command: "/acp model openai/gpt-5.5",
+      label: "model",
+      managerMock: hoisted.setConfigOptionMock,
+    },
+    { command: "/acp set-mode plan", label: "runtime mode", managerMock: hoisted.setModeMock },
+  ])("preserves the $label failure boundary", async ({ command, label, managerMock }) => {
     mockBoundThreadSession();
-    hoisted.setConfigOptionMock.mockRejectedValueOnce("backend failure");
+    managerMock.mockRejectedValueOnce("backend failure");
 
-    const result = await runThreadAcpCommand("/acp model openai/gpt-5.5", baseCfg);
+    const result = await runThreadAcpCommand(command, baseCfg);
 
     expect(result?.reply?.text).toBe(
-      "ACP error (ACP_TURN_FAILED): Could not update ACP model.\nnext: Retry, or use `/acp cancel` and send the message again.",
+      `ACP error (ACP_TURN_FAILED): Could not update ACP ${label}.\nnext: Retry, or use \`/acp cancel\` and send the message again.`,
     );
   });
 

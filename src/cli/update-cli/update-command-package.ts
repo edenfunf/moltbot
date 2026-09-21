@@ -1,9 +1,7 @@
 import path from "node:path";
-import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { hashConfigRaw } from "../../config/io.read-helpers.js";
 import { resolveConfigPath } from "../../config/paths.js";
 import { resolveGatewayInstallEntrypoint } from "../../daemon/gateway-entrypoint.js";
-import { createLowDiskSpaceWarning } from "../../infra/disk-space.js";
 import {
   markPackagePostInstallDoctorAdvisory,
   runGlobalPackageUpdateSteps,
@@ -37,8 +35,7 @@ import {
   type UpdateRunResult,
   type UpdateStepResult,
 } from "../../infra/update-runner.js";
-import { runCommandWithTimeout, runUtf8CommandWithTimeout } from "../../process/exec.js";
-import { defaultRuntime } from "../../runtime.js";
+import { runCommandWithTimeout } from "../../process/exec.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { CLI_NAME } from "../cli-name.js";
 import { createUpdateProgress } from "./progress.js";
@@ -56,11 +53,7 @@ import {
   readUpdateConfigSnapshot,
   type UpdateConfigSnapshot,
 } from "./update-command-config-snapshot.js";
-import {
-  withUpdateCommandExecutorChild,
-  type UpdateCommandChildGrant,
-} from "./update-command-executor.js";
-import type { UpdateDoctorInput } from "./update-command-migrated-types.js";
+import { withUpdateDoctorChild } from "./update-command-doctor-child.js";
 import { resolveUpdateTargetEnv } from "./update-command-service-env.js";
 export async function readPackageUpdateIdentity(root: string) {
   const [version, buildId] = await Promise.all([
@@ -86,6 +79,7 @@ type PackageDoctorOptions = {
         inputHash: string;
         changes: UpdateDoctorConfigChange[];
         assertCurrent: () => void;
+        assertBoundChildCurrent: () => void;
       }
     | undefined;
 };
@@ -98,6 +92,7 @@ export function preparePackageDoctorContext(params: {
   inputHash?: string | null;
   changes: UpdateDoctorConfigChange[];
   assertCurrent: () => void;
+  assertBoundChildCurrent: () => void;
 }) {
   params.assertCurrent();
   if (!params.capable) {
@@ -113,6 +108,7 @@ export function preparePackageDoctorContext(params: {
     inputHash: params.inputHash ?? hashConfigRaw(null),
     changes: params.changes,
     assertCurrent: params.assertCurrent,
+    assertBoundChildCurrent: params.assertBoundChildCurrent,
   };
 }
 
@@ -160,20 +156,8 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
   const configSnapshot = params.onConfigSnapshot
     ? await readUpdateConfigSnapshot(resolveConfigPath(doctorEnv))
     : undefined;
-  const runDoctor = (executor?: UpdateCommandChildGrant, beforeInput?: (pid: number) => void) => {
-    context?.assertCurrent();
-    const input: UpdateDoctorInput | undefined =
-      context && executor
-        ? {
-            executor,
-            runId: context.runId,
-            root: params.root,
-            configInputHash: context.inputHash,
-            requester: context.requester,
-            repair: doctorPolicy.fix,
-          }
-        : undefined;
-    return runUpdateStep({
+  const runDoctor = (runCommand?: Parameters<typeof runUpdateStep>[0]["runCommand"]) =>
+    runUpdateStep({
       name: `${CLI_NAME} doctor`,
       argv: doctorArgv,
       cwd: params.root,
@@ -189,33 +173,19 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
         [UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]: doctorResultPath,
       },
       timeoutMs: params.timeoutMs,
-      ...(input
-        ? {
-            runCommand: async (argv, options) => {
-              const result = await runUtf8CommandWithTimeout(argv, {
-                ...options,
-                input: JSON.stringify(input),
-                beforeInput,
-                killProcessTree: true,
-                requireProcessTreeExtinction: true,
-              });
-              if (result.cleanup !== "normal") {
-                throw new Error("Doctor executor did not settle its child processes.");
-              }
-              return result;
-            },
-          }
-        : {}),
+      ...(runCommand ? { runCommand } : {}),
     });
-  };
   const doctorStep = context
-    ? await withUpdateCommandExecutorChild(context.executorFence, params.root, (grant, bindChild) =>
-        runDoctor(grant, (pid) => {
-          context.assertCurrent();
-          bindChild(pid);
-        }),
+    ? await withUpdateDoctorChild(
+        {
+          root: params.root,
+          context: { ...context, assertRequesterCurrent: context.assertBoundChildCurrent },
+          input: { configInputHash: context.inputHash, repair: doctorPolicy.fix },
+        },
+        runDoctor,
       )
     : await runDoctor();
+  context?.assertCurrent();
   const doctorResult = await consumeUpdatePostInstallDoctorResult(doctorResultPath);
   if (configSnapshot) {
     // Only the child writer can attribute bytes to Doctor; a later read may contain an operator save.
@@ -339,7 +309,6 @@ export type PackageInstallUpdateParams = {
   timeoutMs: number;
   startedAt: number;
   progress: ReturnType<typeof createUpdateProgress>["progress"];
-  jsonMode: boolean;
   managedServiceEnv?: NodeJS.ProcessEnv;
   invocationCwd?: string;
   honorPackageRoot?: boolean;
@@ -348,6 +317,7 @@ export type PackageInstallUpdateParams = {
   installTarget?: ResolvedGlobalInstallTarget;
   validateCandidate: (root: string) => Promise<UpdateStepResult[]>;
   beforeActivate: () => Promise<void>;
+  assertCurrent?: () => void;
   onTransaction: (transaction: PackageUpdateTransaction) => void;
   onConfigSnapshot?: PackageDoctorOptions["onConfigSnapshot"];
   getDoctorContext?: PackageDoctorOptions["getDoctorContext"];
@@ -400,8 +370,8 @@ export async function stagePackageInstallUpdate(
   if ("result" in ready) {
     throw new UpdatePreMutationError(
       ready.result.reason ?? "package-staging-failed",
-      ready.result.steps.find((step) => step.exitCode !== 0)?.stderrTail ??
-        "Package staging did not produce a target runtime.",
+      ready.result.failedStep?.stderrTail ?? "Package staging did not produce a target runtime.",
+      { failureFacts: ready.result.failedStep?.failureFacts },
     );
   }
   return {
@@ -460,18 +430,6 @@ export async function runPackageInstallUpdate(
 
   const before = pkgRoot ? await readPackageUpdateIdentity(pkgRoot) : { version: null };
 
-  const diskWarning = createLowDiskSpaceWarning({
-    targetPath: pkgRoot ? path.dirname(pkgRoot) : params.root,
-    purpose: "global package update",
-  });
-  if (diskWarning) {
-    if (params.jsonMode) {
-      defaultRuntime.error(`Warning: ${diskWarning}`);
-    } else {
-      defaultRuntime.log(theme.warn(diskWarning));
-    }
-  }
-
   const packageUpdate = await runGlobalPackageUpdateSteps({
     localOverrides: {
       reapply: params.reapplyLocalOverrides === true,
@@ -482,6 +440,7 @@ export async function runPackageInstallUpdate(
     },
     validateCandidate: params.validateCandidate,
     beforeActivate: params.beforeActivate,
+    assertCurrent: params.assertCurrent,
     onTransaction: params.onTransaction,
     installTarget,
     installSpec,
@@ -489,7 +448,7 @@ export async function runPackageInstallUpdate(
     packageRoot: pkgRoot,
     // Artifact equality cannot skip a method switch or retained-runtime staging.
     requirePackageReplacement:
-      params.installKind === "git" || params.requirePackageReplacement === true,
+      params.requirePackageReplacement === true || params.installKind === "git",
     runCommand: runCommandWithTimeout,
     timeoutMs: params.timeoutMs,
     ...(installEnv === undefined ? {} : { env: installEnv }),
@@ -525,6 +484,7 @@ export async function runPackageInstallUpdate(
       ...(afterBuildId ? { buildId: afterBuildId } : {}),
     },
     steps: packageUpdate.steps,
+    failedStep: packageUpdate.failedStep ?? undefined,
     recovery: packageUpdate.recovery,
     localOverrides: packageUpdate.localOverrides,
     durationMs: Date.now() - params.startedAt,

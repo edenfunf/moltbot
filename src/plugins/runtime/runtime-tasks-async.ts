@@ -1,16 +1,42 @@
-import { captureOpenClawStateDatabaseReadAdmission } from "../../state/openclaw-state-db-cache.js";
-import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
+import crypto from "node:crypto";
+import {
+  collectNestedErrorCandidates,
+  extractErrorCode,
+} from "@openclaw/normalization-core/error-coercion";
+import { captureRuntimeConfigAsyncReader } from "../../config/io.runtime.js";
+import type { SqliteWorkerStore } from "../../infra/sqlite-worker-contract.js";
+import type { SqliteWorkerNativeSettlementOwner } from "../../infra/sqlite-worker-operation-settlement.js";
+import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import type { OpenClawStateWorkerOperations } from "../../state/openclaw-state-worker-contract.js";
 import {
   mapTaskFlowDetail,
   mapTaskRunAggregateSummary,
   mapTaskRunDetail,
   mapTaskRunView,
 } from "../../tasks/task-domain-views.js";
-import { ensureTaskFlowRegistryReady } from "../../tasks/task-flow-runtime-internal.js";
-import { canOwnerAccessTask } from "../../tasks/task-owner-access.js";
-import { ensureTaskRegistryReady } from "../../tasks/task-registry-state.js";
+import {
+  buildFlowRecord,
+  buildManagedTaskFlowPatch,
+  type FlowRecordPatch,
+  type ManagedTaskFlowMutation,
+} from "../../tasks/task-flow-registry.records.js";
+import {
+  ensureTaskFlowRegistryReadyAsync,
+  runTaskFlowRegistryWorkerMutation,
+} from "../../tasks/task-flow-runtime-internal.js";
+import { canOwnerAccessTaskAsync } from "../../tasks/task-owner-access.js";
+import { readTaskCreationEventTarget } from "../../tasks/task-registry-agent-event-target.js";
+import {
+  runTaskRegistryWorkerMutation,
+  ensureTaskRegistryReadyAsync,
+} from "../../tasks/task-registry-state.js";
 import type { TaskRecord } from "../../tasks/task-registry.types.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
+import {
+  asManagedTaskFlowRecord,
+  mapFlowTaskRunResult,
+  mapFlowUpdateResult,
+} from "./runtime-managed-flow-result.js";
 import type {
   BoundAsyncManagedTaskFlowsRuntime,
   BoundAsyncTaskFlowsRuntime,
@@ -30,45 +56,61 @@ function bind(params: Binding) {
 }
 
 async function readStore(includeTasks: boolean, includeFlows: boolean) {
-  const databasePath = resolveOpenClawStateSqlitePath();
-  const context = captureOpenClawStateDatabaseReadAdmission(databasePath);
-  // Cold restore retains canonical schema admission and failure semantics. Only
-  // this first admission uses main-thread SQLite; warmed queries run in the worker.
+  const context = captureOpenClawStateWorkerContext();
+  const loadConfig = captureRuntimeConfigAsyncReader({
+    assertCurrent: context.admission.assertCurrent,
+  });
   if (includeFlows) {
-    context.assertCurrent();
-    ensureTaskFlowRegistryReady();
+    context.admission.assertCurrent();
+    await ensureTaskFlowRegistryReadyAsync(context);
   }
   if (includeTasks) {
-    context.assertCurrent();
-    ensureTaskRegistryReady();
+    context.admission.assertCurrent();
+    await ensureTaskRegistryReadyAsync(context);
   }
   const store = await import("../../state/openclaw-state-worker-store.js");
-  context.assertCurrent();
-  return { store, context };
+  context.admission.assertCurrent();
+  return { store, context, loadConfig };
 }
 
 function bindRuns(params: Binding): BoundAsyncTaskRunsRuntime {
   const binding = bind(params);
   const identity = { callerOwnerKey: binding.sessionKey, callerAgentId: params.agentId };
-  const visible = (task: TaskRecord | undefined) =>
-    task && canOwnerAccessTask(task, identity) ? task : undefined;
+  const visible = async (
+    task: TaskRecord | undefined,
+    read: Awaited<ReturnType<typeof readStore>>,
+  ) => {
+    if (!task) {
+      return undefined;
+    }
+    const allowed = await canOwnerAccessTaskAsync(task, identity, read.loadConfig);
+    read.context.admission.assertCurrent();
+    return allowed ? task : undefined;
+  };
   const list = async () => {
-    const { store, context } = await readStore(true, false);
-    const records = await store.executeOpenClawStateWorker(context, {
+    const read = await readStore(true, false);
+    const records = await read.store.executeOpenClawStateWorker(read.context, {
       type: "tasks.list",
       input: { ownerKey: binding.sessionKey },
     });
-    return records.filter((task) => canOwnerAccessTask(task, identity));
+    const visibleRecords: TaskRecord[] = [];
+    for (const record of records) {
+      if (await visible(record, read)) {
+        visibleRecords.push(record);
+      }
+    }
+    return visibleRecords;
   };
   return {
     ...binding,
     async get(taskId) {
-      const { store, context } = await readStore(true, false);
-      const task = visible(
-        await store.executeOpenClawStateWorker(context, {
+      const read = await readStore(true, false);
+      const task = await visible(
+        await read.store.executeOpenClawStateWorker(read.context, {
           type: "tasks.get",
           input: { taskId: taskId.trim() },
         }),
+        read,
       );
       return task ? mapTaskRunDetail(task) : undefined;
     },
@@ -78,14 +120,18 @@ function bindRuns(params: Binding): BoundAsyncTaskRunsRuntime {
       return task ? mapTaskRunDetail(task) : undefined;
     },
     async resolve(token) {
-      const { store, context } = await readStore(true, false);
-      const records = await store.executeOpenClawStateWorker(context, {
+      const read = await readStore(true, false);
+      const records = await read.store.executeOpenClawStateWorker(read.context, {
         type: "tasks.resolve",
         input: { ownerKey: binding.sessionKey, token: token.trim() },
       });
-      const task =
-        visible(records.direct) ?? visible(records.byRun) ?? records.related.find(visible);
-      return task ? mapTaskRunDetail(task) : undefined;
+      for (const record of [records.direct, records.byRun, ...records.related]) {
+        const task = await visible(record, read);
+        if (task) {
+          return mapTaskRunDetail(task);
+        }
+      }
+      return undefined;
     },
   };
 }
@@ -98,8 +144,73 @@ async function readFlowTaskSummary(ownerKey: string, flowId: string) {
   });
 }
 
-function bindFlowReads(params: Binding): BoundAsyncManagedTaskFlowsRuntime {
+function bindManagedFlows(params: Binding): BoundAsyncManagedTaskFlowsRuntime {
   const binding = bind(params);
+  const prepareWrite = async () => {
+    const { store, context } = await readStore(false, true);
+    return <T>(
+      flowId: string,
+      mutate: (
+        scope: Pick<SqliteWorkerStore<OpenClawStateWorkerOperations>, "execute">,
+      ) => Promise<T>,
+    ) =>
+      store.runOpenClawStateWorkerOperation(context, (scope) =>
+        runTaskFlowRegistryWorkerMutation(
+          { admission: context.admission, flowId },
+          () => mutate(scope),
+          () => scope.execute({ type: "flows.current", input: { flowId } }),
+        ),
+      );
+  };
+  const createManagedResult = async (
+    input: Parameters<BoundAsyncManagedTaskFlowsRuntime["createManaged"]>[0],
+  ) => {
+    const snapshot = structuredClone(input);
+    const write = await prepareWrite();
+    const flow = buildFlowRecord({
+      ...snapshot,
+      ownerKey: binding.sessionKey,
+      requesterOrigin: binding.requesterOrigin,
+      syncMode: "managed",
+    });
+    try {
+      const created = await write(flow.flowId, (scope) =>
+        scope.execute({ type: "flows.createManaged", input: { flow } }),
+      );
+      return { flow: asManagedTaskFlowRecord(created) ?? null };
+    } catch (error) {
+      // Retirement can aggregate an uncertain operation with a cleanup error.
+      if (
+        collectNestedErrorCandidates(error).some(
+          (candidate) => extractErrorCode(candidate) === "outcome-unknown",
+        )
+      ) {
+        throw error;
+      }
+      return { flow: null, error };
+    }
+  };
+  const update = async (
+    mutation: ManagedTaskFlowMutation,
+    input: FlowRecordPatch & { flowId: string; expectedRevision: number },
+  ) => {
+    const snapshot = structuredClone(input);
+    const write = await prepareWrite();
+    const patch = buildManagedTaskFlowPatch(mutation, snapshot);
+    const result = await write(snapshot.flowId, (scope) =>
+      scope.execute({
+        type: "flows.updateManaged",
+        input: {
+          flowId: snapshot.flowId,
+          expectedRevision: snapshot.expectedRevision,
+          ownerKey: binding.sessionKey,
+          patch,
+        },
+      }),
+    );
+    return mapFlowUpdateResult(result);
+  };
+
   const read = async (lookup: "id" | "latest" | "resolve", token?: string) => {
     const { store, context } = await readStore(false, true);
     return store.executeOpenClawStateWorker(context, {
@@ -109,6 +220,76 @@ function bindFlowReads(params: Binding): BoundAsyncManagedTaskFlowsRuntime {
   };
   return {
     ...binding,
+    tryCreateManaged: async (input) => (await createManagedResult(input)).flow,
+    async createManaged(input) {
+      const result = await createManagedResult(input);
+      if (!result.flow) {
+        throw new Error("TaskFlow persistence failed.", { cause: result.error });
+      }
+      return result.flow;
+    },
+    setWaiting: (input) => update("setWaiting", input),
+    resume: (input) => update("resume", input),
+    finish: (input) => update("finish", input),
+    fail: (input) => update("fail", input),
+    requestCancel: (input) => update("requestCancel", input),
+    async runTask(input) {
+      const taskInput = structuredClone(input);
+      const { store, context } = await readStore(true, true);
+      const { runTaskRegistryWorkerOperation } =
+        await import("../../tasks/task-registry-worker-operation.js");
+      context.admission.assertCurrent();
+      const scope = {
+        taskId: crypto.randomUUID(),
+        flowId: taskInput.flowId.trim(),
+        runId: taskInput.runId?.trim(),
+        childSessionKey: taskInput.childSessionKey?.trim(),
+      };
+      let publicationTask: TaskRecord | undefined;
+      let creationOwner: SqliteWorkerNativeSettlementOwner | undefined;
+      const result = await store.runOpenClawStateWorkerOperation(context, (worker) =>
+        runTaskRegistryWorkerMutation(
+          {
+            scope,
+            admission: context.admission,
+            readEventTarget: () =>
+              readTaskCreationEventTarget(
+                creationOwner?.committed?.facts,
+                "flows.runTask",
+                scope.taskId,
+              ),
+            publicationRecords: () =>
+              new Map<string, TaskRecord>(
+                publicationTask ? [[publicationTask.taskId, publicationTask]] : [],
+              ),
+          },
+          async () => {
+            const receipt = await runTaskRegistryWorkerOperation(
+              context,
+              {
+                type: "flows.runTask",
+                input: {
+                  callerOwnerKey: binding.sessionKey,
+                  params: taskInput,
+                  taskId: scope.taskId,
+                  now: Date.now(),
+                },
+              },
+              () => context.admission.assertCurrent(),
+              (owner) => {
+                creationOwner = owner;
+              },
+            );
+            if (receipt.taskMutation === "created" || receipt.taskMutation === "updated") {
+              publicationTask = receipt.task;
+            }
+            return receipt;
+          },
+          () => worker.execute({ type: "tasks.mutationSnapshot", input: scope }),
+        ),
+      );
+      return mapFlowTaskRunResult(result);
+    },
     get: (flowId) => read("id", flowId),
     async list() {
       const { store, context } = await readStore(false, true);
@@ -127,11 +308,14 @@ function bindFlows(params: Binding): BoundAsyncTaskFlowsRuntime {
   const binding = bind(params);
   const read = async (lookup: "id" | "latest" | "resolve", token?: string) => {
     const { store, context } = await readStore(true, true);
-    const result = await store.executeOpenClawStateWorker(context, {
-      type: "flows.detail",
-      input: { ownerKey: binding.sessionKey, lookup, token },
+    return store.runOpenClawStateWorkerOperation(context, async (scope) => {
+      const result = await scope.execute({
+        type: "flows.detail",
+        input: { ownerKey: binding.sessionKey, lookup, token },
+      });
+      context.admission.assertCurrent();
+      return result ? mapTaskFlowDetail(result) : undefined;
     });
-    return result ? mapTaskFlowDetail(result) : undefined;
   };
   return {
     ...binding,
@@ -169,9 +353,12 @@ export function createRuntimeAsyncTasks(): PluginRuntimeAsyncTasks {
         bindFlows({ sessionKey: ctx.sessionKey ?? "", requesterOrigin: ctx.deliveryContext }),
     },
     managedFlows: {
-      bindSession: bindFlowReads,
+      bindSession: bindManagedFlows,
       fromToolContext: (ctx) =>
-        bindFlowReads({ sessionKey: ctx.sessionKey ?? "", requesterOrigin: ctx.deliveryContext }),
+        bindManagedFlows({
+          sessionKey: ctx.sessionKey ?? "",
+          requesterOrigin: ctx.deliveryContext,
+        }),
     },
   };
 }

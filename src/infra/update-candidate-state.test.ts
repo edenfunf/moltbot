@@ -14,7 +14,6 @@ import {
 } from "../state/openclaw-state-db.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 import { hasNodeErrorCode } from "./path-guards.js";
-import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
 import {
   copyUpdateCandidatePlugins,
   prepareUpdateCandidatePlugins,
@@ -111,9 +110,17 @@ it.each(["DELETE", "WAL"])(
         })),
       );
     const before = await artifacts();
+    const expectArtifactsUnchanged = async () => {
+      const after = await artifacts();
+      expect(after.map(({ entries }) => entries)).toEqual(before.map(({ entries }) => entries));
+      // Keep exact bytes without expanding whole databases through iterable equality.
+      for (const [index, { bytes }] of after.entries()) {
+        expect(bytes.equals(before[index]!.bytes)).toBe(true);
+      }
+    };
     const inspected = await readUpdateStateSchemaVersions({ stateDir: source, config: {} });
     expect(inspected.filter((entry) => entry.userVersion === 3)).toHaveLength(2);
-    expect(await artifacts()).toEqual(before);
+    await expectArtifactsUnchanged();
     const versions = await runSnapshotWorker({
       stateDir: source,
       targetStateDir: target,
@@ -131,7 +138,7 @@ it.each(["DELETE", "WAL"])(
         async (maintenance) => maintenance.assertOwned(),
       ),
     ).resolves.toBeUndefined();
-    expect(await artifacts()).toEqual(before);
+    await expectArtifactsUnchanged();
     const copiedRegistry = openNodeSqliteDatabase(path.join(target, "state", "openclaw.sqlite"));
     expect(copiedRegistry.prepare("SELECT * FROM agent_database_leases").all()).toEqual([]);
     expect(copiedRegistry.prepare("SELECT * FROM state_leases").all()).toEqual([]);
@@ -224,67 +231,6 @@ it("keeps absent stores explicit and observes newly created databases for rollba
   ).toBe(false);
   expect(updateStateSchemaVersionsMatch(after, before, candidate)).toBe(false);
   expect(updateStateSchemaVersionsMatch(after, after.toReversed(), candidate)).toBe(true);
-});
-
-it("inspects with the installed candidate and selected Node after the old package is removed", async () => {
-  const stateDir = path.join(root, "state-owner");
-  await createDatabase(path.join(stateDir, "state", "openclaw.sqlite"));
-  const previousRoot = path.join(root, "previous-package");
-  const candidateRoot = path.join(root, "candidate-package");
-  const worker = `
-    import path from "node:path";
-    import { DatabaseSync } from "node:sqlite";
-    let input = "";
-    for await (const chunk of process.stdin) input += chunk;
-    const file = path.join(JSON.parse(input).stateDir, "state", "openclaw.sqlite");
-    const db = new DatabaseSync(file, { readOnly: true });
-    try {
-      console.log(JSON.stringify([{ path: file, userVersion: db.prepare("PRAGMA user_version").get().user_version }]));
-    } finally {
-      db.close();
-    }
-  `;
-  for (const packageRoot of [previousRoot, candidateRoot]) {
-    const file = path.join(packageRoot, "dist/infra/update-candidate-state.worker.js");
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(path.join(packageRoot, "package.json"), '{"type":"module"}');
-    await fs.writeFile(file, worker);
-  }
-  const entrypoint = runtimeProcessEntrypoints.updateCandidateState;
-  const originalModuleUrl = entrypoint.currentModuleUrl;
-  Object.assign(entrypoint, {
-    currentModuleUrl: pathToFileURL(path.join(previousRoot, "dist/old-updater.js")).href,
-  });
-  try {
-    const before = await readUpdateStateSchemaVersions({ stateDir, config: {} });
-    expect(before).toEqual([
-      { path: path.join(stateDir, "state", "openclaw.sqlite"), userVersion: 3 },
-    ]);
-    await fs.rm(previousRoot, { recursive: true });
-    const selectedNodeMarker = path.join(root, "selected-node-ran");
-    let nodeRunner = process.execPath;
-    if (process.platform !== "win32") {
-      nodeRunner = path.join(root, "selected-node");
-      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-      await fs.writeFile(
-        nodeRunner,
-        `#!/bin/sh\nprintf selected > ${quote(selectedNodeMarker)}\nexec ${quote(process.execPath)} "$@"\n`,
-        { mode: 0o755 },
-      );
-    }
-    const after = await readUpdateStateSchemaVersions({
-      stateDir,
-      config: {},
-      root: candidateRoot,
-      nodeRunner,
-    });
-    expect(after).toEqual(before);
-    if (process.platform !== "win32") {
-      expect(await fs.readFile(selectedNodeMarker, "utf8")).toBe("selected");
-    }
-  } finally {
-    Object.assign(entrypoint, { currentModuleUrl: originalModuleUrl });
-  }
 });
 
 it.runIf(process.platform !== "win32")(
@@ -410,7 +356,7 @@ it.each([
     closeOpenClawStateDatabaseByPath(shared);
     const before = await fs.readFile(shared);
     await runSnapshotWorker({ stateDir: source, targetStateDir: target, config: {} });
-    expect(await fs.readFile(shared)).toEqual(before);
+    expect((await fs.readFile(shared)).equals(before)).toBe(true);
     expect(await fs.realpath(path.join(packageDir, "node_modules", "openclaw"))).toBe(liveHost);
     const copied = openNodeSqliteDatabase(path.join(target, "state", "openclaw.sqlite"));
     try {
@@ -446,7 +392,7 @@ it.each([
       );
       await fs.writeFile(copiedDependency, "changed in rehearsal");
       expect(await fs.readFile(path.join(dependency, "index.js"), "utf8")).toContain("preserved");
-      expect(await fs.readFile(shared)).toEqual(before);
+      expect((await fs.readFile(shared)).equals(before)).toBe(true);
     } finally {
       copied.close();
     }

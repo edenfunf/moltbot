@@ -18,6 +18,7 @@ const loadRemoteSkillsRuntimeModule = async () => await import("../skills/runtim
 /** Start early Gateway side runtimes before the main server is fully ready. */
 export async function startGatewayEarlyRuntime(params: {
   minimalTestGateway: boolean;
+  isClosing: () => boolean;
   updateCanary?: boolean;
   cfgAtStart: OpenClawConfig;
   port: number;
@@ -62,7 +63,10 @@ export async function startGatewayEarlyRuntime(params: {
   if (!params.minimalTestGateway) {
     await measureStartup(params.startupTrace, "runtime.early.task-state", async () => {
       const { ensureTaskRuntimeStateReady } = await import("../tasks/runtime-internal.js");
-      ensureTaskRuntimeStateReady();
+      await ensureTaskRuntimeStateReady();
+      const { reconcileRetainedHarnessCompletionDeliveries } =
+        await import("../agents/agent-harness-completion-delivery.js");
+      reconcileRetainedHarnessCompletionDeliveries();
     });
   }
   // Startup failure can occur immediately after discovery; publish its owner first.
@@ -165,11 +169,14 @@ export async function startGatewayEarlyRuntime(params: {
   const startMaintenance = async (activeWorkInspectors: Partial<GatewayActiveWorkInspectors>) => {
     // Defer periodic maintenance until the caller has finished ready-state
     // wiring, but keep the lazy import owned by this early-runtime bundle.
-    if (params.minimalTestGateway) {
+    if (params.minimalTestGateway || params.isClosing()) {
       return null;
     }
     return await measureStartup(params.startupTrace, "post-ready.maintenance", async () => {
       const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+      if (params.isClosing()) {
+        return null;
+      }
       return startGatewayMaintenanceTimers({
         broadcast: params.broadcast,
         nodeSendToAllSubscribed: params.nodeSendToAllSubscribed,

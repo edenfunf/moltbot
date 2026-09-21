@@ -4,9 +4,9 @@ import {
   buildClawHubTrustErrorDetails,
   ErrorCodes,
   errorShape,
+  type SkillsInstallParams,
+  type SkillsUpdateParams,
   validateSkillsBinsParams,
-  validateSkillsCuratorActionParams,
-  validateSkillsCuratorStatusParams,
   validateSkillsDetailParams,
   validateSkillsInstallParams,
   validateSkillsProposalActionParams,
@@ -22,17 +22,10 @@ import {
   validateSkillsSearchParams,
   validateSkillsSecurityVerdictsParams,
   validateSkillsSkillCardParams,
-  validateSkillsStatusParams,
   validateSkillsUpdateParams,
   validateSkillsWorkshopReadParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import type { SkillLibrarySelection } from "../../../packages/gateway-protocol/src/schema/skill-library.js";
-import {
-  listAgentIds,
-  resolveAgentWorkspaceDir,
-  tryResolveAmbientOwnerAgentId,
-} from "../../agents/agent-scope-config.js";
-import { resolveNodeExecEligibility } from "../../agents/exec-defaults.js";
+import { listAgentIds, resolveAgentWorkspaceDir } from "../../agents/agent-scope-config.js";
 import { redactConfigObject } from "../../config/redact-snapshot.js";
 import { fetchClawHubSkillDetail } from "../../infra/clawhub-skills.js";
 import { formatErrorMessage } from "../../infra/errors.js";
@@ -41,28 +34,19 @@ import { normalizeAgentId } from "../../routing/session-key.js";
 import { getOrCreatePromise } from "../../shared/lazy-promise.js";
 import { updateSkillConfigEntry } from "../../skills/config/mutations.js";
 import { collectSkillBins } from "../../skills/discovery/bins.js";
-import { buildWorkspaceSkillStatus } from "../../skills/discovery/status.js";
-import { loadSkillLibrarySelection } from "../../skills/library/selection.js";
 import { parseRequestedClawHubSkillRef } from "../../skills/lifecycle/clawhub-store.js";
 import {
   installSkillFromClawHub,
-  readLocalSkillCardContentSync,
   searchSkillsFromClawHub,
   updateSkillsFromClawHub,
 } from "../../skills/lifecycle/clawhub.js";
 import { installSkill } from "../../skills/lifecycle/install.js";
 import { installUploadedSkillArchive } from "../../skills/lifecycle/upload-install.js";
-import { loadWorkspaceSkills } from "../../skills/loading/workspace-skill-loader.js";
-import { ensureSkillsWatcher } from "../../skills/runtime/refresh.js";
-import { getRemoteSkillEligibility } from "../../skills/runtime/remote.js";
+import { prepareWorkspaceSkillEntries } from "../../skills/loading/workspace-skill-loader.js";
 import {
   collectClawHubVerdictTargets,
   fetchOpenClawSkillSecurityVerdicts,
 } from "../../skills/security/clawhub-verdicts.js";
-import {
-  getSkillCuratorStatus,
-  SKILL_LIFECYCLE_CURATION_RETIRED_MESSAGE,
-} from "../../skills/workshop/curator.js";
 import { resolveSkillProposalName } from "../../skills/workshop/frontmatter.js";
 import { assertExpectedRevisionHash } from "../../skills/workshop/service-evaluation.js";
 import {
@@ -83,17 +67,17 @@ import {
   listWritableWorkshopSkillSummaries,
   readWritableWorkshopSkill,
 } from "../../skills/workshop/workspace-skill-read.js";
-import { authorizeSessionSharingTarget, resolveSessionSharingTarget } from "../session-sharing.js";
+import { skillsCuratorHandlers } from "./skills-curator.js";
 import { skillsLibraryHandlers } from "./skills-library.js";
 import { skillProposalHistoryHandlers } from "./skills-proposal-history.js";
+import { buildRemoteAwareWorkspaceSkillStatus, handleSkillsStatus } from "./skills-status.js";
 import { skillsUploadHandlers } from "./skills-upload.js";
 import {
   resolveSkillsAgentWorkspace,
   runSkillsProposalWorkspaceHandler,
   SKILL_PROPOSAL_RESPONSE_HANDLED,
-  type ResolvedSkillsWorkspace,
 } from "./skills-workspace-handler.js";
-import type { GatewayRequestHandlerOptions, GatewayRequestHandlers, RespondFn } from "./types.js";
+import type { GatewayRequestHandlerOptions, GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
 type ClawHubInstallResult = Awaited<ReturnType<typeof installSkillFromClawHub>>;
@@ -134,52 +118,6 @@ function installClawHubSkillDeduped(params: ClawHubInstallParams): Promise<ClawH
   return getOrCreatePromise(clawHubInstallsInFlight, key, () => installSkillFromClawHub(params), {
     evictOnSettled: true,
   });
-}
-
-function buildRemoteAwareWorkspaceSkillStatus(
-  resolved: ResolvedSkillsWorkspace,
-  selections?: SkillLibrarySelection[],
-) {
-  // Remote skill availability depends on the agent's executable-node surface,
-  // not only the workspace contents, so status reports include live eligibility.
-  const nodeSkills = resolveNodeExecEligibility({
-    cfg: resolved.cfg,
-    agentId: resolved.agentId,
-  });
-  return buildWorkspaceSkillStatus(resolved.workspaceDir, {
-    ...(selections?.length
-      ? {
-          entries: [
-            ...loadWorkspaceSkills(resolved.workspaceDir, {
-              config: resolved.cfg,
-              agentId: resolved.agentId,
-              agentSkillFilter: "ignore",
-            }),
-            ...loadSkillLibrarySelection(selections),
-          ],
-        }
-      : {}),
-    config: resolved.cfg,
-    agentId: resolved.agentId,
-    eligibility: {
-      nodeSkills,
-      remote: getRemoteSkillEligibility({ advertiseExecNode: nodeSkills.canExec }),
-    },
-  });
-}
-
-function respondSkillWorkshopError(respond: RespondFn, err: unknown) {
-  respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, formatErrorMessage(err)));
-}
-
-function respondRetiredSkillCuratorAction(
-  { params, respond }: GatewayRequestHandlerOptions,
-  method: `skills.curator.${"pin" | "restore" | "unpin"}`,
-): void {
-  if (!assertValidParams(params, validateSkillsCuratorActionParams, method, respond)) {
-    return;
-  }
-  respondSkillWorkshopError(respond, new Error(SKILL_LIFECYCLE_CURATION_RETIRED_MESSAGE));
 }
 
 function collectClawHubTrustWarnings(results: Array<{ warning?: string }>): string[] {
@@ -244,48 +182,11 @@ async function forwardSkillWorkshopRevisionToChatSend(
 
 /** Gateway request handlers for skill status, catalogs, installs, updates, and workshop proposals. */
 export const skillsHandlers: GatewayRequestHandlers = {
+  ...skillsCuratorHandlers,
   ...skillsLibraryHandlers,
   ...skillsUploadHandlers,
   ...skillProposalHistoryHandlers,
-  "skills.status": ({ params, respond, context, client }) => {
-    if (!assertValidParams(params, validateSkillsStatusParams, "skills.status", respond)) {
-      return;
-    }
-    const agentId = params.agentId ?? tryResolveAmbientOwnerAgentId(context.getRuntimeConfig());
-    const resolved = resolveSkillsAgentWorkspace({ ...params, agentId }, context);
-    if (!resolved.ok) {
-      respond(false, undefined, resolved.error);
-      return;
-    }
-    const target = params.sessionKey
-      ? resolveSessionSharingTarget({
-          cfg: resolved.cfg,
-          sessionKey: params.sessionKey,
-          agentId: resolved.agentId,
-        })
-      : undefined;
-    if (params.sessionKey && !target) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "Session not found."));
-      return;
-    }
-    if (target) {
-      const denied = authorizeSessionSharingTarget({ cfg: resolved.cfg, client, target });
-      if (denied) {
-        respond(false, undefined, denied);
-        return;
-      }
-    }
-    ensureSkillsWatcher({
-      workspaceDir: resolved.workspaceDir,
-      config: resolved.cfg,
-      agentId: resolved.agentId,
-    });
-    const report = buildRemoteAwareWorkspaceSkillStatus(
-      resolved,
-      target?.entry.skillLibrarySelections,
-    );
-    respond(true, report, undefined);
-  },
+  "skills.status": handleSkillsStatus,
   "skills.securityVerdicts": async ({ params, respond, context }) => {
     if (
       !assertValidParams(
@@ -303,7 +204,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       return;
     }
     try {
-      const report = buildRemoteAwareWorkspaceSkillStatus(resolved);
+      const { report } = await buildRemoteAwareWorkspaceSkillStatus(resolved);
       const targets = collectClawHubVerdictTargets(report);
       if (targets.length === 0) {
         respond(true, { schema: "openclaw.skills.security-verdicts.v1", items: [] }, undefined);
@@ -315,7 +216,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatErrorMessage(err)));
     }
   },
-  "skills.skillCard": ({ params, respond, context }) => {
+  "skills.skillCard": async ({ params, respond, context }) => {
     if (!assertValidParams(params, validateSkillsSkillCardParams, "skills.skillCard", respond)) {
       return;
     }
@@ -324,10 +225,11 @@ export const skillsHandlers: GatewayRequestHandlers = {
       respond(false, undefined, resolved.error);
       return;
     }
-    const report = buildWorkspaceSkillStatus(resolved.workspaceDir, {
-      config: resolved.cfg,
-      agentId: resolved.agentId,
-    });
+    const { report, files } = await buildRemoteAwareWorkspaceSkillStatus(
+      resolved,
+      undefined,
+      params.skillKey,
+    );
     const skill = report.skills.find((candidate) => candidate.skillKey === params.skillKey);
     if (!skill?.skillCard) {
       respond(
@@ -337,7 +239,9 @@ export const skillsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const content = readLocalSkillCardContentSync(skill.baseDir);
+    const content = files.find(
+      (file) => file.name === skill.name && file.filePath === skill.filePath,
+    )?.skillCard?.content;
     if (content === undefined) {
       respond(
         false,
@@ -358,7 +262,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       undefined,
     );
   },
-  "skills.bins": ({ params, respond, context }) => {
+  "skills.bins": async ({ params, respond, context }) => {
     if (!assertValidParams(params, validateSkillsBinsParams, "skills.bins", respond)) {
       return;
     }
@@ -366,11 +270,14 @@ export const skillsHandlers: GatewayRequestHandlers = {
     const bins = new Set<string>();
     for (const agentId of listAgentIds(cfg)) {
       // Node inventories include missing requirements, not only locally usable skills.
-      const entries = loadWorkspaceSkills(resolveAgentWorkspaceDir(cfg, agentId), {
-        config: cfg,
-        agentId,
-        agentSkillFilter: "ignore",
-      });
+      const { entries } = await prepareWorkspaceSkillEntries(
+        resolveAgentWorkspaceDir(cfg, agentId),
+        {
+          config: cfg,
+          agentId,
+          agentSkillFilter: "ignore",
+        },
+      );
       for (const bin of collectSkillBins(entries)) {
         bins.add(bin);
       }
@@ -427,25 +334,6 @@ export const skillsHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatErrorMessage(err)));
     }
   },
-  "skills.curator.status": async ({ params, respond }) => {
-    if (
-      !assertValidParams(
-        params,
-        validateSkillsCuratorStatusParams,
-        "skills.curator.status",
-        respond,
-      )
-    ) {
-      return;
-    }
-    respond(true, getSkillCuratorStatus(), undefined);
-  },
-  "skills.curator.pin": (options) =>
-    respondRetiredSkillCuratorAction(options, "skills.curator.pin"),
-  "skills.curator.unpin": (options) =>
-    respondRetiredSkillCuratorAction(options, "skills.curator.unpin"),
-  "skills.curator.restore": (options) =>
-    respondRetiredSkillCuratorAction(options, "skills.curator.restore"),
   "skills.proposals.list": async ({ params, respond, context }) => {
     await runSkillsProposalWorkspaceHandler({
       method: "skills.proposals.list",
@@ -714,6 +602,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
     if (!assertValidParams(params, validateSkillsInstallParams, "skills.install", respond)) {
       return;
     }
+    const p: SkillsInstallParams = params;
     const resolved = resolveSkillsAgentWorkspace(params, context);
     if (!resolved.ok) {
       respond(false, undefined, resolved.error);
@@ -723,13 +612,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
     const workspaceDirRaw = resolved.workspaceDir;
     // Skill installs are intentionally routed by source; each source owns its
     // validation, provenance checks, and result payload shape.
-    if (params && typeof params === "object" && "source" in params && params.source === "clawhub") {
-      const p = params as {
-        source: "clawhub";
-        slug: string;
-        version?: string;
-        force?: boolean;
-      };
+    if ("source" in p && p.source === "clawhub") {
       const result = await installClawHubSkillDeduped({
         workspaceDir: workspaceDirRaw,
         slug: p.slug,
@@ -764,15 +647,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    if (params && typeof params === "object" && "source" in params && params.source === "upload") {
-      const p = params as {
-        source: "upload";
-        uploadId: string;
-        slug: string;
-        force?: boolean;
-        sha256?: string;
-        timeoutMs?: number;
-      };
+    if ("source" in p && p.source === "upload") {
       const result = await installUploadedSkillArchive({
         uploadId: p.uploadId,
         slug: p.slug,
@@ -801,11 +676,6 @@ export const skillsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as {
-      name: string;
-      installId: string;
-      timeoutMs?: number;
-    };
     const result = await installSkill({
       workspaceDir: workspaceDirRaw,
       agentId: resolved.agentId,
@@ -824,13 +694,8 @@ export const skillsHandlers: GatewayRequestHandlers = {
     if (!assertValidParams(params, validateSkillsUpdateParams, "skills.update", respond)) {
       return;
     }
-    if (params && typeof params === "object" && "source" in params && params.source === "clawhub") {
-      const p = params as {
-        source: "clawhub";
-        slug?: string;
-        all?: boolean;
-        force?: boolean;
-      };
+    const p: SkillsUpdateParams = params;
+    if ("source" in p) {
       if (!p.slug && !p.all) {
         respond(
           false,
@@ -885,12 +750,6 @@ export const skillsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as {
-      skillKey: string;
-      enabled?: boolean;
-      apiKey?: string;
-      env?: Record<string, string>;
-    };
     const updated = await updateSkillConfigEntry(p);
     respond(
       true,

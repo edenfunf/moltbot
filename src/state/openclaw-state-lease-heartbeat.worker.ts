@@ -7,6 +7,7 @@ import {
   acquireStateDatabaseCoordinator,
   StateDatabaseCoordinatorContentionError,
 } from "../infra/state-database-coordinator.js";
+import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
 import { openTrackedStateDatabase, closeTrackedStateDatabase } from "./openclaw-state-db-handle.js";
 import {
   leaseHeartbeatState as state,
@@ -36,8 +37,10 @@ function withLifecycleCoordinator<T>(label: string, operation: () => T): T {
 function openHeartbeatDatabase() {
   // The parent's bound is a retry deadline, not ownership. Renewal below still
   // checks the exact current persisted owner/expiry before changing the row.
-  const deadline = Math.min(params.expiresAt, Date.now() + LEASE_HEARTBEAT_START_TIMEOUT_MS);
-  while (Date.now() < deadline && Atomics.load(shared, state.status) === state.starting) {
+  const deadline = Date.now() + LEASE_HEARTBEAT_START_TIMEOUT_MS;
+  const remaining = () =>
+    Math.min(deadline, Number(Atomics.load(shared, state.expiresAt))) - Date.now();
+  while (remaining() > 0 && Atomics.load(shared, state.status) === state.starting) {
     try {
       return withLifecycleCoordinator("maintenance heartbeat open", () =>
         openTrackedStateDatabase(params.path, { existingOnly: params.existingOnly }),
@@ -47,16 +50,12 @@ function openHeartbeatDatabase() {
         throw error;
       }
     }
-    Atomics.wait(
-      shared,
-      state.status,
-      state.starting,
-      Math.max(1, Math.min(25, deadline - Date.now())),
-    );
+    Atomics.wait(shared, state.status, state.starting, Math.max(1, Math.min(25, remaining())));
   }
   throw new Error("state lease heartbeat startup deadline expired or owner stopped");
 }
 const db = openHeartbeatDatabase();
+let processOwner = params.processOwner;
 let heartbeat: ReturnType<typeof setTimeout> | undefined;
 const lose = () => {
   Atomics.compareExchange(shared, state.status, state.starting, state.lost);
@@ -72,6 +71,16 @@ const renew = () => {
   }
   let expiresAt: number | undefined;
   try {
+    // Native lookup can be slow; keep it outside write admission and startup readiness.
+    if (
+      processOwner?.identity.startedAt === null &&
+      Atomics.load(shared, state.status) === state.ready
+    ) {
+      processOwner.identity.startedAt = getFileLockProcessStartTime(
+        processOwner.identity.pid,
+        processOwner.env,
+      );
+    }
     expiresAt = withLifecycleCoordinator("maintenance heartbeat renewal", () =>
       runWithSqliteBusyTimeout(
         db,
@@ -83,13 +92,21 @@ const renew = () => {
               if (Atomics.load(shared, state.status) >= state.closed) {
                 return undefined;
               }
-              return renewOpenClawStateLeaseInTransaction(db, params.identity, params.leaseMs);
+              return renewOpenClawStateLeaseInTransaction(
+                db,
+                params.identity,
+                params.leaseMs,
+                processOwner?.identity,
+              );
             },
             { logger: { warn() {} } },
           ),
         { lockFailureReporting: "suppress" },
       ),
     );
+    if (expiresAt !== undefined && processOwner?.identity.startedAt != null) {
+      processOwner = undefined;
+    }
   } catch (error) {
     if (!(error instanceof StateDatabaseCoordinatorContentionError) && !isSqliteLockError(error)) {
       lose();

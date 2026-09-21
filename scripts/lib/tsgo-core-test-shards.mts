@@ -68,6 +68,37 @@ export const TSGO_CORE_TEST_SHARDS = [
     config: "test/tsconfig/tsconfig.test.packages.json",
     sparseRoots: ["packages", "src", "ui/src"],
   },
+  {
+    name: "plugin-sdk",
+    group: "src",
+    config: "test/tsconfig/tsconfig.core.test.plugin-sdk.json",
+  },
+  // Append new splits to preserve the existing CI stripe assignments.
+  {
+    name: "commands-doctor",
+    group: "src",
+    config: "test/tsconfig/tsconfig.core.test.commands-doctor.json",
+  },
+  {
+    name: "cli-update",
+    group: "src",
+    config: "test/tsconfig/tsconfig.core.test.cli-update.json",
+  },
+  {
+    name: "gateway-methods",
+    group: "src",
+    config: "test/tsconfig/tsconfig.core.test.gateway-methods.json",
+  },
+  {
+    name: "ui-chat",
+    group: "ui",
+    config: "test/tsconfig/tsconfig.core.test.ui-chat.json",
+  },
+  {
+    name: "agents-sessions",
+    group: "src",
+    config: "test/tsconfig/tsconfig.core.test.agents-sessions.json",
+  },
 ] as const;
 
 export const TSGO_CORE_GRAPHS = [

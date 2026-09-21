@@ -13,14 +13,16 @@ import {
   ensureMemoryChunkProvenance,
   loadSqliteVecExtension,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { deleteSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
+import { deleteSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
+import { withSessionTranscriptWriteLock } from "openclaw/plugin-sdk/session-transcript-runtime";
 import * as sqliteRuntime from "openclaw/plugin-sdk/sqlite-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { recordMemorySessionTombstones } from "../memory-entry-origins.js";
-import { MemoryIndexRevisionConflictError } from "./manager-db.js";
+import { seedMemoryForgetTombstones } from "../test-helpers.js";
+import { MemoryIndexRevisionConflictError } from "./manager-db-kernel.js";
 import { createManagerIndexFixture } from "./manager-index.test-support.js";
-import { closeAllMemoryIndexManagers, MemoryIndexManager } from "./manager.js";
+import { closeAllMemoryIndexManagers } from "./manager-runtime.js";
+import { MemoryIndexManager } from "./manager.js";
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
 
@@ -122,6 +124,10 @@ describe("memory manager shared agent connection", () => {
     } finally {
       damaged.close();
     }
+    // Replaced files cannot reuse the original connection's clean integrity receipt.
+    const replacementPath = `${shared.path}.replacement`;
+    await fs.copyFile(shared.path, replacementPath);
+    await fs.rename(replacementPath, shared.path);
 
     expect(() => sqliteRuntime.openOpenClawAgentDatabase({ agentId: "main" })).toThrow(
       /foreign_key_check/,
@@ -131,23 +137,25 @@ describe("memory manager shared agent connection", () => {
     expect(result.error).toMatch(/foreign_key_check/);
   });
 
-  it("retains the borrowed connection through agent-cache eviction until manager close", async () => {
-    const shared = sqliteRuntime.openOpenClawAgentDatabase({ agentId: "main" });
-    const manager = await fixture.getFreshManager(createConfig());
-    // Cross the shared owner's 64-handle LRU cap while the manager is idle.
-    for (let index = 0; index < 65; index += 1) {
-      sqliteRuntime.openOpenClawAgentDatabase({ agentId: `churn-${index}` });
-    }
+  it("retains a borrowed connection until thirty idle minutes after manager close", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const shared = sqliteRuntime.openOpenClawAgentDatabase({ agentId: "main" });
+      const manager = await fixture.getFreshManager(createConfig());
+      vi.advanceTimersByTime(30 * 60_000);
 
-    expect(shared.db.isOpen).toBe(true);
-    expect(managerDatabase(manager) === shared.db).toBe(true);
-    await manager.sync({ reason: "test", force: true });
-    expect((await manager.search("Alpha")).length).toBeGreaterThan(0);
-    await manager.close();
-    for (let index = 0; index < 65; index += 1) {
-      sqliteRuntime.openOpenClawAgentDatabase({ agentId: `released-${index}` });
+      expect(shared.db.isOpen).toBe(true);
+      expect(managerDatabase(manager) === shared.db).toBe(true);
+      await manager.sync({ reason: "test", force: true });
+      expect((await manager.search("Alpha")).length).toBeGreaterThan(0);
+      await manager.close();
+      vi.advanceTimersByTime(30 * 60_000 - 1);
+      expect(shared.db.isOpen).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(shared.db.isOpen).toBe(false);
+    } finally {
+      vi.useRealTimers();
     }
-    expect(shared.db.isOpen).toBe(false);
   });
 
   it("loads vectors on the shared connection with native loading disabled between calls", async () => {
@@ -169,7 +177,7 @@ describe("memory manager shared agent connection", () => {
     );
   });
 
-  it("shares retained manager handles and trims released handles on the next open", async () => {
+  it("shares more than sixty-four manager handles without evicting released handles on open", async () => {
     const cfg = createConfig();
     const agents = Array.from({ length: 65 }, (_, index) => ({
       id: `retained-${index}`,
@@ -196,7 +204,7 @@ describe("memory manager shared agent connection", () => {
     expect({ retained, afterRelease, afterOpen: countOpenHandles() }).toEqual({
       retained: agents.length,
       afterRelease: agents.length,
-      afterOpen: 64,
+      afterOpen: agents.length + 1,
     });
   });
 
@@ -212,6 +220,62 @@ describe("memory manager shared agent connection", () => {
     await first.close();
     await replacement.sync({ reason: "test", force: true });
     expect((await replacement.search("Alpha")).length).toBeGreaterThan(0);
+  });
+
+  it("rejects queued maintenance without reopening its retired source connection", async () => {
+    const cfg = createConfig();
+    const source = await fixture.getFreshManager(cfg, "cli");
+    const sourcePath = source.status().dbPath;
+    const target = {
+      agentId: "main",
+      sessionKey: "agent:main:maintenance-admission",
+      sessionId: "maintenance-admission",
+    };
+    await upsertSessionEntry({
+      ...target,
+      entry: { sessionId: target.sessionId, updatedAt: Date.now() },
+    });
+    const entered = createDeferred<void>();
+    const released = createDeferred<void>();
+    const queued = createDeferred<void>();
+    const writer = withSessionTranscriptWriteLock(target, async () => {
+      entered.resolve();
+      await released.promise;
+      closeOpenClawAgentDatabasesForTest();
+    });
+    await entered.promise;
+    const admit = sqliteRuntime.withOpenClawAgentDatabaseWrite;
+    vi.spyOn(sqliteRuntime, "withOpenClawAgentDatabaseWrite").mockImplementation(
+      (options, write, expectedDatabase) => {
+        const result = admit(options, write, expectedDatabase);
+        queued.resolve();
+        return result;
+      },
+    );
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const creating = MemoryIndexManager.get({
+      cfg,
+      agentId: "main",
+      purpose: "maintenance",
+      maintenanceSource: source,
+    });
+    void creating.catch(() => undefined);
+    try {
+      await Promise.race([queued.promise, creating]);
+      released.resolve();
+      await expect(creating).rejects.toThrow(/connection is unavailable|closed or changed/);
+      expect(
+        prepare.mock.contexts.filter(
+          (database) =>
+            database instanceof DatabaseSync &&
+            database.isOpen &&
+            database.location() === sourcePath,
+        ),
+      ).toEqual([]);
+    } finally {
+      released.resolve();
+      await Promise.allSettled([writer, creating]);
+    }
   });
 
   it("serves published hits while dirty maintenance setup meets a separate writer lock", async () => {
@@ -487,7 +551,7 @@ describe("memory manager shared agent connection", () => {
       expect(session).toBeDefined();
       Reflect.set(manager, "sessionsDirty", true);
       if (scenario === "deleted-session") {
-        recordMemorySessionTombstones({ agentId: "main", sessionIds: [sessionId] });
+        seedMemoryForgetTombstones({ agentId: "main", sessionIds: [sessionId] });
         Reflect.set(manager, "sessionsReconcileDirty", true);
       } else {
         shared.db
@@ -501,6 +565,7 @@ describe("memory manager shared agent connection", () => {
     const writer = new DatabaseSync(shared.path);
     writer.exec("BEGIN IMMEDIATE");
     const started = performance.now();
+    const writerReleased = createDeferred<void>();
     const observedCacheCounts = new Set<number>();
     let observeCacheTimer: NodeJS.Immediate | undefined;
     const observeCache = () => {
@@ -516,12 +581,15 @@ describe("memory manager shared agent connection", () => {
       if (scenario === "cache-prune") {
         observeCache();
       }
+      writerReleased.resolve();
     }, 100);
     const sync = manager.sync({ reason: sessionWork ? "session-delta" : "watch" });
+    void sync.catch(() => undefined);
     try {
-      const [results] = await Promise.all([reader.search("Alpha"), sync]);
+      const [results] = await Promise.all([reader.search("Alpha"), writerReleased.promise]);
       expect(results.some((result) => result.path === "memory/2026-01-12.md")).toBe(true);
       expect(performance.now() - started).toBeLessThan(1000);
+      await sync;
       if (scenario === "deleted-memory") {
         expect(
           shared.db

@@ -36,8 +36,8 @@ import {
 import { mintSecretSentinel } from "../../secrets/sentinel.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import type { UserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.types.js";
-import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
+import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
+import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
 import {
   createOpenClawTestState,
   type OpenClawTestState,
@@ -51,6 +51,10 @@ import {
   type PreparedAgentRunAdmission,
 } from "../admitted-run-context.js";
 import { isHostScopedAgentToolActive } from "../agent-tools.ring-zero-context.js";
+import {
+  createApiKeyCredential,
+  createAuthProfileStoreFixture,
+} from "../auth-profiles/credential-fixtures.test-support.js";
 import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import {
   createModelGenerationFixture,
@@ -68,21 +72,23 @@ import {
 } from "../embedded-agent-runner/runs.js";
 import { createEmbeddedRunHandle } from "../embedded-agent-runner/runs.test-support.js";
 import { createZeroUsageFixture } from "../test-helpers/usage-fixtures.js";
+import { attachToolAllowlistIntersection } from "../tool-policy.js";
 import { getGatewayToolCallerIdentity } from "../tools/gateway-caller-context.js";
 import { callGatewayTool } from "../tools/gateway.js";
 import type { SystemAgentToolOptions } from "../tools/system-agent-tool.js";
 import { maybeCompactAgentHarnessSession as maybeCompactAgentHarnessSessionImpl } from "./compaction.js";
 import type { ContextEngineLogicalTurnLease } from "./context-engine-logical-turn.js";
+import { resolveAgentHarnessNativeToolPolicyRestricted } from "./execution-environment.js";
 import { resolveAgentHarnessPolicy } from "./policy.js";
-import { clearAgentHarnesses, registerAgentHarness } from "./registry.js";
+import {
+  clearAgentHarnesses,
+  getRegisteredAgentHarness,
+  registerAgentHarness,
+} from "./registry.js";
 import { ensureSelectedAgentHarnessPlugin } from "./runtime-plugin.js";
 import { resolveAgentHarnessDeliveryDefaults } from "./selection-decision.js";
 import {
-  agentHarnessBuildsOpenClawTools,
-  agentHarnessExposesOpenClawTools,
-  resolveAgentHarnessNativeToolPolicyRestricted,
   resolveAvailableAgentHarnessPolicy,
-  resolvePluginHarnessPolicyToolsAllow,
   runAgentHarnessAttempt,
   runAgentHarnessSettledTurnFinalization,
   selectAgentHarness,
@@ -150,17 +156,6 @@ function createTranscriptRecorder(
     persistFallback: async () => undefined,
   };
 }
-
-it("identifies harnesses that expose OpenClaw tools", () => {
-  expect(agentHarnessBuildsOpenClawTools("openclaw")).toBe(false);
-  expect(agentHarnessBuildsOpenClawTools("codex")).toBe(true);
-  expect(agentHarnessBuildsOpenClawTools("copilot")).toBe(true);
-  expect(agentHarnessBuildsOpenClawTools("custom")).toBe(false);
-  expect(agentHarnessExposesOpenClawTools("openclaw")).toBe(true);
-  expect(agentHarnessExposesOpenClawTools("codex")).toBe(true);
-  expect(agentHarnessExposesOpenClawTools("copilot")).toBe(true);
-  expect(agentHarnessExposesOpenClawTools("custom")).toBe(false);
-});
 
 vi.mock("./builtin-openclaw.js", () => ({
   createOpenClawAgentHarness: (): AgentHarness => {
@@ -234,10 +229,9 @@ beforeEach(async () => {
   );
   clearAgentHarnesses();
   compactAuthMocks.ensureAuthProfileStore.mockReturnValue({ version: 1, profiles: {} });
-  compactAuthMocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-    version: 1,
-    profiles: {},
-  });
+  compactAuthMocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+    createAuthProfileStoreFixture({}),
+  );
   compactAuthMocks.resolveModelAsync.mockResolvedValue({
     model: { id: "gpt-5.5", provider: "openai" },
   });
@@ -274,10 +268,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeOpenClawAgentDatabasesAsync();
   vi.unstubAllEnvs();
   clearRuntimeConfigSnapshot();
-  closeOpenClawAgentDatabasesForTest();
-  closeOpenClawStateDatabaseForTest();
+  await closeStateDatabaseForTest();
   trajectoryTempDirs.cleanup();
   selectionAdmission.close();
   resetAgentRunRegistryForTest();
@@ -1138,9 +1132,18 @@ describe("runAgentHarnessAttempt", () => {
     ]);
   });
 
-  it.each(["complete", "missing admission", "missing terminal"] as const)(
-    "records native terminal facts only with complete anchors: %s",
-    async (boundary) => {
+  it.each([
+    { boundary: "complete", selection: "host", ownership: "none" },
+    { boundary: "missing admission", selection: "host", ownership: "none" },
+    { boundary: "missing terminal", selection: "host", ownership: "none" },
+    { boundary: "complete", selection: "native different", ownership: "native" },
+    { boundary: "complete", selection: "native same", ownership: "native" },
+    { boundary: "complete", selection: "native different", ownership: "host" },
+    { boundary: "complete", selection: "host", ownership: "native" },
+    { boundary: "complete", selection: "native different", ownership: "none" },
+  ] as const)(
+    "records terminal context for $selection with $ownership ownership only with complete anchors: $boundary",
+    async ({ boundary, selection, ownership }) => {
       const admission = {
         ...createTranscriptAnchor("user-1", 1, 0),
         logicalTurnId: "heartbeat-turn",
@@ -1148,6 +1151,13 @@ describe("runAgentHarnessAttempt", () => {
       };
       const terminal = createTranscriptAnchor("assistant-1", 2, 1);
       const onContextEngineTurnCandidate = vi.fn();
+      const params = createAttemptParams(providerRuntimeConfig("codex", "codex"));
+      const runtimeModelSelection =
+        selection === "host"
+          ? undefined
+          : selection === "native same"
+            ? { provider: params.provider, model: params.modelId }
+            : { provider: "native-provider", model: "native-model" };
       registerAgentHarness(
         {
           id: "codex",
@@ -1155,12 +1165,16 @@ describe("runAgentHarnessAttempt", () => {
           supports: () => ({ supported: true, priority: 100 }),
           runAttempt: async () => ({
             ...createAttemptResult("session-1"),
+            ...(runtimeModelSelection ? { runtimeModelSelection } : {}),
             contextEngineTerminalAnchor: boundary === "missing terminal" ? undefined : terminal,
           }),
         },
         { ownerPluginId: "codex" },
       );
-      const params = createAttemptParams(providerRuntimeConfig("codex", "codex"));
+      const registration = getRegisteredAgentHarness("codex");
+      if (!registration) {
+        throw new Error("expected registered Codex harness");
+      }
       params.agentHarnessRuntimeOverride = "codex";
       params.sessionKey = admission.sessionKey;
       params.sessionTarget = {
@@ -1177,9 +1191,23 @@ describe("runAgentHarnessAttempt", () => {
         boundary === "missing admission" ? undefined : createTranscriptRecorder(admission);
       params.onContextEngineTurnCandidate = onContextEngineTurnCandidate;
 
-      await runAgentHarnessAttempt(params);
+      const nativeSessionRuntime =
+        ownership === "none"
+          ? undefined
+          : {
+              harness: registration.harness,
+              ...(ownership === "native"
+                ? { auth: "native" as const }
+                : {
+                    auth: "host" as const,
+                    modelRef: { provider: params.provider, model: params.modelId },
+                  }),
+              assertCurrent: async () => {},
+            };
+      await runAgentHarnessAttempt(params, nativeSessionRuntime);
 
       if (boundary === "complete") {
+        expect(onContextEngineTurnCandidate).toHaveBeenCalledOnce();
         expect(onContextEngineTurnCandidate).toHaveBeenCalledWith(
           expect.objectContaining({
             boundary: { admission, terminal },
@@ -1187,12 +1215,18 @@ describe("runAgentHarnessAttempt", () => {
             promptError: false,
             aborted: false,
             yieldAborted: false,
-            runtimeContext: {
-              provider: params.provider,
-              modelId: params.modelId,
-              modelContextWindow: 200_000,
-              tokenBudget: 180_000,
-            },
+            runtimeContext:
+              nativeSessionRuntime && runtimeModelSelection
+                ? {
+                    provider: runtimeModelSelection.provider,
+                    modelId: runtimeModelSelection.model,
+                  }
+                : {
+                    provider: params.provider,
+                    modelId: params.modelId,
+                    modelContextWindow: 200_000,
+                    tokenBudget: 180_000,
+                  },
           }),
         );
       } else {
@@ -2075,6 +2109,13 @@ describe("runAgentHarnessAttempt", () => {
       denyAll: false,
     },
     {
+      name: "overlapping runtime globs",
+      policy: { toolsAllow: attachToolAllowlistIntersection([], [["web_*"], ["*_search"]]) },
+      restricted: true,
+      tools: [],
+      denyAll: false,
+    },
+    {
       name: "wildcard runtime allowlist",
       policy: { toolsAllow: ["*"] },
       restricted: false,
@@ -2149,66 +2190,6 @@ describe("runAgentHarnessAttempt", () => {
     const attempt = runAttempt.mock.calls[0]?.[0];
     expect(attempt?.toolsAllow).toEqual([]);
     expect(attempt?.extraSystemPrompt).toContain("this chat is not allowed by policy");
-  });
-
-  it.each([
-    {
-      name: "narrow allowlist",
-      config: { tools: { allow: ["message"] } } as OpenClawConfig,
-    },
-    {
-      name: "specific denylist",
-      config: { tools: { deny: ["exec"] } } as OpenClawConfig,
-    },
-    {
-      name: "narrow profile",
-      config: { tools: { profile: "coding" } } as OpenClawConfig,
-    },
-  ])("marks plugin side questions restricted for a $name", ({ config }) => {
-    expect(resolvePluginHarnessPolicyToolsAllow(createAttemptParams(config))).toEqual([]);
-  });
-
-  it.each([
-    { name: "full tool profile", config: { tools: { profile: "full" } } as OpenClawConfig },
-    { name: "explicit empty allowlist", config: { tools: { allow: [] } } as OpenClawConfig },
-  ])("leaves plugin side questions unrestricted for an $name", ({ config }) => {
-    expect(resolvePluginHarnessPolicyToolsAllow(createAttemptParams(config))).toBeUndefined();
-  });
-
-  it("leaves owner WebChat unrestricted by wildcard sender policy for plugin harnesses", () => {
-    const config = {
-      tools: {
-        toolsBySender: {
-          "*": { deny: ["*"] },
-        },
-      },
-    } as OpenClawConfig;
-
-    expect(
-      resolvePluginHarnessPolicyToolsAllow({
-        ...createAttemptParams(config),
-        messageProvider: "webchat",
-        senderIsOwner: true,
-      }),
-    ).toBeUndefined();
-  });
-
-  it("keeps non-owner WebChat restricted by wildcard sender policy for plugin harnesses", () => {
-    const config = {
-      tools: {
-        toolsBySender: {
-          "*": { deny: ["*"] },
-        },
-      },
-    } as OpenClawConfig;
-
-    expect(
-      resolvePluginHarnessPolicyToolsAllow({
-        ...createAttemptParams(config),
-        messageProvider: "webchat",
-        senderIsOwner: false,
-      }),
-    ).toEqual([]);
   });
 
   it("leaves OpenClaw harness params unchanged for channel group sender deny-all policy", async () => {
@@ -4290,16 +4271,11 @@ describe("selectAgentHarness", () => {
         };
       },
     );
-    compactAuthMocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue({
-      version: 1,
-      profiles: {
-        "local-proxy:stale": {
-          type: "api_key",
-          provider: "local-proxy",
-          key: "stale-key",
-        },
-      },
-    });
+    compactAuthMocks.ensureAuthProfileStoreWithoutExternalProfiles.mockReturnValue(
+      createAuthProfileStoreFixture({
+        "local-proxy:stale": createApiKeyCredential("local-proxy", "stale-key"),
+      }),
+    );
     const profilePlan = {
       providerForAuth: "local-proxy",
       authProfileProviderForAuth: "local-proxy",

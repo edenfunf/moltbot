@@ -27,6 +27,8 @@ export type GatewayReloadPlan = {
   restartHeartbeat: boolean;
   reconcileSystemJobs?: boolean;
   reloadPlugins: boolean;
+  /** Plugin owners whose undeclared channel settings require fresh registration. */
+  reloadPluginIds?: Set<string>;
   pluginLifecycle?: {
     pluginIds: readonly string[];
     reason: PluginLifecycleReason;
@@ -72,6 +74,7 @@ type ReloadPolicy = {
   actions?: readonly ReloadAction[];
   channels?: readonly ChannelPlugin[];
   services?: readonly string[];
+  replaceChannelPlugins?: boolean;
   accountScoped?: boolean;
 };
 type ReloadRule = Omit<ReloadPolicy, "prefixes"> & { prefix: string };
@@ -136,10 +139,17 @@ function expandReloadPolicies(policies: ReloadPolicy[]): ReloadRule[] {
     .toSorted(compareReloadRules);
 }
 
+const AGENT_ROSTER_RELOAD_ACTIONS: readonly ReloadAction[] = [
+  "restartHeartbeat",
+  "reconcileSystemJobs",
+  "refreshHooksPolicy",
+  "reloadInternalHooks",
+];
+
 const CORE_RELOAD_POLICIES: ReloadPolicy[] = [
   { prefixes: ["gateway.remote", "gateway.reload"], kind: "none" },
   {
-    prefixes: [...AUTH_CREDENTIAL_PATHS, "mcp.apps", "secrets.egressProxy"],
+    prefixes: [...AUTH_CREDENTIAL_PATHS, "mcp.apps", "secrets.egressProxy", "gateway.portals"],
     kind: "restart",
   },
   {
@@ -158,6 +168,7 @@ const CORE_RELOAD_POLICIES: ReloadPolicy[] = [
       "gateway.controlUi.embedSandbox",
       "gateway.controlUi.allowExternalEmbedUrls",
       "gateway.controlUi.automaticallyFetchFavicons",
+      "gateway.controlUi.experimental.customPlugins",
       "gateway.controlUi.allowedOrigins",
       "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback",
       "gateway.nodes.browser",
@@ -172,6 +183,8 @@ const CORE_RELOAD_POLICIES: ReloadPolicy[] = [
       "discovery.mdns.mode",
       "mcp.apps.sandboxOrigin",
       "agents.defaults",
+      "desktop.host.enabled",
+      "cloudWorkers.desktop",
     ],
     kind: "hot",
   },
@@ -197,12 +210,12 @@ const CORE_RELOAD_POLICIES: ReloadPolicy[] = [
   {
     prefixes: ["agents.entries"],
     kind: "hot",
-    actions: [
-      "restartHeartbeat",
-      "reconcileSystemJobs",
-      "refreshHooksPolicy",
-      "reloadInternalHooks",
-    ],
+    actions: AGENT_ROSTER_RELOAD_ACTIONS,
+  },
+  {
+    prefixes: ["agents.entries.*.decisionModel"],
+    kind: "hot",
+    actions: [...AGENT_ROSTER_RELOAD_ACTIONS, "reloadPlugins"],
   },
   {
     prefixes: ["agents.defaults.sessionStore", "agents.ownership"],
@@ -213,6 +226,11 @@ const CORE_RELOAD_POLICIES: ReloadPolicy[] = [
     prefixes: ["skills.workshop.autonomous.mode"],
     kind: "hot",
     actions: ["reconcileSystemJobs"],
+  },
+  {
+    prefixes: ["agents.defaults.decisionModel"],
+    kind: "hot",
+    actions: ["reloadPlugins"],
   },
   { prefixes: ["plugins.load", "plugins.installs"], kind: "hot", actions: ["reloadPlugins"] },
   { prefixes: ["cron"], kind: "hot", actions: ["restartCron"] },
@@ -274,6 +292,12 @@ const DEFAULT_RELOAD_POLICIES: ReloadPolicy[] = [
     kind: "hot",
   },
   { prefixes: ["plugins"], kind: "hot", actions: ["reloadPlugins", "disposeMcpRuntimes"] },
+  {
+    prefixes: ["channels"],
+    kind: "hot",
+    actions: ["reloadPlugins"],
+    replaceChannelPlugins: true,
+  },
   { prefixes: ["gateway", "discovery"], kind: "restart" },
 ];
 
@@ -294,9 +318,9 @@ function getReloadPolicyCatalog() {
     return cachedCatalog;
   }
   const channelPlugins = listChannelPlugins();
-  const servicePolicies = (registry?.services ?? []).map(({ service }) => ({
+  const servicePolicies = (registry?.services ?? []).map(({ id, service }) => ({
     prefixes: service.reload?.configPrefixes ?? [],
-    services: [service.id],
+    services: [id],
   }));
   const channelPolicies = channelPlugins.flatMap((plugin): ReloadPolicy[] => [
     {
@@ -536,6 +560,18 @@ export function buildGatewayReloadPlan(
     plan.hotReasons.push(path);
     for (const action of rule?.actions ?? []) {
       plan[action] = true;
+    }
+    if (rule?.replaceChannelPlugins) {
+      // Manifest channel IDs survive even when registration has no active channel.
+      for (const record of getReloadPolicyCatalog().registry?.plugins ?? []) {
+        if (
+          record.channelIds.some(
+            (id) => path === "channels" || matchesReloadPrefix(path, `channels.${id}`),
+          )
+        ) {
+          (plan.reloadPluginIds ??= new Set()).add(record.id);
+        }
+      }
     }
     for (const service of rule?.services ?? []) {
       plan.restartServices?.add(service);

@@ -4,9 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { isMainThread, threadId } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { requireGitBuffer } from "../agents/worktrees/git.js";
 import * as execRunner from "../process/exec-runner.js";
 import * as processExec from "../process/exec.js";
 import type { SpawnResult } from "../process/exec.js";
@@ -24,8 +26,7 @@ import {
   gitNullConfigPath,
   normalizeGitPathForFilesystem,
   requireGitCommand,
-  requireGitCommandBuffer,
-  requireGitCommandRaw,
+  requireGitCommandOutput,
 } from "./git-exec.js";
 
 const refLogs = vi.hoisted(() => ({ info: vi.fn(), isEnabled: vi.fn() }));
@@ -91,8 +92,18 @@ describe("Git ref mutation timing", () => {
         await releaseCallback.promise;
         return result;
       });
+      const abort = new AbortController();
       const queued = runWithDiagnosticTraceContext(trace, () =>
-        enqueueGitRefMutation("/private/linked-checkout", "../shared.git", callback),
+        enqueueGitRefMutation("/private/linked-checkout", "../shared.git", callback, abort.signal),
+      );
+      let callbackSettled = false;
+      void queued.then(
+        () => {
+          callbackSettled = true;
+        },
+        () => {
+          callbackSettled = true;
+        },
       );
       pending.push(queued);
       clock += 25;
@@ -107,6 +118,9 @@ describe("Git ref mutation timing", () => {
       clock += 1_200;
       releaseHolder.resolve();
       await callbackEntered.promise;
+      abort.abort(new Error("cancelled after ref mutation started"));
+      await nextTurn();
+      expect(callbackSettled).toBe(false);
       expect(refLogs.info).not.toHaveBeenCalled();
       clock += 175;
       releaseCallback.resolve();
@@ -361,8 +375,7 @@ it.each([
 
 describe.each([
   ["text", requireGitCommand],
-  ["raw", requireGitCommandRaw],
-  ["buffered", requireGitCommandBuffer],
+  ["buffered", requireGitBuffer],
 ] as const)("Git %s diagnostics", (_kind, requireGit) => {
   async function failureMessage(args: string[]): Promise<string> {
     try {
@@ -496,7 +509,9 @@ describe("required Git output", () => {
   it("keeps raw text byte-for-byte and preserves the trimmed text contract", async () => {
     const stdout = " \u001b[31mname\u001b[0m\rredraw\0\r\n ";
     await withGitBlob(stdout, async (root, args) => {
-      await expect(requireGitCommandRaw(root, args)).resolves.toBe(stdout);
+      expect(
+        requireGitCommandOutput("git cat-file blob", await executeGitCommand(root, args)),
+      ).toBe(stdout);
       await expect(requireGitCommand(root, args)).resolves.toBe(stdout.trim());
     });
   });
@@ -507,22 +522,21 @@ describe("required Git output", () => {
       outputErrorStream: "stdout",
     });
     vi.spyOn(execRunner, "runCommandWithTimeout").mockRejectedValueOnce(error);
-    await expect(
-      requireGitCommandBuffer("/repo", ["cat-file", "blob", "HEAD:file"]),
-    ).rejects.toThrow("git cat-file blob HEAD:file failed");
+    await expect(requireGitBuffer("/repo", ["cat-file", "blob", "HEAD:file"])).rejects.toThrow(
+      "git cat-file blob HEAD:file failed",
+    );
   });
 
   it("keeps binary output including invalid UTF-8 and terminal control bytes", async () => {
     const stdout = Buffer.from([0, 255, 13, 10, 27, 91, 51, 49, 109, 32]);
     await withGitBlob(stdout, async (root, args) => {
-      await expect(requireGitCommandBuffer(root, args)).resolves.toEqual(stdout);
+      await expect(requireGitBuffer(root, args)).resolves.toEqual(stdout);
     });
   });
 
   it.each([
     ["text", requireGitCommand],
-    ["raw", requireGitCommandRaw],
-    ["buffered", requireGitCommandBuffer],
+    ["buffered", requireGitBuffer],
   ] as const)("rejects incomplete %s output from a real Git blob", async (_kind, requireGit) => {
     const sentinel = "complete-git-output-leading-sentinel\0";
     const blob = Buffer.alloc(17 * 1024 * 1024, "x");
@@ -554,7 +568,9 @@ describe("required Git output", () => {
       stderr: "progress tail",
       stderrTruncatedBytes: 1,
     });
-    await expect(requireGitCommandRaw("/repo", ["status"])).resolves.toBe("complete\n");
+    expect(
+      requireGitCommandOutput("git status", await executeGitCommand("/repo", ["status"])),
+    ).toBe("complete\n");
     await expect(requireGitCommand("/repo", ["status"])).resolves.toBe("complete");
   });
 });

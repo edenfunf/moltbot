@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AcpxRuntime as BaseAcpxRuntime, type AcpRuntimeOptions } from "acpx/runtime";
+import {
+  AcpxRuntime as BaseAcpxRuntime,
+  createAgentRegistry,
+  createFileSessionStore,
+  type AcpRuntimeOptions,
+} from "acpx/runtime";
 import {
   createPluginStateKeyedStoreForTests,
   resetPluginStateStoreForTests,
@@ -16,9 +21,11 @@ import {
   openAcpxProcessLeaseStateStore,
   readAcpxProcessLeaseIdentity,
 } from "./process-lease.js";
-import { AcpxRuntime, createAgentRegistry, createFileSessionStore } from "./runtime.js";
+import { AcpxRuntime } from "./runtime.js";
 
-const script = fileURLToPath(new URL("../test/fixtures/owner-agent.mjs", import.meta.url));
+const script = fileURLToPath(
+  new URL("../../../test/fixtures/acp/owner-agent.mjs", import.meta.url),
+);
 const sessionKey = "agent:main:acp:argv";
 const samples = ["", "space value", `owner's "choice"`, String.raw`C:\tools\adapter`];
 
@@ -106,7 +113,7 @@ it.each([
         store: openAcpxProcessLeaseStateStore((options) =>
           createPluginStateKeyedStoreForTests("acpx", {
             ...options,
-            env: { ...process.env, OPENCLAW_STATE_DIR: state.root },
+            env: state.env,
           }),
         ),
       });

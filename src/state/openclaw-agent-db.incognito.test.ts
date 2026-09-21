@@ -10,7 +10,6 @@ import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabases,
   closeOpenClawAgentDatabasesForTest,
-  IncognitoAgentDatabasePathCollisionError,
   isIncognitoOpenClawAgentSqlitePath,
   listOpenClawRegisteredAgentDatabases,
   listOpenIncognitoAgentDatabases,
@@ -86,7 +85,7 @@ describe("incognito agent database", () => {
 
   it.each([false, true])(
     "rejects deletion-fenced opens and writes and retires prepared statements (held: %s)",
-    (held) => {
+    async (held) => {
       const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "incognito-delete-")));
       tempDirs.push(stateDir);
       const env = { OPENCLAW_STATE_DIR: stateDir };
@@ -114,7 +113,7 @@ describe("incognito agent database", () => {
           runOpenClawAgentWriteTransaction(({ db }) => db.prepare(writeSql).run(), options),
         )
         .toThrow("is deleted");
-      const plan = prepareAgentDeleteDatabases(
+      const plan = await prepareAgentDeleteDatabases(
         { agents: { entries: { worker: {}, kept: {} } } },
         "worker",
         path.dirname(sentinel),
@@ -166,7 +165,7 @@ describe("incognito agent database", () => {
     } catch (error) {
       collision = error;
     }
-    expect(collision).toBeInstanceOf(IncognitoAgentDatabasePathCollisionError);
+    expect(collision).toBeInstanceOf(Error);
     expect(collision).toMatchObject({
       name: "IncognitoAgentDatabasePathCollisionError",
       path: sentinel,

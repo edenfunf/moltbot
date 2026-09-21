@@ -364,7 +364,7 @@ describe("schema preflight source artifacts", () => {
     const paths = [...fixture.paths, configPath];
     const before = sourceArtifacts(paths);
     await expect(checkTargetDatabaseSchemas(supportedVersions, fixture.env)).rejects.toMatchObject({
-      reason: "database-schema-preflight",
+      reason: "invalid-config",
     });
     expect(
       await checkTargetDatabaseSchemasForContexts(undefined, [{ env: fixture.env, config: {} }]),
@@ -575,6 +575,13 @@ describe("schema preflight source artifacts", () => {
         for (const inspect of [
           () => preflightOpenClawDatabaseSchemas({ env: fixture.env, supportedVersions }),
           () =>
+            preflightOpenClawDatabaseSchemas({
+              env: fixture.env,
+              supportedVersions,
+              verifyCurrentSchemaShape: true,
+              requireStartupMigrationReadiness: true,
+            }),
+          () =>
             checkTargetDatabaseSchemasForContexts(supportedVersions, [
               { env: fixture.env, config: {} },
             ]),
@@ -756,14 +763,15 @@ describe("schema preflight source artifacts", () => {
       vi.spyOn(snapshots, "prepareSqliteReadOnlyLocation").mockImplementation(
         async (pathname, options) => {
           const prepared = await prepare(pathname, options);
-          const cleanup = vi.fn(prepared.cleanup);
+          const cleanup = vi.fn(prepared.cleanupAsync);
           cleanups.push({ location: prepared.location, cleanup });
           return {
+            ...prepared,
             location:
               pathname === fixture[kind].path
                 ? path.join(path.dirname(prepared.location), "missing.sqlite")
                 : prepared.location,
-            cleanup,
+            cleanupAsync: cleanup,
           };
         },
       );

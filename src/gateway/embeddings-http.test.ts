@@ -20,9 +20,9 @@ import type {
 import type { MemoryEmbeddingProviderAdapter } from "../plugins/memory-embedding-providers.js";
 import { createPluginRegistry } from "../plugins/registry.js";
 import type { PluginRuntime } from "../plugins/runtime/types.js";
+import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import { startOpenAiCompatGatewayServer } from "./openai-compatible-http.test-helpers.js";
 import {
-  getGatewayTestPort,
   installGatewayTestHooks,
   resetTestPluginRegistry,
   setTestPluginRegistry,
@@ -176,10 +176,11 @@ beforeAll(async () => {
     },
   };
   ({ startGatewayServer } = await import("./server.js"));
-  enabledPort = await getGatewayTestPort();
+  const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
+  enabledPort = portClaim.port;
   enabledServer = await startOpenAiCompatGatewayServer({
     startGatewayServer,
-    port: enabledPort,
+    port: portClaim,
     auth: { mode: "token", token: "secret" },
     openAiChatCompletionsEnabled: true,
   });
@@ -652,10 +653,11 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
   });
 
   it("rejects x-openclaw-model for trusted write-only callers", async () => {
-    const port = await getGatewayTestPort();
+    const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
+    const port = portClaim.port;
     const server = await startOpenAiCompatGatewayServer({
       startGatewayServer,
-      port,
+      port: portClaim,
       auth: { mode: "none" },
       openAiChatCompletionsEnabled: true,
     });
@@ -801,10 +803,7 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
 
   it("does not admit a replacement while provider cleanup is pending", async () => {
     Reflect.set(openAiAdapter, "transport", "local");
-    let releaseClose: () => void = () => {};
-    const closeGate = new Promise<void>((resolve) => {
-      releaseClose = resolve;
-    });
+    const { promise: closeGate, resolve: releaseClose } = createDeferred();
     closeEmbeddingProviderMock.mockImplementationOnce(async () => {
       await closeGate;
       throw new Error("close failed");
@@ -830,10 +829,7 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
 
   it("does not create a provider for a disconnected request waiting behind cleanup", async () => {
     Reflect.set(openAiAdapter, "transport", "local");
-    let releaseClose: () => void = () => {};
-    const closeGate = new Promise<void>((resolve) => {
-      releaseClose = resolve;
-    });
+    const { promise: closeGate, resolve: releaseClose } = createDeferred();
     closeEmbeddingProviderMock.mockImplementationOnce(async () => {
       await closeGate;
     });
@@ -890,10 +886,7 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
   });
 
   it("serializes cleanup when a remote request creates a local provider", async () => {
-    let releaseClose: () => void = () => {};
-    const closeGate = new Promise<void>((resolve) => {
-      releaseClose = resolve;
-    });
+    const { promise: closeGate, resolve: releaseClose } = createDeferred();
     closeEmbeddingProviderMock.mockImplementationOnce(async () => {
       await closeGate;
     });
@@ -926,10 +919,7 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
 
   it("does not bypass local cleanup with a model override", async () => {
     Reflect.set(openAiAdapter, "transport", "local");
-    let releaseClose: () => void = () => {};
-    const closeGate = new Promise<void>((resolve) => {
-      releaseClose = resolve;
-    });
+    const { promise: closeGate, resolve: releaseClose } = createDeferred();
     closeEmbeddingProviderMock.mockImplementationOnce(async () => {
       await closeGate;
     });
@@ -959,10 +949,7 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
   });
 
   it("allows providers without cleanup resources to embed concurrently", async () => {
-    let releaseFirstEmbed: () => void = () => {};
-    const firstEmbedGate = new Promise<void>((resolve) => {
-      releaseFirstEmbed = resolve;
-    });
+    const { promise: firstEmbedGate, resolve: releaseFirstEmbed } = createDeferred();
     const firstEmbed = vi.fn(async () => {
       await firstEmbedGate;
       return [[1, 2]];

@@ -51,7 +51,7 @@ export function registerBrowserAgentActDownloadRoutes(
       ctx,
       targetId,
       enforceCurrentUrlAllowed: true,
-      run: async ({ profileCtx, cdpUrl, tab, signal }) => {
+      run: async ({ profileCtx, cdpUrl, tab, signal, assertCurrent }) => {
         if (getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp) {
           return jsonError(res, 501, EXISTING_SESSION_LIMITS.download.waitUnsupported);
         }
@@ -76,9 +76,11 @@ export function registerBrowserAgentActDownloadRoutes(
         const requestBase = buildDownloadRequestBase(cdpUrl, tab.targetId, timeoutMs);
         const result = await pw.waitForDownloadViaPlaywright({
           ...requestBase,
+          ...browserNavigationPolicyForProfile(ctx, profileCtx),
           path: downloadPath,
           rootDir: DEFAULT_DOWNLOAD_DIR,
           signal,
+          ...(assertCurrent ? { assertCurrent } : {}),
         });
         res.json({ ok: true, targetId: tab.targetId, download: result });
       },
@@ -123,7 +125,7 @@ export function registerBrowserAgentActDownloadRoutes(
       ctx,
       targetId,
       enforceCurrentUrlAllowed: true,
-      run: async ({ profileCtx, cdpUrl, tab, signal }) => {
+      run: async ({ profileCtx, cdpUrl, tab, signal, assertCurrent }) => {
         if (getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp) {
           return jsonError(res, 501, EXISTING_SESSION_LIMITS.download.downloadUnsupported);
         }
@@ -140,6 +142,7 @@ export function registerBrowserAgentActDownloadRoutes(
             expectedUrl,
             rootDir: DEFAULT_DOWNLOAD_DIR,
             signal,
+            ...(assertCurrent ? { assertCurrent } : {}),
           });
           res.json({ ok: true, targetId: tab.targetId, download: result });
           return;
@@ -155,10 +158,12 @@ export function registerBrowserAgentActDownloadRoutes(
         }
         const result = await pw.downloadViaPlaywright({
           ...requestBase,
+          ...browserNavigationPolicyForProfile(ctx, profileCtx),
           ref,
           path: downloadPath,
           rootDir: DEFAULT_DOWNLOAD_DIR,
           signal,
+          ...(assertCurrent ? { assertCurrent } : {}),
         });
         res.json({ ok: true, targetId: tab.targetId, download: result });
       },

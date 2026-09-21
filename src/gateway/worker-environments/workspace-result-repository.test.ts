@@ -29,9 +29,13 @@ import { recoverPendingWorkspaceResults } from "./placement-dispatch-pending-res
 import { createWorkerPlacementReclaim } from "./placement-reclaim.js";
 import { placementTurnOwner, projectWorkerSessionTurnClaim } from "./placement-record.js";
 import { createWorkerSessionPlacementStore } from "./placement-store.js";
+import { SessionWorkspaceReservationBusyError } from "./placement-workspace-reservation.js";
 import { createRepositoryWorkspaceMutationService } from "./repository-workspace-mutation.js";
 import { syncSessionRepositoryWorkspace } from "./repository-workspace-startup.js";
-import { readSessionRepositoryCheckpoint } from "./session-repository-checkpoints.js";
+import {
+  readSessionRepositoryArtifacts,
+  withSessionRepositoryCheckpoint,
+} from "./session-repository-checkpoints.js";
 import type { WorkerTunnelHandle } from "./tunnel-contract.js";
 import {
   attachedEnvironment,
@@ -214,8 +218,7 @@ describe("repository workspace result ownership", () => {
         throw new Error("unexpected prepared binding");
       },
       get: () => attachedEnvironment(),
-      create: vi.fn(async () => attachedEnvironment()),
-      createFromProfileSnapshot: vi.fn(async () => attachedEnvironment()),
+      createWithRequest: vi.fn(async () => attachedEnvironment()),
       attachSession: vi.fn(async () => credential()),
       destroy: vi.fn(async () => attachedEnvironment()),
       startTunnel: vi.fn(async () => tunnel),
@@ -274,12 +277,12 @@ describe("repository workspace result ownership", () => {
         },
       });
       expect(saved).toBe("saved");
-      const checkpoint = await readSessionRepositoryCheckpoint({
+      const checkpoint = await readSessionRepositoryArtifacts({
         workspaceId: f.repository.workspaceId,
+        previewPath: "editor.txt",
+        assertCurrent: () => {},
       });
-      expect((await checkpoint.readEntry(checkpoint.changedEntries[0]!)).toString()).toBe(
-        "saved from editor\n",
-      );
+      expect(checkpoint.preview).toEqual(new Uint8Array(Buffer.from("saved from editor\n")));
       expect(placements.get(SESSION_ID)?.workspaceBaseManifestRef).toBe(
         checkpoint.currentManifestRef,
       );
@@ -334,11 +337,13 @@ describe("repository workspace result ownership", () => {
       );
       expect(placements.listPendingWorkspaceResults()).toEqual([]);
       expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
-      const checkpoint = await readSessionRepositoryCheckpoint({
+      const checkpoint = await readSessionRepositoryArtifacts({
         workspaceId: f.repository.workspaceId,
+        previewPath: "uncertain.txt",
+        assertCurrent: () => {},
       });
-      expect((await checkpoint.readEntry(checkpoint.changedEntries[0]!)).toString()).toBe(
-        "write completed before transport loss\n",
+      expect(checkpoint.preview).toEqual(
+        new Uint8Array(Buffer.from("write completed before transport loss\n")),
       );
     },
   );
@@ -366,7 +371,7 @@ describe("repository workspace result ownership", () => {
           mutate: async (assertCurrent) => {
             await expect(
               placements.withRepositoryWorkspaceReservation(sessionTarget, competing),
-            ).rejects.toThrow("checkpoint is busy");
+            ).rejects.toBeInstanceOf(SessionWorkspaceReservationBusyError);
             assertCurrent();
             return { changed: false, value: "unchanged" };
           },
@@ -465,25 +470,29 @@ describe("repository workspace result ownership", () => {
       });
       await f.stop(sessionTarget);
       expect(placements.get(SESSION_ID)?.state).toBe("reclaimed");
-      const snapshot = await readSessionRepositoryCheckpoint({
-        workspaceId: f.repository.workspaceId,
-      });
-      expect(snapshot.changedEntries.map((entry) => entry.path)).toEqual([
-        "editor.txt",
-        "first.txt",
-        "second.txt",
-        "setup.txt",
-      ]);
       const expected = new Map([
         ["editor.txt", "editor save\n"],
         ["first.txt", "first turn\n"],
         ["second.txt", "second turn\n"],
         ["setup.txt", "prepared\n"],
       ]);
-      for (const entry of snapshot.changedEntries) {
-        expect((await snapshot.readEntry(entry)).toString()).toBe(expected.get(entry.path));
-      }
-      expect(snapshot.baseManifestRef).toBe(pinned.baseManifestHash);
+      await withSessionRepositoryCheckpoint(
+        { workspaceId: f.repository.workspaceId },
+        async (snapshot) => {
+          expect(snapshot.changedEntries.map((entry) => entry.path)).toEqual([
+            "editor.txt",
+            "first.txt",
+            "second.txt",
+            "setup.txt",
+          ]);
+          for (const entry of snapshot.changedEntries) {
+            expect(await fs.readFile(path.join(snapshot.stagingRoot, entry.path), "utf8")).toBe(
+              expected.get(entry.path),
+            );
+          }
+          expect(snapshot.baseManifestRef).toBe(pinned.baseManifestHash);
+        },
+      );
       expect(f.store.get(f.repository.workspaceId)?.baseManifestHash).toBe(pinned.baseManifestHash);
       const artifactRoot = f.store.artifactPath(f.repository.workspaceId);
       expect(
@@ -613,8 +622,7 @@ describe("repository workspace result ownership", () => {
           throw new Error("unexpected prepared binding");
         },
         get: () => undefined,
-        create: vi.fn(async () => attachedEnvironment()),
-        createFromProfileSnapshot: vi.fn(async () => attachedEnvironment()),
+        createWithRequest: vi.fn(async () => attachedEnvironment()),
         attachSession: vi.fn(async () => credential()),
         destroy: vi.fn(async () => attachedEnvironment()),
         startTunnel: vi.fn(async () => {
@@ -649,12 +657,12 @@ describe("repository workspace result ownership", () => {
         turnClaim: null,
       });
       expect(environments.startTunnel).not.toHaveBeenCalled();
-      const saved = await readSessionRepositoryCheckpoint({
+      const saved = await readSessionRepositoryArtifacts({
         workspaceId: f.repository.workspaceId,
+        previewPath: "survives.txt",
+        assertCurrent: () => {},
       });
-      expect((await saved.readEntry(saved.changedEntries[0]!)).toString()).toBe(
-        "durable before restart\n",
-      );
+      expect(saved.preview).toEqual(new Uint8Array(Buffer.from("durable before restart\n")));
     },
   );
 });

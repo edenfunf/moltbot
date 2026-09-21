@@ -1,5 +1,5 @@
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
-import type { readSessionChangedEvent } from "./reconcile.ts";
+import { projectSessionResultRows, type readSessionChangedEvent } from "./reconcile.ts";
 import type { SessionGateway } from "./session-capability.ts";
 import { resolveUiConversationIdentity } from "./session-key.ts";
 
@@ -125,11 +125,20 @@ export function createSessionPermissionProjection(
     if (!fact || newer || (!older && revision > fact.revision)) {
       // Retain the watermark: another older managed/list request may still finish.
       if (observe) {
-        projection.fact = {
-          permissionMode: row.permissionMode,
-          updatedAt: row.updatedAt,
-          revision: Math.max(revision, fact?.revision ?? 0),
-        };
+        if (
+          fact &&
+          fact.permissionMode === row.permissionMode &&
+          fact.updatedAt === row.updatedAt
+        ) {
+          // An identical read refreshes observations without superseding the confirmed mutation.
+          fact.revision = revision;
+        } else {
+          projection.fact = {
+            permissionMode: row.permissionMode,
+            updatedAt: row.updatedAt,
+            revision: Math.max(revision, fact?.revision ?? 0),
+          };
+        }
       }
       return row;
     }
@@ -153,13 +162,10 @@ export function createSessionPermissionProjection(
     if (!result || permissionProjections.size === 0) {
       return result;
     }
-    let changed = false;
-    const sessions = result.sessions.map((row) => {
-      const next = projectPermissionRow(row, readRevision, agentId, observe);
-      changed ||= next !== row;
-      return next;
-    });
-    return changed ? { ...result, sessions } : result;
+    return projectSessionResultRows(
+      result,
+      result.sessions.map((row) => projectPermissionRow(row, readRevision, agentId, observe)),
+    );
   };
   const observeEventRow = (
     row: GatewaySessionRow,
@@ -205,8 +211,21 @@ export function createSessionPermissionProjection(
 
   return {
     claim: claimPermissionProjection,
+    capture: (key: string, agentId?: string | null) => {
+      const identity = permissionIdentity(key, agentId);
+      const projection = permissionProjections.get(identity);
+      const fact = projection?.fact;
+      const revision = fact?.revision;
+      return () =>
+        projection !== undefined &&
+        permissionProjections.get(identity) === projection &&
+        projection.fact === fact &&
+        projection.fact?.revision === revision;
+    },
     reconcileList: (result: SessionsListResult | null, revision: number, agentId?: string) =>
       projectPermissionList(result, () => revision, agentId, true),
+    reconcileRow: (row: GatewaySessionRow, revision: number, agentId?: string | null) =>
+      projectPermissionRow(row, () => revision, agentId, true),
     apply: (
       result: SessionsListResult | null,
       readRevision: (row: GatewaySessionRow) => number,

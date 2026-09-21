@@ -279,7 +279,7 @@ describe("server-owned pending input display", () => {
     }
     await loadChatHistory(host);
     expect(host.chatMessages).toHaveLength(1);
-    expect(host.request).toHaveBeenLastCalledWith(
+    expect(host.request.mock.calls.findLast(([method]) => method === "chat.history")).toEqual([
       "chat.history",
       expect.objectContaining({
         inputRunIds: Array.from(
@@ -288,14 +288,14 @@ describe("server-owned pending input display", () => {
         ),
       }),
       { signal: expect.any(AbortSignal) },
-    );
+    ]);
     await loadChatHistory(host);
     expect(host.chatMessages).toEqual([]);
-    expect(host.request).toHaveBeenLastCalledWith(
+    expect(host.request.mock.calls.findLast(([method]) => method === "chat.history")).toEqual([
       "chat.history",
       expect.objectContaining({ inputRunIds: ["source-50"] }),
       { signal: expect.any(AbortSignal) },
-    );
+    ]);
   });
 
   it.each(["page", "delta"])(
@@ -484,7 +484,7 @@ describe("server-owned pending input display", () => {
               sendRunId,
             ),
           );
-          admitChatSubmission(host);
+          admitChatSubmission(host, getChatPendingInputs(host)?.page.items);
         } else {
           await retainDeliveredUserTurn(host, item);
         }
@@ -518,14 +518,16 @@ describe("server-owned pending input display", () => {
         { type: "snapshotLoaded", messages: history },
         { runActive: true },
       );
-      expect(admitChatSubmission(host)).toBe(false);
+      expect(admitChatSubmission(host, getChatPendingInputs(host)?.page.items)).toBe(false);
       const remounted = makeChatHost({
         sessionKey,
         currentSessionId: sessionId,
         client: host.client,
         chatSubmissions,
       });
-      expect(admitChatSubmission(remounted)).toBe(false);
+      expect(admitChatSubmission(remounted, getChatPendingInputs(remounted)?.page.items)).toBe(
+        false,
+      );
       expect(remounted.chatMessages).toEqual([]);
       // Retirement does not hide distinct or uncorrelated server-owned inputs.
       const otherInputs = ["other-accepted-source", undefined].map((runId) => ({
@@ -567,7 +569,7 @@ describe("server-owned pending input display", () => {
           ...history,
           unrelated,
         ]);
-        expect(admitChatSubmission(host)).toBe(false);
+        expect(admitChatSubmission(host, getChatPendingInputs(host)?.page.items)).toBe(false);
       }
     },
   );
@@ -612,6 +614,7 @@ describe("server-owned pending input display", () => {
     "supersedes a stale custody read when a user input promotes with local run %s",
     async (runId) => {
       const stale = createDeferred<unknown>();
+      const fresh = createDeferred<unknown>();
       const initialUser = {
         role: "user",
         content: "First turn",
@@ -647,20 +650,7 @@ describe("server-owned pending input display", () => {
           ],
         ]),
         requestHandlers: {
-          "chat.history": () =>
-            ++historyReads === 1
-              ? stale.promise
-              : {
-                  sessionId,
-                  messages: [initialUser, promoted],
-                  pendingInputs: { items: [], total: 0 },
-                  sessionInfo: {
-                    key: sessionKey,
-                    sessionId,
-                    hasActiveRun: true,
-                    status: "running",
-                  },
-                },
+          "chat.history": () => (++historyReads === 1 ? stale.promise : fresh.promise),
         },
       });
       applyChatPendingInputs(host, page);
@@ -678,14 +668,23 @@ describe("server-owned pending input display", () => {
           message: promoted,
         },
       });
-      expect(historyReads).toBe(2);
-      const refreshed = await loadChatHistory(host);
+      expect(historyReads).toBe(1);
+      const refreshing = loadChatHistory(host);
+      stale.resolve({ sessionId, messages: [initialUser], pendingInputs: page });
+      await loading;
+      await vi.waitFor(() => expect(historyReads).toBe(2));
+      expect(host.chatMessages).toEqual([initialUser, promoted]);
+      expect(getChatHistoryLoadState(host).phase).toBe("in-flight");
+      fresh.resolve({
+        sessionId,
+        messages: [initialUser, promoted],
+        pendingInputs: { items: [], total: 0 },
+        sessionInfo: { key: sessionKey, sessionId, hasActiveRun: true, status: "running" },
+      });
+      const refreshed = await refreshing;
       expect(host.lastError).toBeNull();
       expect(getChatHistoryLoadState(host).phase).toBe("committed");
       expect(refreshed).toMatchObject({ pendingInputs: { items: [], total: 0 } });
-      expect(getChatPendingInputs(host)?.page.total).toBe(0);
-      stale.resolve({ sessionId, messages: [initialUser], pendingInputs: page });
-      await loading;
       expect(getChatPendingInputs(host)?.page.total).toBe(0);
       expect(host.chatMessages).toEqual([initialUser, promoted]);
       expect(host.chatRunId).toBe(runId);
@@ -843,16 +842,28 @@ describe("server-owned pending input display", () => {
   );
 
   it("replaces a server pending bubble with canonical persistence exactly once", () => {
+    const clients = [{ id: "cli", mode: "cli", displayName: "Release helper" }];
     const promoted = {
       role: "user",
       content: "Keep my accepted input",
-      __openclaw: { id: "input-1", seq: 2, idempotencyKey: "run-queued:user" },
+      __openclaw: {
+        id: "input-1",
+        seq: 2,
+        idempotencyKey: "run-queued:user",
+        transport: { clients },
+      },
     };
     const items = buildChatItems({
       paneId: "promoted-pane",
       sessionKey,
       messages: [promoted],
-      pendingInputs: page.items,
+      pendingInputs: page.items.map((entry) => ({
+        ...entry,
+        message: {
+          ...promoted,
+          __openclaw: { id: `pending:${entry.id}`, transport: { clients } },
+        },
+      })),
       queue: [],
       toolMessages: [],
       streamSegments: [],
@@ -864,6 +875,7 @@ describe("server-owned pending input display", () => {
     expect(items[0]).toMatchObject({
       kind: "group",
       role: "user",
+      sourceClients: clients,
       messages: [{ message: promoted }],
     });
   });

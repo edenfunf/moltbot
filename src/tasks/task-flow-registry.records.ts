@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type {
   JsonValue,
@@ -60,7 +61,7 @@ export type FlowRecordPatch = Omit<
   endedAt?: number | null;
 };
 
-export type FlowRecordCreateFields = {
+type FlowRecordCreateFields = {
   ownerKey: string;
   requesterOrigin?: TaskFlowRecord["requesterOrigin"];
   status?: TaskFlowStatus;
@@ -76,6 +77,67 @@ export type FlowRecordCreateFields = {
   updatedAt?: number;
   endedAt?: number | null;
 };
+
+export type ManagedTaskFlowCreateFields = FlowRecordCreateFields & {
+  controllerId: string;
+};
+
+export type ManagedTaskFlowMutation = "setWaiting" | "resume" | "finish" | "fail" | "requestCancel";
+
+/** Both transports translate managed actions through the same field and timestamp rules. */
+export function buildManagedTaskFlowPatch(
+  mutation: ManagedTaskFlowMutation,
+  input: FlowRecordPatch,
+): FlowRecordPatch {
+  switch (mutation) {
+    case "setWaiting":
+      return {
+        status:
+          normalizeOptionalString(input.blockedTaskId) ||
+          normalizeOptionalString(input.blockedSummary)
+            ? "blocked"
+            : "waiting",
+        currentStep: input.currentStep,
+        stateJson: input.stateJson,
+        waitJson: input.waitJson,
+        blockedTaskId: input.blockedTaskId,
+        blockedSummary: input.blockedSummary,
+        endedAt: null,
+        updatedAt: input.updatedAt,
+      };
+    case "resume":
+      return {
+        status: input.status ?? "queued",
+        currentStep: input.currentStep,
+        stateJson: input.stateJson,
+        waitJson: null,
+        blockedTaskId: null,
+        blockedSummary: null,
+        endedAt: null,
+        updatedAt: input.updatedAt,
+      };
+    case "finish":
+    case "fail": {
+      const endedAt = input.endedAt ?? input.updatedAt ?? Date.now();
+      return {
+        status: mutation === "finish" ? "succeeded" : "failed",
+        currentStep: input.currentStep,
+        stateJson: input.stateJson,
+        waitJson: null,
+        blockedTaskId: mutation === "finish" ? null : input.blockedTaskId,
+        blockedSummary: mutation === "finish" ? null : input.blockedSummary,
+        endedAt,
+        updatedAt: input.updatedAt ?? endedAt,
+      };
+    }
+    case "requestCancel":
+      return {
+        cancelRequestedAt: input.cancelRequestedAt ?? input.updatedAt ?? Date.now(),
+        updatedAt: input.updatedAt,
+      };
+  }
+  throw new Error("Unknown managed task-flow mutation");
+}
 
 export type CreateFlowRecordParams = FlowRecordCreateFields & {
   syncMode?: TaskFlowSyncMode;
@@ -108,6 +170,26 @@ export function cloneFlowRecord(record: TaskFlowRecord): TaskFlowRecord {
   };
 }
 
+/** Optional record fields decode without own undefined properties; JSON payloads retain their shape. */
+export function areTaskFlowRecordsEqual(
+  left: TaskFlowRecord | undefined,
+  right: TaskFlowRecord | undefined,
+): boolean {
+  const fields = (record: TaskFlowRecord | undefined) =>
+    record
+      ? Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined))
+      : undefined;
+  return isDeepStrictEqual(fields(left), fields(right));
+}
+
+export function isTaskMirroredFlowSyncUnchanged(prepared: PreparedTaskMirroredFlowSync): boolean {
+  // Older mirrored rows stored SQL NULL for the same cleared wait state as JSON null.
+  return areTaskFlowRecordsEqual(
+    { ...prepared.current, waitJson: prepared.current.waitJson ?? null },
+    { ...prepared.next, revision: prepared.current.revision },
+  );
+}
+
 export function normalizeRestoredFlowRecord(record: TaskFlowRecord): TaskFlowRecord {
   const syncMode = record.syncMode === "task_mirrored" ? "task_mirrored" : "managed";
   const controllerId =
@@ -133,6 +215,24 @@ export function normalizeRestoredFlowRecord(record: TaskFlowRecord): TaskFlowRec
     cancelRequestedAt: record.cancelRequestedAt ?? undefined,
     endedAt: record.endedAt ?? undefined,
   };
+}
+
+export function selectTaskFlowRecords(
+  source: ReadonlyMap<string, TaskFlowRecord>,
+  ownerKey?: string,
+): TaskFlowRecord[] {
+  const normalizedOwnerKey = ownerKey?.trim();
+  if (normalizedOwnerKey === "") {
+    return [];
+  }
+  const records = [...source.values()];
+  const selected =
+    normalizedOwnerKey === undefined
+      ? records
+      : records.filter((flow) => flow.ownerKey.trim() === normalizedOwnerKey);
+  return selected
+    .map((flow) => cloneFlowRecord(flow))
+    .toSorted((left, right) => right.createdAt - left.createdAt);
 }
 
 export function snapshotFlowRecords(source: ReadonlyMap<string, TaskFlowRecord>): TaskFlowRecord[] {
@@ -163,7 +263,7 @@ export function assertControllerId(controllerId?: string | null): string {
   return normalized;
 }
 
-export function resolveFlowBlockedSummary(
+function resolveFlowBlockedSummary(
   task: Pick<TaskRecord, "status" | "terminalOutcome" | "terminalSummary" | "progressSummary">,
 ): string | undefined {
   if (task.status !== "succeeded" || task.terminalOutcome !== "blocked") {
@@ -174,7 +274,7 @@ export function resolveFlowBlockedSummary(
   );
 }
 
-export function deriveTaskFlowStatusFromTask(
+function deriveTaskFlowStatusFromTask(
   task: Pick<TaskRecord, "status" | "terminalOutcome">,
 ): TaskFlowStatus {
   if (task.status === "queued") {
@@ -195,7 +295,7 @@ export function deriveTaskFlowStatusFromTask(
   return "failed";
 }
 
-export function isTerminalTaskFlowStatus(status: TaskFlowStatus): boolean {
+function isTerminalTaskFlowStatus(status: TaskFlowStatus): boolean {
   return (
     status === "succeeded" ||
     status === "blocked" ||
@@ -205,7 +305,7 @@ export function isTerminalTaskFlowStatus(status: TaskFlowStatus): boolean {
   );
 }
 
-export function resolveTaskMirroredFlowTiming(
+function resolveTaskMirroredFlowTiming(
   task: Pick<TaskRecord, "createdAt" | "lastEventAt" | "endedAt">,
   isTerminal: boolean,
 ): { updatedAt: number; endedAt?: number } {
@@ -214,6 +314,46 @@ export function resolveTaskMirroredFlowTiming(
   }
   const endedAt = task.endedAt ?? task.lastEventAt ?? task.createdAt;
   return { updatedAt: endedAt, endedAt };
+}
+
+export function buildTaskMirroredFlowCreateFields(params: {
+  task: Pick<
+    TaskRecord,
+    | "ownerKey"
+    | "taskId"
+    | "notifyPolicy"
+    | "status"
+    | "terminalOutcome"
+    | "label"
+    | "task"
+    | "createdAt"
+    | "lastEventAt"
+    | "endedAt"
+    | "terminalSummary"
+    | "progressSummary"
+  >;
+  requesterOrigin?: TaskFlowRecord["requesterOrigin"];
+}): CreateFlowRecordParams {
+  const terminalFlowStatus = deriveTaskFlowStatusFromTask(params.task);
+  const timing = resolveTaskMirroredFlowTiming(
+    params.task,
+    isTerminalTaskFlowStatus(terminalFlowStatus),
+  );
+  return {
+    syncMode: "task_mirrored",
+    ownerKey: params.task.ownerKey,
+    requesterOrigin: params.requesterOrigin,
+    status: terminalFlowStatus,
+    notifyPolicy: params.task.notifyPolicy,
+    goal:
+      normalizeOptionalString(params.task.label) ?? (params.task.task.trim() || "Background task"),
+    blockedTaskId:
+      terminalFlowStatus === "blocked" ? normalizeOptionalString(params.task.taskId) : undefined,
+    blockedSummary: resolveFlowBlockedSummary(params.task),
+    createdAt: params.task.createdAt,
+    updatedAt: timing.updatedAt,
+    ...(timing.endedAt !== undefined ? { endedAt: timing.endedAt } : {}),
+  };
 }
 
 export function buildFlowRecord(params: CreateFlowRecordParams): TaskFlowRecord {

@@ -10,10 +10,12 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { requireNodeTool } from "../helpers/node-toolchain.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { validReview, writeReviewArtifacts } from "./pr-review-artifact-fixture.js";
 
@@ -21,6 +23,7 @@ const temps = useAutoCleanupTempDirTracker(afterEach);
 const templateDirs = useAutoCleanupTempDirTracker(afterAll);
 let fixtureTemplate: ReturnType<typeof createFixtureTemplate> | undefined;
 const scripts = join(process.cwd(), "scripts");
+const nodeExecutable = requireNodeTool("node");
 const outcomeRef = "refs/openclaw/pr-merge-outcomes/123";
 const lockRef = "refs/openclaw/pr-operation-locks/123";
 const describePosix = process.platform === "win32" ? describe.skip : describe;
@@ -137,8 +140,10 @@ function fixture(
   git(["config", "--add", `url.file://${remote}.insteadOf`, "https://github.com/fixture/repo.git"]);
   const worktree = join(repo, ".worktrees/pr-123");
   git(["worktree", "add", "-q", "-b", "pr-123-prep", worktree, head]);
+  // Match the real repository: native review artifacts are ignored generated files.
+  writeFileSync(join(repo, ".git/info/exclude"), ".local/\n");
   mkdirSync(join(worktree, ".local"));
-  const prepare = (preparedHead: string, main = base) => {
+  const prepare = (preparedHead: string, main = base, localHead = preparedHead) => {
     const review = validReview(preparedHead);
     review.pr.number = 123;
     review.recommendation = "READY FOR /prepare-pr";
@@ -146,7 +151,7 @@ function fixture(
     writeReviewArtifacts(worktree, review, { headSha: preparedHead, prNumber: 123 });
     writeFileSync(
       join(worktree, ".local/prep.env"),
-      `PR_NUMBER=123\nPREP_HEAD_SHA=${preparedHead}\nLOCAL_PREP_HEAD_SHA=${preparedHead}\nPREP_MAINLINE_BASE_SHA=${main}\nPREP_REPLACED_HOSTED_ANCESTRY=false\nPREP_AUTHOR_ACCESS=external\n`,
+      `PR_NUMBER=123\nPREP_HEAD_SHA=${preparedHead}\nLOCAL_PREP_HEAD_SHA=${localHead}\nPREP_MAINLINE_BASE_SHA=${main}\nPREP_REPLACED_HOSTED_ANCESTRY=false\nPREP_AUTHOR_ACCESS=external\n`,
     );
     writeFileSync(
       join(worktree, ".local/prep-context.env"),
@@ -154,20 +159,35 @@ function fixture(
     );
     writeFileSync(
       join(worktree, ".local/gates.env"),
-      `PR_NUMBER=123\nGATES_MODE=full\nLAST_VERIFIED_HEAD_SHA=${preparedHead}\n`,
+      `PR_NUMBER=123\nGATES_MODE=full\nLAST_VERIFIED_HEAD_SHA=${localHead}\n`,
     );
     writeFileSync(join(worktree, ".local/prep.md"), "Prepared fixture.\n");
   };
   prepare(head);
   const initial = {
-    // gh reports the REST database id (a number) while GraphQL reports the node id.
-    // The fixture models both so the merge path is exercised against real gh shapes.
+    // The CLI locator can use an adapter's numeric id; REST and GraphQL expose
+    // the authoritative pair independently of that projection.
     repo: {
-      id: 1103012935 as string | number,
+      id: "R_kgDOQb6kRw" as string | number,
       url: "https://github.com/fixture/repo",
       nameWithOwner: "fixture/repo",
     },
-    repoNodeId: "R_kgDOQb6kRw" as string | null,
+    repoAuthority: {
+      id: 1103012935,
+      node_id: "R_kgDOQb6kRw",
+      full_name: "fixture/repo",
+      html_url: "https://github.com/fixture/repo",
+      permissions: { admin: true },
+      squash_merge_commit_title: "PR_TITLE",
+      squash_merge_commit_message: "PR_BODY",
+    } as Record<string, unknown>,
+    repoAuthorityUnavailable: false,
+    repoGraphql: {
+      id: "R_kgDOQb6kRw",
+      databaseId: 1103012935,
+      url: "https://github.com/fixture/repo",
+      nameWithOwner: "fixture/repo",
+    },
     pr: {
       id: "fixture-pr",
       number: 123,
@@ -185,6 +205,37 @@ function fixture(
       mergeStateStatus: "CLEAN",
     },
     mode: "success",
+    quotaAt: "",
+    quotaAfterObservations: 0,
+    quotaFailuresRemaining: null as number | null,
+    // Preserve GraphQL lifecycle fixtures through an explicit unsupported REST policy.
+    restPolicy: "classic",
+    restReadFailure: "",
+    restReadFailuresRemaining: 0,
+    restReadFailureAtMainReads: [] as number[],
+    restRequiredApp: 15368 as number | null,
+    restContexts: ["CI"],
+    restCheckApp: 15368,
+    restChecks: "pass",
+    restFailedContext: "",
+    restDuplicate: "",
+    restSuite: "pass",
+    restUnseenSuite: "",
+    restAdvanceMain: false,
+    restMainFault: "",
+    restMainFaultAfterReads: 0,
+    restMainReads: 0,
+    restMainAdvance: null as null | {
+      boundary: "before-evidence" | "during-evidence";
+      observed: boolean;
+      main: string;
+    },
+    restObservation: null as null | {
+      pr?: Record<string, unknown>;
+      advanceMain?: boolean;
+      gates?: string;
+    },
+    restMergePayload: null as null | { sha: string; merge_method: string; commit_message: string },
     landing: "requested",
     reads: 0,
     observationReads: 0,
@@ -243,7 +294,11 @@ function fixture(
   const save = (state: typeof initial) => {
     writeFileSync(statePath, JSON.stringify(state));
     if (!state.review) {
-      writeFileSync(join(worktree, ".local/review.md"), "stale review\n");
+      const file = join(worktree, ".local/review.json");
+      writeFileSync(
+        file,
+        JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), docs: "invalid" }),
+      );
     }
     if (!state.ready) {
       const file = join(worktree, ".local/review.json");
@@ -259,7 +314,7 @@ function fixture(
     gh,
     `
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 const [route,...args]=process.argv.slice(2);
 const file=process.env.FIXTURE_STATE;
 const s=JSON.parse(fs.readFileSync(file,"utf8"));
@@ -275,15 +330,171 @@ if(route==="sleep") {s.settlementSleeps.push(Number(args[0]));save();process.exi
 s.calls.push([route,...args]);save();
 if(args.some(arg=>arg.includes("{owner}")||arg.includes("{repo}"))) fail("protected unresolved repository placeholder");
 const main=()=>git(["--git-dir="+process.env.FIXTURE_REMOTE,"rev-parse","refs/heads/main"]);
+const quota=()=>{
+  if(args[0]==="pr") fail("GraphQL: API rate limit already exceeded for user ID 123.");
+  out({data:null,errors:[{type:"RATE_LIMITED",message:"API rate limit exceeded for fixture-operator."}]});
+  fail("gh: API rate limit exceeded for fixture-operator. (RATE_LIMITED)");
+};
+const postComment=(body)=>{
+  s.posts++;
+  if(s.cleanup==="absent") git(["push","-q","origin",":refs/heads/topic"]);
+  if(s.cleanup==="advanced") {
+    s.cleanupHead=git(["commit-tree",git(["rev-parse",s.pr.headRefOid+"^{tree}"]),"-p",s.pr.headRefOid],"Branch advance\\n");
+    git(["push","-q","origin",s.cleanupHead+":refs/heads/topic"]);
+  }
+  const url=s.pr.url+"#issuecomment-1";
+  if(s.comment!=="rejected") s.comments.push({body,html_url:url});
+  save();
+  if(s.comment!=="success") fail("comment response lost");
+  return url;
+};
+if(args[0]==="api"&&args.includes("repos/fixture/repo/pulls/123")&&
+  (s.restReadFailuresRemaining>0||s.restReadFailureAtMainReads.includes(s.restMainReads))) {
+  if(s.restReadFailuresRemaining>0) s.restReadFailuresRemaining--;
+  s.restReadFailureAtMainReads=s.restReadFailureAtMainReads.filter(read=>read!==s.restMainReads);
+  const primary=s.restReadFailure==="core";
+  out("HTTP/2.0 403 Forbidden\\nX-RateLimit-Resource: core\\nX-RateLimit-Remaining: "+(primary?"0":"4999")+"\\n\\n"+
+    JSON.stringify({message:primary?"API rate limit exceeded for fixture-operator.":s.restReadFailure==="secondary"?"You have exceeded a secondary rate limit.":"Resource not accessible by integration"}));
+  fail("gh: synthetic REST read rejected (HTTP 403)");
+}
+const quotaRead=s.quotaAt==="checks"&&args[0]==="pr"&&args[1]==="checks"||
+  s.quotaAt==="preview"&&args.some(arg=>arg.includes("viewerMergeBodyText"))||
+  s.quotaAt==="observe"&&s.observationReads>=s.quotaAfterObservations&&args.includes("graphql")&&!args.some(arg=>arg.includes("viewerMergeBodyText"));
+if(quotaRead&&s.quotaFailuresRemaining!==0) {
+  if(s.quotaFailuresRemaining!==null) s.quotaFailuresRemaining--;
+  quota();
+}
+const restMerge=args[0]==="api"&&args.includes("repos/fixture/repo/pulls/123/merge");
+const restCheckRuns=()=>{
+  if(["missing","status-only"].includes(s.restChecks)) return [];
+  const check={id:1,head_sha:s.pr.headRefOid,name:s.restContexts[0],status:"completed",conclusion:s.gates==="pass"?"success":"failure",
+    started_at:"2026-09-20T00:00:00Z",check_suite:{id:10},app:{id:s.restCheckApp,slug:s.restCheckApp===15368?"github-actions":"custom-ci"}};
+  if(s.restUnseenSuite==="partial-pending") return [check,{...check,id:2,name:"detect-changes",check_suite:{id:2}}];
+  if(!s.restDuplicate) return s.restContexts.map((name,index)=>({...check,id:index+1,name,check_suite:{id:10+index},
+    conclusion:name===s.restFailedContext?"failure":check.conclusion}));
+  return [{...check,conclusion:"failure"},{...check,id:2,check_suite:{id:20},
+    started_at:s.restDuplicate==="missing-time"?null:s.restDuplicate==="same-time"?check.started_at:"2026-09-20T00:01:00Z"}];
+};
+const restCheckSuites=()=>{
+  const suites=restCheckRuns().map(check=>{
+    const running=s.restSuite==="rerunning"||(s.restUnseenSuite==="partial-pending"&&check.check_suite.id===2);
+    return {id:check.check_suite.id,head_sha:s.pr.headRefOid,app:check.app,
+      status:running?"in_progress":"completed",conclusion:running?null:check.conclusion};
+  });
+  if(s.restUnseenSuite&&s.restUnseenSuite!=="partial-pending") {
+    const empty=s.restUnseenSuite.startsWith("queued-empty");
+    const pending=empty||["pending","other-app"].includes(s.restUnseenSuite);
+    const failed=["failed","irrelevant-failure"].includes(s.restUnseenSuite);
+    for(const id of s.restUnseenSuite==="labeler"?[30,31]:[30]) suites.push({id,head_sha:s.pr.headRefOid,
+      app:{id:s.restUnseenSuite==="other-app"?999:s.restCheckApp,slug:s.restUnseenSuite==="other-app"?"another-app":s.restCheckApp===15368?"github-actions":"custom-ci"},
+      status:empty?"queued":pending?"in_progress":"completed",conclusion:pending?null:failed?"failure":"skipped",
+      updated_at:s.restUnseenSuite==="missing-version"?undefined:"2026-09-20T00:01:00Z",
+      latest_check_runs_count:s.restUnseenSuite==="missing-count"?undefined:empty?0:["failed","hidden-skipped"].includes(s.restUnseenSuite)?1:3});
+  }
+  return suites;
+};
 const advanceMain=()=>{
   const parent=main();
   const next=git(["--git-dir="+process.env.FIXTURE_REMOTE,"commit-tree",git(["--git-dir="+process.env.FIXTURE_REMOTE,"rev-parse",parent+"^{tree}"]),"-p",parent],"Remote advance\\n");
   git(["--git-dir="+process.env.FIXTURE_REMOTE,"update-ref","refs/heads/main",next,parent]);
   s.mainAdvances.push(next);
 };
-if(args[0]==="repo") out(args.includes("--jq")?s.repo.nameWithOwner:s.repo);
-else if(args[0]==="api"&&args.includes("user")) out("relay-reader");
-else if(args.includes("graphql")&&args.includes("query=query { viewer { login } }")) out(args.includes("--include") ? "HTTP/2.0 200 OK\\n\\n" + JSON.stringify({data:{viewer:{login:s.operator}}}) : s.operator);
+if(args[0]==="browse") out(s.repo.url);
+else if(args[0]==="repo") out(args.includes("--jq")?s.repo.nameWithOwner:s.repo);
+else if(args[0]==="api"&&args.includes("rate_limit")) out({resources:{graphql:{remaining:0,limit:5000,reset:1900000000},core:{remaining:4999,limit:5000,reset:1900000000}}});
+else if(args[0]==="api"&&args.some(arg=>new RegExp("^repos/[^/]+/[^/]+$").test(arg))) {
+  if(!args.includes("Cache-Control: max-age=0")) fail("missing live repository header");
+  if(!args.includes("--hostname")) fail("missing repository hostname");
+  if(s.repoAuthorityUnavailable) fail("repository metadata unavailable");
+  out(args.includes("--include")?"HTTP/2.0 200 OK\\n\\n"+JSON.stringify(s.repoAuthority):s.repoAuthority);
+}
+else if(args[0]==="api"&&args.includes("user")) {
+  if(route==="direct"&&JSON.stringify(args)===JSON.stringify(["api","--hostname","github.com","user","--include"])) out("HTTP/2.0 200 OK\\n\\n"+JSON.stringify({login:s.operator}));
+  else out("relay-reader");
+}
+else if(args[0]==="api"&&args.includes("repos/fixture/repo/pulls/123")) {
+  if(s.restObservation) {
+    if(s.restObservation.pr) Object.assign(s.pr,s.restObservation.pr);
+    if(s.restObservation.advanceMain) advanceMain();
+    if(s.restObservation.gates) s.gates=s.restObservation.gates;
+    s.restObservation=null;save();
+  }
+  out({node_id:s.pr.id,number:s.pr.number,html_url:s.pr.url,title:"Fixture repair",body:s.previewBody,
+    state:s.pr.state==="OPEN"?"open":"closed",merged:s.pr.state==="MERGED",merged_at:s.pr.state==="MERGED"?"2026-09-20T00:00:00Z":null,
+    merge_commit_sha:s.pr.mergeCommit?.oid??null,draft:s.pr.isDraft,
+    auto_merge:s.pr.autoMergeRequest?{merge_method:s.pr.autoMergeRequest.mergeMethod.toLowerCase()}:null,
+    head:{sha:s.pr.headRefOid,ref:"topic",repo:s.repoAuthority},base:{ref:s.pr.baseRefName,sha:main(),repo:s.repoAuthority},
+    user:{login:s.pr.author.login,type:s.pr.author.__typename},
+    mergeable:s.pr.mergeable==="UNKNOWN"?null:s.pr.mergeable==="MERGEABLE",mergeable_state:s.pr.mergeStateStatus.toLowerCase()});
+}
+else if(args[0]==="api"&&args.includes("repos/fixture/repo/git/ref/heads/main")) {
+  s.restMainReads++;
+  if(s.restMainAdvance&&s.pr.state==="OPEN") {
+    const retained=spawnSync("git",["show","refs/openclaw/pr-merge-outcomes/123:outcome.json"],{cwd:process.env.FIXTURE_REPO,encoding:"utf8"});
+    if(retained.status===0) {
+      const intent=JSON.parse(retained.stdout);
+      if(intent.phase==="intent"&&intent.accepted===false) {
+        if(s.restMainAdvance.boundary==="before-evidence"||s.restMainAdvance.observed) {
+          git(["push","-q","origin",s.restMainAdvance.main+":refs/heads/main"]);
+          s.restMainAdvance=null;
+        } else s.restMainAdvance.observed=true;
+      }
+    }
+  }
+  const reference={ref:"refs/heads/main",object:{type:"commit",sha:main()}};
+  if(s.restMainReads>s.restMainFaultAfterReads) {
+    if(s.restMainFault==="wrong-ref") reference.ref="refs/tags/main";
+    if(s.restMainFault==="wrong-type") reference.object.type="tag";
+    if(s.restMainFault==="missing-object") delete reference.object;
+    if(s.restMainFault==="invalid-sha") reference.object.sha="not-a-commit";
+  }
+  out(reference);
+  if(s.pr.state==="MERGED"&&s.restAdvanceMain) {s.restAdvanceMain=false;advanceMain();}
+}
+else if(args[0]==="api"&&args.includes("repos/fixture/repo/branches/main/protection")) {
+  if(s.restPolicy==="classic") out('HTTP/2.0 200 OK\\n\\n{}');
+  else {out('HTTP/2.0 404 Not Found\\n\\n{"message":"Branch not protected"}');fail("gh: Branch not protected (HTTP 404)");}
+}
+else if(args[0]==="api"&&args.some(arg=>arg.startsWith("repos/fixture/repo/rules/branches/main?"))) {
+  out(s.restPolicy==="missing"?[null]:[[
+    {type:"required_status_checks",parameters:{required_status_checks:s.restContexts.map(context=>({context,integration_id:s.restRequiredApp}))}},
+    ...(s.restPolicy==="queue"?[{type:"merge_queue"}]:s.restPolicy==="unsupported"?[{type:"workflows"}]:[])
+  ]]);
+}
+else if(args[0]==="api"&&args.some(arg=>arg.startsWith("repos/fixture/repo/check-suites/"))) {
+  const endpoint=args.find(arg=>arg.startsWith("repos/fixture/repo/check-suites/"));
+  const id=Number(endpoint.split("/")[4]);
+  const suite=restCheckSuites().find(suite=>suite.id===id);
+  if(!suite) fail("unknown check suite");
+  if(endpoint.includes("/check-runs?")) {
+    const names=s.restUnseenSuite.startsWith("queued-empty")?[]:["failed","hidden-skipped"].includes(s.restUnseenSuite)?["CI"]:["label","label-issues","backfill-pr-labels"];
+    const checks=names.map((name,index)=>({id:id*100+index,head_sha:s.pr.headRefOid,name,app:suite.app,check_suite:{id},
+      status:"completed",conclusion:suite.conclusion,started_at:"2026-09-20T00:00:00Z"}));
+    out([{total_count:checks.length+(s.restUnseenSuite==="incomplete-suite"?1:0),check_runs:checks}]);
+  } else out(s.restUnseenSuite==="changed-suite"?{...suite,updated_at:"2026-09-20T00:02:00Z"}:["changed-count","queued-empty-drift"].includes(s.restUnseenSuite)?{...suite,latest_check_runs_count:4}:suite);
+}
+else if(args[0]==="api"&&args.some(arg=>arg.includes("/check-runs?"))) {
+  const endpoint=args.find(arg=>arg.includes("/check-runs?"));
+  const context=new URL(endpoint,"https://github.com").searchParams.get("check_name");
+  const checks=restCheckRuns().filter(check=>context===null||check.name===context);
+  out([{total_count:checks.length,check_runs:checks}]);
+}
+else if(args[0]==="api"&&args.some(arg=>arg.includes("/status?"))) {
+  const statuses=["bound-status","status-only","wrong-app-status","failed-status"].includes(s.restChecks)?[{id:2,context:"CI",state:s.restChecks==="failed-status"?"failure":"success"}]:[];
+  out([{total_count:statuses.length,sha:s.pr.headRefOid,state:s.restChecks==="inconsistent-status"?"failure":statuses[0]?.state??"pending",statuses}]);
+}
+else if(args[0]==="api"&&args.some(arg=>arg.includes("/check-suites?"))) {
+  const suites=restCheckSuites();
+  const page={total_count:suites.length,check_suites:suites};
+  out(args.includes("--slurp")?[page]:page);
+}
+else if(args[0]==="api"&&args.some(arg=>arg.startsWith("repos/fixture/repo/actions/runs?"))) {
+  const runs=restCheckRuns().map((check,index)=>({id:100+index,head_sha:s.pr.headRefOid,check_suite_id:check.check_suite.id,
+    workflow_id:index===1&&s.restDuplicate==="other-workflow"?43:42,event:index===1&&s.restDuplicate==="other-event"?"push":"pull_request"}));
+  if(s.restDuplicate==="missing-mapping") runs.pop();
+  if(s.restDuplicate==="ambiguous-mapping") runs.push({...runs[1],id:103,workflow_id:44});
+  out([{total_count:runs.length,workflow_runs:runs}]);
+}
 else if(args[0]==="pr"&&args[1]==="checks") {
   if(s.duringChecks?.bodyPath) fs.writeFileSync(s.duringChecks.bodyPath,"Changed later");
   if(s.duringChecks?.head) s.pr.headRefOid=s.duringChecks.head;
@@ -296,8 +507,15 @@ else if(args[0]==="pr"&&args[1]==="view") {
   if(route==="path"&&s.stale) {pr.state="OPEN";pr.mergeCommit=null;}
   if(args.includes("--jq")) {const q=args[args.indexOf("--jq")+1];out(q===".state"?pr.state:q===".mergeCommit.oid"?pr.mergeCommit?.oid??"null":pr.url);}
   else out(pr);
-} else if(args[0]==="pr"&&args[1]==="merge") {
+} else if((args[0]==="pr"&&args[1]==="merge")||restMerge) {
   s.mutations++;
+  if(s.quotaAt==="mutation") {s.quotaAt="observe";quota();}
+  if(restMerge) {
+    if(!args.includes("PUT")||args[args.indexOf("--input")+1]!=="-") fail("invalid REST merge request");
+    s.restMergePayload=JSON.parse(fs.readFileSync(0,"utf8"));
+    if(s.restMergePayload.sha!==s.pr.headRefOid||s.restMergePayload.merge_method!=="squash") fail("unpinned REST merge request");
+    s.mergeBody=s.restMergePayload.commit_message;
+  }
   if(args.includes("--body-file")) s.mergeBody=fs.readFileSync(args[args.indexOf("--body-file")+1],"utf8");
   if(args.includes("--disable-auto")) fail("unexpected cancellation");
   if(s.mode==="pending"||s.mode==="pending-error") {
@@ -334,6 +552,9 @@ else if(args[0]==="pr"&&args[1]==="view") {
     if(s.crash==="dispatch") {save();process.kill(Number(process.env.FIXTURE_LEADER),"SIGKILL");process.exit(1);}
     if(s.mutations===1&&["applied-open","applied-merged","unapplied"].includes(s.mode)) fail("non-200 OK status code: 502 Bad Gateway");
   }
+  if(restMerge) out({merged:true,sha:s.pr.mergeCommit?.oid});
+} else if(args.includes("graphql")&&args.some(arg=>arg.includes("addComment("))) {
+  out({data:{addComment:{commentEdge:{node:{url:postComment(args.find(arg=>arg.startsWith("body="))?.slice(5))}}}}});
 } else if(args.includes("graphql")) {
   s.reads++;save();
   if(s.unavailable) fail("metadata unavailable");
@@ -348,25 +569,13 @@ else if(args[0]==="pr"&&args[1]==="view") {
     if(step?.unavailable) fail("metadata unavailable");
     if(step?.invalid) {save();out({data:{repository:{}}});process.exit(0);}
     const pr={...s.pr};if(s.drift&&s.reads%2===0) pr.baseRefName="changed";
-    const repository={...s.repo,ref:{target:{oid:step?.reportedMain??main()}},pullRequest:pr};
-    if(s.repoNodeId!==null) {repository.id=s.repoNodeId;repository.databaseId=s.repo.id;}
+    const repository={...s.repoGraphql,ref:{target:{oid:step?.reportedMain??main()}},pullRequest:pr};
     out({data:{repository}});
     if(step?.advanceAfterRead) advanceMain();
   }
 } else if(args.some(x=>x.includes("/comments"))) {
   if(args.includes("POST")) {
-    s.posts++;
-    if(s.cleanup==="absent") git(["push","-q","origin",":refs/heads/topic"]);
-    if(s.cleanup==="advanced") {
-      s.cleanupHead=git(["commit-tree",git(["rev-parse",s.pr.headRefOid+"^{tree}"]),"-p",s.pr.headRefOid],"Branch advance\\n");
-      git(["push","-q","origin",s.cleanupHead+":refs/heads/topic"]);
-    }
-    const body=args.find(x=>x.startsWith("body="))?.slice(5);
-    const url=s.pr.url+"#issuecomment-1";
-    if(s.comment!=="rejected") s.comments.push({body,html_url:url});
-    save();
-    if(s.comment!=="success") fail("comment response lost");
-    out(url);
+    out(postComment(args.find(x=>x.startsWith("body="))?.slice(5)));
   } else {
     if(!args.includes("Cache-Control: max-age=0")) fail("missing live comment header");
     s.issueCommentReads++;
@@ -379,9 +588,10 @@ else if(args[0]==="pr"&&args[1]==="view") {
     save();
     out([[...s.issueComments,...s.comments]]);
   }
-} else if(args[0]==="api"&&new RegExp("^repos/fixture/repo/commits/[0-9a-f]{40}$").test(args[1])&&args.includes("--jq")) {
-  const oid=args[1].split("/").at(-1);
-  out({name:git(["show","-s","--format=%an",oid]),email:git(["show","-s","--format=%ae",oid]),user:{login:s.pr.author.login,type:"User"}});
+} else if(args[0]==="api"&&args.some(arg=>arg.startsWith("repos/fixture/repo/commits?"))) {
+  const query=new URL(args.find(arg=>arg.startsWith("repos/fixture/repo/commits?")),"https://github.com").searchParams;
+  const commits=git(["rev-list","--max-count="+query.get("per_page"),query.get("sha")]).split("\\n");
+  out(commits.map(oid=>({sha:oid,commit:{author:{name:git(["show","-s","--format=%an",oid]),email:git(["show","-s","--format=%ae",oid])}},author:{login:s.pr.author.login,type:"User"}})));
 } else if(args.some(x=>x.includes("/commits/"))) {
   if(s.audit) fail("audit unavailable");
   out({parents:[{sha:git(["rev-parse",s.pr.mergeCommit.oid+"^1"])}]});
@@ -405,8 +615,19 @@ repo_root() { printf '%s\\n' "$FIXTURE_REPO"; }
 ensure_gh_api_auth() { :; }
 verify_prep_branch_matches_prepared_head() { [ "$(command git rev-parse HEAD)" = "$2" ]; }
 node() { if [[ "$1" == */watch-pr-ci.mjs ]]; then shift; command node "$FIXTURE_GH" watch "$@"; else command node "$@"; fi; }
-gh() { command node "$FIXTURE_GH" path "$@"; }
-gh_plain() { command node "$FIXTURE_GH" direct "$@"; }
+pr_gh() {
+  if [ "$1" = commit-authors ]; then pr_gh_run read "$@";
+  else command node "$FIXTURE_GH" path "$@"; fi
+}
+pr_gh_plain() {
+  if [ "$1" = repo-authority ] || [ "$1" = issue-comments ] || [ "$1" = writer-login ]; then
+    pr_gh_run plain "$@"
+  elif [ "$FIXTURE_REAL_GH" = true ] && { [ "$1" = pr ] && { [ "$2" = checks ] || [ "$2" = merge ]; } || [[ " $* " == *" graphql "* ]]; }; then
+    pr_gh_run "\${pr_gh_quota_route:-plain}" "$@"
+  else
+    command node "$FIXTURE_GH" direct "$@"
+  fi
+}
 # Skip only admission settlement delays; preserve the operation lock's short sleeps.
 sleep() { if [ "$#" = 1 ] && { [ "$1" = 1 ] || [ "$1" = 2 ]; }; then command node "$FIXTURE_GH" sleep "$1"; else command sleep "$@"; fi; }
 verify_crabbox_admin_merge_bypass() {
@@ -415,7 +636,7 @@ verify_crabbox_admin_merge_bypass() {
 }
 # Fault the Git boundary, not the outcome owner: crash after intent CAS, or
 # reject later receipt writes. All successful object/ref operations are real.
-git() {
+pr_git() {
   if [ "$1" = update-ref ] && [ "\${3-}" = refs/openclaw/pr-merge-outcomes/123 ]; then
     local crash
     crash=$(command jq -r .crash "$FIXTURE_STATE")
@@ -440,13 +661,19 @@ begin_pr_operation_validation_phase
 if [ -n "\${5:-}" ]; then
   merge_complete 123 "$5"
 else
-  merge_run 123 "\${1:-false}" "\${2:-}" "\${3:-}" "\${4:-}"
+  merge_run 123 "\${1:-false}" "\${2:-}" "\${3:-}" "\${4:-}" "\${6:-}"
 fi
 `,
   );
   chmodSync(shell, 0o755);
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\nexec "$FIXTURE_NODE" "$FIXTURE_GH" direct "$@"\n', {
+    mode: 0o755,
+  });
   const env = {
     ...gitEnv,
+    PATH: `${bin}:${gitEnv.PATH}`,
     TMPDIR: root,
     FIXTURE_STATE: statePath,
     FIXTURE_ROOT: root,
@@ -454,6 +681,7 @@ fi
     FIXTURE_REMOTE: remote,
     FIXTURE_SCRIPTS: scripts,
     FIXTURE_GH: gh,
+    FIXTURE_NODE: nodeExecutable,
     OPENCLAW_PR_MERGE_METHOD: "squash",
     OPENCLAW_PR_STRICT_DRIFT: "",
     GIT_TRACE2_EVENT: join(root, "git.trace.jsonl"),
@@ -466,9 +694,10 @@ fi
     replacementHead = "",
     bodyPath = "",
     completionOid = "",
+    legacyDirectory = "",
   ) => {
     const result = spawnSync(
-      process.execPath,
+      nodeExecutable,
       [
         join(scripts, "pr-lib/process-group-runner.mjs"),
         repo,
@@ -478,8 +707,18 @@ fi
         replacementHead,
         bodyPath,
         completionOid,
+        legacyDirectory,
       ],
-      { cwd, env: { ...env, OPENCLAW_PR_MERGE_METHOD: method }, encoding: "utf8", timeout: 20_000 },
+      {
+        cwd,
+        env: {
+          ...env,
+          FIXTURE_REAL_GH: String(Boolean(state().quotaAt)),
+          OPENCLAW_PR_MERGE_METHOD: method,
+        },
+        encoding: "utf8",
+        timeout: 20_000,
+      },
     );
     return { ...result, output: result.stdout + result.stderr };
   };
@@ -539,7 +778,7 @@ fi
   const ordinaryRead = () =>
     JSON.parse(
       execFileSync(
-        process.execPath,
+        nodeExecutable,
         [gh, "path", "pr", "view", "123", "--json", "state,headRefOid,mergeCommit"],
         { cwd: repo, env, encoding: "utf8" },
       ),
@@ -611,6 +850,29 @@ function expectNoProbeFetch(trace: ReturnType<ReturnType<typeof fixture>["trace"
   ).toEqual([]);
 }
 
+function createLegacyRefusal(f: ReturnType<typeof fixture>) {
+  const directory = join(f.root, "legacy-evidence");
+  mkdirSync(directory);
+  const capture = `X Pull request fixture/repo#123 is not mergeable: the merge commit cannot be cleanly created.
+To have the pull request merged after all the requirements have been met, add the \`--auto\` flag.
+Run the following to resolve the merge conflicts locally:
+  gh pr checkout 123 && git fetch origin main && git merge origin/main
+`;
+  writeFileSync(join(f.worktree, ".local/merge-output.log"), capture);
+  const files = Object.fromEntries(
+    ["merge-output.log", "prep.env", "prep.md", "gates.env"].map((name) => {
+      const contents = readFileSync(join(f.worktree, ".local", name), "utf8");
+      writeFileSync(join(directory, name), contents);
+      return [name, contents];
+    }),
+  );
+  return {
+    directory,
+    files,
+    oid: f.git(["hash-object", "--no-filters", join(directory, "merge-output.log")]),
+  };
+}
+
 function reconciledMergeAfterCleanup(admin = false) {
   const f = fixture();
   f.save({ ...f.state(), mode: "applied-open", admin, gates: admin ? "fail" : "pass" });
@@ -631,7 +893,610 @@ function reconciledMergeAfterCleanup(admin = false) {
   return f;
 }
 
+describePosix("native merge with exhausted GraphQL quota", () => {
+  function restFixture(...args: Parameters<typeof fixture>) {
+    const f = fixture(...args);
+    f.save({ ...f.state(), restPolicy: "supported" });
+    return f;
+  }
+
+  it("uses one pinned REST PUT for ordinary squash without GraphQL reads", () => {
+    const f = restFixture();
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(0);
+    expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+    expect(f.state().mutations).toBe(1);
+    expect(f.state().restMergePayload).toMatchObject({ sha: f.head, merge_method: "squash" });
+    expect(f.state().restMergePayload).not.toHaveProperty("commit_title");
+    expect(f.state().calls.filter((call) => call.includes("PUT"))).toHaveLength(1);
+    expect(
+      f
+        .state()
+        .calls.some((call) => call.includes("graphql") || (call[1] === "pr" && call[2] !== "view")),
+    ).toBe(false);
+  });
+
+  it("switches exhausted REST reads to one pinned GraphQL merge", () => {
+    const f = restFixture();
+    f.save({ ...f.state(), restReadFailure: "core", restReadFailuresRemaining: 1 });
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(0);
+    expect(f.record()).toMatchObject({ phase: "complete", head: f.head });
+    expect(f.record()).not.toHaveProperty("transport");
+    expect(f.state().mutations).toBe(1);
+    expect(f.state().restMergePayload).toBeNull();
+    const merges = f.state().calls.filter((call) => call[1] === "pr" && call[2] === "merge");
+    expect(merges).toHaveLength(1);
+    expect(merges[0]).toEqual(expect.arrayContaining(["--match-head-commit", f.head]));
+  });
+
+  it.each(["core", "secondary", "access"])(
+    "does not dispatch after REST %s failure without an available alternate",
+    (failure) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        restReadFailure: failure,
+        restReadFailuresRemaining: 1,
+        quotaAt: "checks",
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).not.toBe(0);
+      expect(f.state().mutations).toBe(0);
+      expect(() => f.record()).toThrow();
+      const fallbackChecks = f
+        .state()
+        .calls.filter((call) => call[1] === "pr" && call[2] === "checks");
+      expect(fallbackChecks).toHaveLength(failure === "core" ? 1 : 0);
+      if (failure === "core") {
+        expect(run.output).toContain("Neither GitHub transport");
+      }
+    },
+  );
+
+  it.each(["preview", "observe"])(
+    "completes pinned REST squash after quota exhaustion during %s and preserves human credit",
+    (quotaAt) => {
+      const f = restFixture(
+        "Repair\n\nCo-authored-by: Source <source@example.com>\nCo-authored-by: Codex <codex@openai.com>",
+        undefined,
+        false,
+        { name: "Contributor", email: "contributor@example.com" },
+      );
+      f.save({ ...f.state(), quotaAt, restReadFailure: "core", restReadFailuresRemaining: 1 });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(0);
+      expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+      expect(f.state().restMergePayload).toMatchObject({ sha: f.head, merge_method: "squash" });
+      expect(f.state().mergeBody).toContain(
+        "Co-authored-by: Contributor <contributor@example.com>",
+      );
+      expect(f.state().mergeBody).toContain("Co-authored-by: Source <source@example.com>");
+      expect(f.state().mergeBody).not.toContain("codex@openai.com");
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(1);
+      expect(f.state().calls.some((call) => call[1] === "pr" && call[2] === "merge")).toBe(false);
+      expect(f.git(["show", `${f.record().landed}:owner.txt`])).toBe("after");
+      expect(existsSync(f.worktree)).toBe(false);
+    },
+  );
+
+  it.each(["none", "head", "lifecycle", "main"])(
+    "settles UNKNOWN GraphQL mergeability through REST without hiding %s drift",
+    (drift) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "observe",
+        quotaAfterObservations: 1,
+        restReadFailure: "core",
+        restReadFailuresRemaining: 1,
+        observations: [{ pr: unknownProjection }],
+        restObservation: {
+          pr: {
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            ...(drift === "head" ? { headRefOid: f.base } : {}),
+            ...(drift === "lifecycle" ? { state: "CLOSED" } : {}),
+          },
+          advanceMain: drift === "main",
+        },
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(["none", "main"].includes(drift) ? 0 : 1);
+      expect(f.state().observationReads).toBe(1);
+      expect(f.state().mutations).toBe(["none", "main"].includes(drift) ? 1 : 0);
+      if (["none", "main"].includes(drift)) {
+        expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+      } else {
+        expect(() => f.record()).toThrow();
+      }
+    },
+  );
+
+  it.each(["before-evidence", "during-evidence"] as const)(
+    "lands ordinary REST squash when main advances %s at dispatch",
+    (boundary) => {
+      const f = restFixture();
+      const main = f.commit(f.tree("before\n", "advanced\n"), [f.base]);
+      f.save({
+        ...f.state(),
+        quotaAt: "checks",
+        restMainAdvance: { boundary, observed: false, main },
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(0);
+      expect(f.record()).toMatchObject({
+        phase: "complete",
+        transport: "rest",
+        head: f.head,
+        main: f.base,
+      });
+      expect(f.state().restMainAdvance).toBeNull();
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(1);
+      expect(f.git(["show", `${f.record().landed}:owner.txt`])).toBe("after");
+      expect(f.git(["show", `${f.record().landed}:sibling.txt`])).toBe("advanced");
+    },
+  );
+  it("keeps the prepared squash message when GraphQL depletes during final stability verification", () => {
+    const credit = "Co-authored-by: Contributor <contributor@example.com>";
+    const f = restFixture(`Repair\n\n${credit}`);
+    f.save({
+      ...f.state(),
+      quotaAt: "observe",
+      quotaAfterObservations: 2,
+      restReadFailure: "core",
+      restReadFailuresRemaining: 1,
+    });
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(0);
+    expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+    expect(f.state().observationReads).toBe(2);
+    expect(f.state().mergeBody).toBe(`Fixture body\n\n${credit}\n`);
+    expect(f.state().restMergePayload).toMatchObject({ sha: f.head, merge_method: "squash" });
+    expect(f.state().mutations).toBe(1);
+  });
+
+  it("keeps the recomposed body when reads switch from GraphQL through REST and back", () => {
+    const credit = "Co-authored-by: Contributor <contributor@example.com>";
+    const f = restFixture(`Repair\n\n${credit}`);
+    f.save({
+      ...f.state(),
+      quotaAt: "observe",
+      quotaFailuresRemaining: 1,
+      restReadFailure: "core",
+      restReadFailureAtMainReads: [1, 6],
+    });
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(0);
+    expect(f.record()).toMatchObject({ phase: "complete", head: f.head });
+    expect(f.record()).not.toHaveProperty("transport");
+    expect(f.state().restReadFailureAtMainReads).toEqual([]);
+    expect(f.state().mergeBody).toBe(`Fixture body\n\n${credit}\n`);
+    expect(f.state().restMergePayload).toBeNull();
+    expect(f.state().mutations).toBe(1);
+  });
+
+  it.each(["merge", "rebase", "auto", "admin"])(
+    "rejects %s routing when GraphQL depletes only during final stability verification",
+    (route) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "observe",
+        quotaAfterObservations: 2,
+        admin: route === "admin",
+        gates: route === "admin" ? "fail" : "pass",
+        restObservation: { gates: "pass" },
+      });
+      if (route === "admin") {
+        const gates = join(f.worktree, ".local/gates.env");
+        writeFileSync(
+          gates,
+          readFileSync(gates, "utf8").replace("GATES_MODE=full", "GATES_MODE=remote_crabbox_aws"),
+        );
+      }
+
+      const run = f.run(
+        route === "auto",
+        f.repo,
+        route === "merge" || route === "rebase" ? route : "squash",
+      );
+
+      expect(run.status, run.output).toBe(1);
+      expect(f.state().observationReads).toBe(2);
+      expect(f.state().mutations).toBe(0);
+      expect(() => f.record()).toThrow();
+    },
+  );
+
+  it.each(["missing", "classic", "queue", "unsupported", "no-admin"])(
+    "rejects %s branch policy before recording a REST merge intent",
+    (restPolicy) => {
+      const f = restFixture();
+      const state = f.state();
+      if (restPolicy === "no-admin") {
+        state.repoAuthority.permissions = { admin: false };
+      }
+      f.save({ ...state, quotaAt: "checks", restPolicy });
+
+      const run = f.run();
+
+      expect(run.status, run.output).not.toBe(0);
+      expect(run.output).toContain(
+        restPolicy === "missing" ? "REST merge fallback" : "Neither GitHub transport",
+      );
+      expect(
+        f.state().calls.filter((call) => call[1] === "pr" && call[2] === "checks"),
+      ).toHaveLength(restPolicy === "missing" ? 0 : 1);
+      expect(f.state().mutations).toBe(0);
+      expect(f.state().posts).toBe(0);
+      expect(() => f.record()).toThrow();
+    },
+  );
+
+  it.each([
+    { fault: "wrong-ref", afterReads: 0 },
+    { fault: "wrong-type", afterReads: 1 },
+    { fault: "missing-object", afterReads: 0 },
+    { fault: "invalid-sha", afterReads: 1 },
+  ])(
+    "rejects $fault main reference evidence after $afterReads valid reads",
+    ({ fault, afterReads }) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "checks",
+        restMainFault: fault,
+        restMainFaultAfterReads: afterReads,
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(1);
+      expect(run.output).toContain("REST merge fallback: main is unavailable");
+      expect(f.state().mutations).toBe(0);
+      expect(() => f.record()).toThrow();
+    },
+  );
+
+  it.each([
+    { contexts: ["CI / checks? & +"], failedContext: "", admitted: true },
+    { contexts: ["CI", "Quality"], failedContext: "", admitted: true },
+    { contexts: ["CI", "Quality"], failedContext: "Quality", admitted: false },
+  ])(
+    "preserves all required contexts $contexts with failing context '$failedContext'",
+    ({ contexts, failedContext, admitted }) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "checks",
+        restContexts: contexts,
+        restFailedContext: failedContext,
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(admitted ? 0 : 1);
+      expect(f.state().mutations).toBe(admitted ? 1 : 0);
+      const requests = f
+        .state()
+        .calls.flatMap((call) =>
+          call.filter(
+            (arg) => arg.startsWith("repos/fixture/repo/commits/") && arg.includes("/check-runs?"),
+          ),
+        )
+        .map((endpoint) => new URL(endpoint, "https://github.com"));
+      expect(requests.length).toBeGreaterThan(0);
+      expect(
+        requests.every(
+          (request) =>
+            request.searchParams.get("check_name") === (contexts.length === 1 ? contexts[0] : null),
+        ),
+      ).toBe(true);
+      if (admitted) {
+        expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+      } else {
+        expect(() => f.record()).toThrow();
+      }
+    },
+  );
+
+  it("accepts an app-bound required check alongside a successful same-name legacy status", () => {
+    const f = restFixture();
+    f.save({ ...f.state(), quotaAt: "checks", restChecks: "bound-status" });
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(0);
+    expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+    expect(f.state().mutations).toBe(1);
+  });
+
+  it.each([
+    "missing",
+    "status-only",
+    "wrong-app",
+    "wrong-app-status",
+    "failed",
+    "failed-status",
+    "inconsistent-status",
+  ])("does not admit REST merge with %s required-check evidence", (fault) => {
+    const f = restFixture();
+    f.save({
+      ...f.state(),
+      quotaAt: "checks",
+      restChecks: fault,
+      restCheckApp: fault.startsWith("wrong-app") ? 999 : 15368,
+      gates: fault === "failed" ? "fail" : "pass",
+    });
+
+    const run = f.run();
+
+    expect(run.status, run.output).not.toBe(0);
+    expect(f.state().mutations).toBe(0);
+    expect(() => f.record()).toThrow();
+  });
+
+  it.each([
+    { restDuplicate: "same-workflow", admitted: true },
+    { restDuplicate: "other-workflow", admitted: false },
+    { restDuplicate: "other-event", admitted: false },
+    { restDuplicate: "missing-mapping", admitted: false },
+    { restDuplicate: "ambiguous-mapping", admitted: false },
+    { restDuplicate: "same-time", admitted: false },
+    { restDuplicate: "missing-time", admitted: false },
+  ])(
+    "preserves required-check rerun identity for $restDuplicate",
+    ({ restDuplicate, admitted }) => {
+      const f = restFixture();
+      f.save({ ...f.state(), quotaAt: "checks", restDuplicate });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(admitted ? 0 : 1);
+      expect(f.state().mutations).toBe(admitted ? 1 : 0);
+      if (admitted) {
+        expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+      } else {
+        expect(() => f.record()).toThrow();
+      }
+    },
+  );
+
+  it("rejects a successful required check while its suite is rerunning", () => {
+    const f = restFixture();
+    f.save({ ...f.state(), quotaAt: "checks", restSuite: "rerunning" });
+
+    const run = f.run();
+
+    expect(run.status, run.output).toBe(1);
+    expect(f.state().mutations).toBe(0);
+    expect(() => f.record()).toThrow();
+  });
+
+  it.each([
+    { restUnseenSuite: "pending", admitted: false },
+    { restUnseenSuite: "failed", admitted: false },
+    { restUnseenSuite: "partial-pending", admitted: false },
+    { restUnseenSuite: "other-app", admitted: true },
+    { restUnseenSuite: "labeler", admitted: true },
+    { restUnseenSuite: "hidden-skipped", admitted: false },
+    { restUnseenSuite: "irrelevant-failure", admitted: true },
+    { restUnseenSuite: "changed-suite", admitted: false },
+    { restUnseenSuite: "incomplete-suite", admitted: false },
+    { restUnseenSuite: "missing-version", admitted: false },
+    { restUnseenSuite: "missing-count", admitted: false },
+    { restUnseenSuite: "changed-count", admitted: false },
+    { restUnseenSuite: "queued-empty-unbound", restRequiredApp: null, admitted: true },
+    { restUnseenSuite: "queued-empty-custom", restRequiredApp: 45678, admitted: true },
+    { restUnseenSuite: "queued-empty-drift", admitted: false },
+  ])(
+    "checks fresh $restUnseenSuite suites missing from the earlier check-run snapshot",
+    ({ restUnseenSuite, admitted, restRequiredApp = 15368 }) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "checks",
+        restUnseenSuite,
+        restRequiredApp,
+        restCheckApp: restRequiredApp ?? 15368,
+      });
+
+      const run = f.run();
+
+      expect(run.status, run.output).toBe(admitted ? 0 : 1);
+      expect(f.state().mutations).toBe(admitted ? 1 : 0);
+      if (admitted) {
+        expect(f.record()).toMatchObject({ phase: "complete", transport: "rest", head: f.head });
+      } else {
+        expect(() => f.record()).toThrow();
+      }
+    },
+  );
+
+  it.each(["auto", "merge", "rebase", "admin"])(
+    "does not silently change the requested %s route to REST squash",
+    (route) => {
+      const f = restFixture();
+      f.save({
+        ...f.state(),
+        quotaAt: "checks",
+        admin: route === "admin",
+        gates: route === "admin" ? "fail" : "pass",
+      });
+      if (route === "admin") {
+        const gates = join(f.worktree, ".local/gates.env");
+        writeFileSync(
+          gates,
+          readFileSync(gates, "utf8").replace("GATES_MODE=full", "GATES_MODE=remote_crabbox_aws"),
+        );
+      }
+
+      const run = f.run(
+        route === "auto",
+        f.repo,
+        route === "merge" || route === "rebase" ? route : "squash",
+      );
+
+      expect(run.status, run.output).not.toBe(0);
+      expect(f.state().mutations).toBe(0);
+      expect(() => f.record()).toThrow();
+    },
+  );
+
+  it.each([
+    "supported",
+    "classic",
+    "queue",
+    "unsupported",
+    "no-admin",
+    "main-advance",
+    "open-main-advance",
+  ])(
+    "reconciles a lost REST merge reply after policy changes to %s without submitting another mutation",
+    (restPolicy) => {
+      const f = restFixture();
+      f.save({ ...f.state(), quotaAt: "checks", mode: "applied-open" });
+      const first = f.run();
+      expect(first.status, first.output).toBe(1);
+      expect(f.record()).toMatchObject({ phase: "intent", transport: "rest", accepted: false });
+      expect(f.state().mutations).toBe(1);
+      const intent = f.git(["rev-parse", outcomeRef]);
+      const captures = f.captures();
+      const landed = f.git(["--git-dir=" + f.remote, "rev-parse", "main"]);
+      f.recover();
+      const state = f.state();
+      if (restPolicy === "no-admin") {
+        state.repoAuthority.permissions = { admin: false };
+      }
+      if (restPolicy === "open-main-advance") {
+        state.restMainAdvance = {
+          boundary: "during-evidence",
+          observed: false,
+          main: f.commit(
+            f.git(["rev-parse", `${landed}^{tree}`]),
+            [landed],
+            "Open receipt advance\n",
+          ),
+        };
+      }
+      f.save({ ...state, restPolicy });
+
+      const unresolved = f.run();
+      expect(unresolved.status, unresolved.output).toBe(1);
+      expect(f.git(["rev-parse", outcomeRef])).toBe(intent);
+      expect(f.captures()).toEqual(captures);
+      expect(f.state().mutations).toBe(1);
+      if (restPolicy === "open-main-advance") {
+        expect(f.state().restMainAdvance).toBeNull();
+        expect(unresolved.output).toContain("main changed while reading evidence");
+      }
+      f.recover();
+      f.save({
+        ...f.state(),
+        gates: "fail",
+        restAdvanceMain: restPolicy === "main-advance",
+        pr: { ...f.state().pr, state: "MERGED", mergeCommit: { oid: landed } },
+      });
+
+      const resumed = f.run();
+
+      expect(resumed.status, resumed.output).toBe(0);
+      expect(f.record()).toMatchObject({
+        phase: "merged",
+        transport: "rest",
+        landed,
+        head: f.head,
+      });
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(0);
+      expect(f.state().mainAdvances).toHaveLength(restPolicy === "main-advance" ? 1 : 0);
+    },
+  );
+
+  it("never replays an exhausted GraphQL mutation through REST", () => {
+    const f = fixture();
+    f.save({ ...f.state(), quotaAt: "mutation" });
+    const first = f.run();
+    expect(first.status, first.output).toBe(1);
+    const intent = f.git(["rev-parse", outcomeRef]);
+    expect(f.record()).toMatchObject({ phase: "intent", accepted: false });
+    expect(f.state().mutations).toBe(1);
+    expect(f.state().restMergePayload).toBeNull();
+    f.recover();
+
+    const resumed = f.run();
+
+    expect(resumed.status, resumed.output).toBe(1);
+    expect(f.git(["rev-parse", outcomeRef])).toBe(intent);
+    expect(f.state().mutations).toBe(1);
+    expect(f.state().restMergePayload).toBeNull();
+  });
+});
+
 describePosix("native merge outcome with real Git and supervised lock recovery", () => {
+  it("explains every rejected admission fact and local conflicts before dispatch", () => {
+    const f = fixture();
+    f.advance("conflicting main\n", "stable\n");
+    f.save({
+      ...f.state(),
+      observations: [
+        {
+          pr: {
+            state: "CLOSED",
+            headRefOid: f.base,
+            baseRefName: "release",
+            isDraft: true,
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+            autoMergeRequest: { mergeMethod: "SQUASH" },
+            isInMergeQueue: true,
+          },
+        },
+      ],
+    });
+    const run = f.run();
+    expect(run.status, run.output).toBe(1);
+    for (const line of [
+      'state: observed="CLOSED"; expected="OPEN"',
+      `headRefOid: observed="${f.base}"; expected="${f.head}"`,
+      'baseRefName: observed="release"; expected="main"',
+      "isDraft: observed=true; expected=false",
+      'mergeable: observed="CONFLICTING"; expected="MERGEABLE|UNKNOWN"',
+      'autoMergeRequest: observed={"mergeMethod":"SQUASH"}; expected=null',
+      "isInMergeQueue: observed=true; expected=false",
+      'REST pulls/123: mergeable=false; mergeable_state="dirty"',
+      "Conflicting path: owner.txt",
+      `Local outcome ref ${outcomeRef}: absent`,
+      "Legacy .local/merge-output.log: absent",
+      "lock-recover, then rerun merge-run",
+    ]) {
+      expect(run.output).toContain(line);
+    }
+    expect(f.state().mutations).toBe(0);
+    expect(f.state().posts).toBe(0);
+    expect(() => f.record()).toThrow();
+    expect(f.captures()).toEqual([]);
+  });
+
   it("explicitly completes a reconciled merge after cleanup without another merge dispatch", () => {
     const f = reconciledMergeAfterCleanup();
     const landed = f.git(["--git-dir=" + f.remote, "rev-parse", "main"]);
@@ -1038,6 +1903,9 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       const run = f.run();
       expect(run.status, run.output).toBe(1);
       expect(run.output).toContain("PR or main changed during observation");
+      expect(run.output).toContain(`Local outcome ref ${outcomeRef}: present`);
+      expect(run.output).toContain("investigate; see scripts/AGENTS.md merge-outcome doctrine");
+      expect(run.output).not.toContain("lock-recover, then rerun merge-run");
       expect(f.git(["rev-parse", outcomeRef])).toBe(before);
       expect(f.state().mutations).toBe(1);
       expect(f.state().posts).toBe(0);
@@ -1258,6 +2126,186 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     expect(f.state().mutations).toBe(1);
   });
 
+  it("recovers a qualified legacy refusal with preserved evidence and one new current intent", () => {
+    const f = fixture();
+    const legacy = createLegacyRefusal(f);
+    const approvedHead = f.replacePreparedHead();
+    const run = f.run(false, f.repo, "squash", legacy.oid, approvedHead, "", "", legacy.directory);
+    expect(run.status, run.output).toBe(0);
+    expect(f.state().mutations).toBe(1);
+    expect(f.record()).toMatchObject({
+      phase: "complete",
+      head: approvedHead,
+      legacyRefusal: {
+        actor: "fixture-operator",
+        kind: "gh-2.98-pre-dispatch-refusal",
+        head: f.head,
+        preparedBase: f.base,
+      },
+    });
+    expect(f.record()).not.toHaveProperty("recovery");
+    for (const [name, contents] of Object.entries(legacy.files)) {
+      expect(f.git(["rev-parse", `${outcomeRef}:legacy-refusal/${name}`])).toBe(
+        f.git(["hash-object", "--stdin"], contents),
+      );
+    }
+    expect(f.run().status).toBe(0);
+    expect(f.state().mutations).toBe(1);
+    const replay = f.run(
+      false,
+      f.repo,
+      "squash",
+      legacy.oid,
+      approvedHead,
+      "",
+      "",
+      legacy.directory,
+    );
+    expect(replay.status, replay.output).toBe(1);
+    expect(f.state().mutations).toBe(1);
+  });
+
+  it("retains qualified legacy evidence through successor recovery and garbage collection", () => {
+    const f = fixture();
+    const legacy = createLegacyRefusal(f);
+    const approvedHead = f.replacePreparedHead();
+    f.save({ ...f.state(), mode: "unapplied" });
+    const first = f.run(
+      false,
+      f.repo,
+      "squash",
+      legacy.oid,
+      approvedHead,
+      "",
+      "",
+      legacy.directory,
+    );
+    expect(first.status, first.output).toBe(1);
+    expect(f.state().mutations).toBe(1);
+    const previous = f.git(["rev-parse", outcomeRef]);
+    const previousRecord = f.record();
+    expect(previousRecord.legacyRefusal).toMatchObject({ head: f.head, preparedBase: f.base });
+    expect(previousRecord).not.toHaveProperty("recovery");
+    f.recover();
+    f.save({ ...f.state(), mode: "success" });
+    const recovered = f.run(false, f.repo, "squash", previous);
+    expect(recovered.status, recovered.output).toBe(0);
+    expect(f.state().mutations).toBe(2);
+    expect(f.record()).toMatchObject({
+      phase: "complete",
+      head: approvedHead,
+      recovery: { outcome: previous, attempt: previousRecord.attempt },
+    });
+    f.git(["merge-base", "--is-ancestor", previous, outcomeRef]);
+    for (const ref of [
+      "refs/heads/topic",
+      "refs/heads/pr-123",
+      "refs/heads/pr-123-prep",
+      "refs/remotes/origin/topic",
+    ]) {
+      f.git(["update-ref", "-d", ref]);
+    }
+    rmSync(legacy.directory, { recursive: true });
+    f.git(["reflog", "expire", "--expire=now", "--all"]);
+    f.git(["gc", "--prune=now"]);
+    for (const oid of [previous, f.head, f.base, approvedHead]) {
+      f.git(["cat-file", "-e", `${oid}^{commit}`]);
+    }
+    expect(JSON.parse(f.git(["show", `${previous}:outcome.json`]))).toEqual(previousRecord);
+    for (const [name, contents] of Object.entries(legacy.files)) {
+      const oid = f.git(["rev-parse", `${previous}:legacy-refusal/${name}`]);
+      expect(oid).toBe(f.git(["hash-object", "--stdin"], contents));
+      f.git(["cat-file", "-e", `${oid}^{blob}`]);
+    }
+  });
+
+  it.each([
+    "empty",
+    "timeout",
+    "extra-capture",
+    "wrong-hash",
+    "wrong-pr",
+    "wrong-base",
+    "missing-proof",
+    "symlink",
+    "auto",
+    "queue",
+    "closed",
+    "pending",
+    "ci-proof",
+    "changed-capture",
+    "no-head",
+  ])("legacy refusal recovery refuses %s without losing evidence or dispatching", (fault) => {
+    const f = fixture();
+    const legacy = createLegacyRefusal(f);
+    const approvedHead = f.replacePreparedHead();
+    const next = f.state();
+    const capture = join(f.worktree, ".local/merge-output.log");
+    if (fault === "empty" || fault === "timeout") {
+      const text = fault === "empty" ? "" : "502 after dispatch\n";
+      writeFileSync(capture, text);
+      writeFileSync(join(legacy.directory, "merge-output.log"), text);
+      legacy.oid = f.git(["hash-object", "--no-filters", capture]);
+    }
+    if (fault === "extra-capture") {
+      writeFileSync(join(f.worktree, ".local/merge-output.other.log"), "");
+    }
+    if (fault === "wrong-hash") {
+      legacy.oid = f.base;
+    }
+    if (fault === "wrong-pr" || fault === "wrong-base") {
+      const path = join(legacy.directory, "prep.env");
+      writeFileSync(
+        path,
+        readFileSync(path, "utf8").replace(
+          fault === "wrong-pr" ? "PR_NUMBER=123" : f.base,
+          fault === "wrong-pr" ? "PR_NUMBER=456" : "not-a-sha",
+        ),
+      );
+    }
+    if (fault === "missing-proof") {
+      rmSync(join(legacy.directory, "prep.md"));
+    }
+    if (fault === "symlink") {
+      rmSync(capture);
+      symlinkSync(join(legacy.directory, "merge-output.log"), capture);
+    }
+    if (fault === "auto") {
+      next.pr.autoMergeRequest = { mergeMethod: "SQUASH" };
+    }
+    if (fault === "queue") {
+      next.pr.isMergeQueueEnabled = true;
+    }
+    if (fault === "closed") {
+      next.pr.state = "CLOSED";
+    }
+    if (fault === "pending") {
+      next.gates = "pending";
+    }
+    if (fault === "ci-proof") {
+      next.ciExit = 15;
+    }
+    if (fault === "changed-capture") {
+      next.duringChecks = { artifact: "merge-output.log" };
+    }
+    f.save(next);
+    const run = f.run(
+      false,
+      f.repo,
+      "squash",
+      legacy.oid,
+      fault === "no-head" ? "" : approvedHead,
+      "",
+      "",
+      legacy.directory,
+    );
+    expect(run.status, run.output).not.toBe(0);
+    expect(f.state().mutations, run.output).toBe(0);
+    expect(f.state().posts).toBe(0);
+    expect(existsSync(capture)).toBe(true);
+    expect(() => f.git(["rev-parse", "--verify", outcomeRef])).toThrow();
+  });
+
   it.each([
     { replacement: false, reviewHead: "current", forwardMain: false },
     { replacement: true, reviewHead: "current", forwardMain: false },
@@ -1273,7 +2321,8 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       const previous = f.git(["rev-parse", outcomeRef]);
       const previousRecord = f.record();
       if (replacement) {
-        writeFileSync(join(f.worktree, ".gitattributes"), "*.log text eol=lf\n");
+        // Configure the byte-filter sentinel without adding unpublished work.
+        writeFileSync(join(f.repo, ".git/info/attributes"), "*.log text eol=lf\n");
         const capture = join(f.worktree, ".local", f.captures()[0]![0]);
         writeFileSync(capture, readFileSync(capture, "utf8") + "Capture byte sentinel\r\n");
       }
@@ -1289,7 +2338,13 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       next.mode = "success";
       next.comment = replacement ? "success" : "rejected";
       if (forwardMain) {
-        next.observations = [{}, {}, {}, {}, { advanceMain: true, advanceAfterRead: true }];
+        const parent = f.git(["--git-dir=" + f.remote, "rev-parse", "main"]);
+        const main = f.commit(
+          f.git(["rev-parse", `${parent}^{tree}`]),
+          [parent],
+          "Admission advance\n",
+        );
+        next.observations = [{}, { main }, {}, {}, { advanceMain: true, advanceAfterRead: true }];
       }
       if (reviewHead === "previous") {
         next.issueComments[0]!.body = next.issueComments[0]!.body.replace(approvedHead, f.head);
@@ -1426,7 +2481,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
         next.pr.id = "other-pr";
       }
       if (fault === "wrong-repo") {
-        next.repo.id = "other-repo";
+        next.repoAuthority.node_id = "other-repo";
       }
       if (fault === "current-auto") {
         next.pr.autoMergeRequest = { mergeMethod: "SQUASH" };
@@ -1492,7 +2547,6 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     "wrong-approval",
     "malformed-approval",
     "review-json",
-    "review-markdown",
     "meta-head",
     "prep-context",
     "prep-head",
@@ -1504,7 +2558,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     "head-during-checks",
     "prep.env",
     "gates.env",
-    "review.md",
+    "review.json",
   ])("replacement recovery refuses stale or unapproved evidence: %s", (fault) => {
     const f = fixture();
     f.save({ ...f.state(), mode: "unapplied" });
@@ -1528,13 +2582,12 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     if (fault === "head-during-checks") {
       next.duringChecks = { head: f.head };
     }
-    if (["prep.env", "gates.env", "review.md"].includes(fault)) {
+    if (["prep.env", "gates.env", "review.json"].includes(fault)) {
       next.duringChecks = { artifact: fault };
     }
     f.save(next);
     const staleArtifact: Record<string, string> = {
       "review-json": "review.json",
-      "review-markdown": "review.md",
       "meta-head": "pr-meta.env",
       "prep-context": "prep-context.env",
       "prep-head": "prep.env",
@@ -1641,12 +2694,18 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       expect(f.captures()).toEqual([]);
       expect(existsSync(f.worktree)).toBe(true);
       expect(f.git(["--git-dir=" + f.remote, "rev-parse", "topic"])).toBe(f.head);
+      expect(run.output).toContain(`mergeStateStatus: observed="${mergeStateStatus}"; expected=`);
+      expect(run.output).toContain("lock-recover, then rerun merge-run");
+      if (mergeStateStatus === "DIRTY") {
+        expect(run.output).toContain("Conflicts exist");
+      }
     },
   );
   it.each([
     { auto: false, mergeStateStatus: "CLEAN", route: "immediate" },
     { auto: true, mergeStateStatus: "CLEAN", route: "immediate" },
     { auto: true, mergeStateStatus: "BEHIND", route: "auto" },
+    { auto: true, mergeStateStatus: "BLOCKED", route: "auto" },
     { auto: false, mergeStateStatus: "CLEAN", route: "immediate", statusFirst: true },
   ])(
     "settles initial UNKNOWN projections before one pinned dispatch: %j",
@@ -1675,6 +2734,35 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       expect(f.git(["show", `${f.record().landed}:owner.txt`])).toBe("after");
     },
   );
+  it.each(["settlement", "final"])(
+    "lands ordinary squash when main advances during %s admission",
+    (stage) => {
+      const f = fixture();
+      const main = f.commit(f.tree("before\n", "advanced\n"), [f.base]);
+      const settled = { pr: { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" } };
+      f.save({
+        ...f.state(),
+        observations: [
+          { pr: unknownProjection },
+          { ...settled, ...(stage === "settlement" ? { main } : {}) },
+          ...(stage === "final" ? [{ main }] : []),
+        ],
+      });
+
+      const run = f.run(stage === "final");
+
+      expect(run.status, run.output).toBe(0);
+      expect(f.record()).toMatchObject({
+        phase: "complete",
+        head: f.head,
+        main: stage === "settlement" ? main : f.base,
+      });
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(1);
+      expect(f.git(["show", `${f.record().landed}:owner.txt`])).toBe("after");
+      expect(f.git(["show", `${f.record().landed}:sibling.txt`])).toBe("advanced");
+    },
+  );
   it("preserves gh queue eligibility when the verified admin route is selected", () => {
     const f = fixture();
     f.save({
@@ -1698,7 +2786,6 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     "invalid metadata",
     "API error",
     "PR identity",
-    "main",
     "head",
     "base",
     "closed",
@@ -1709,14 +2796,14 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     "queue membership",
     "invalid receipt",
     "conflicting",
-    "known BLOCKED",
+    "known HAS_HOOKS",
     "final UNKNOWN mergeable",
     "final UNKNOWN status",
     "final changed status",
-    "final main",
   ])("stops initial settlement without dispatch on %s", (fault) => {
     const f = fixture();
     const next = f.state();
+    const { author: _author, ...observedPr } = next.pr;
     const step: (typeof next.observations)[number] = {};
     switch (fault) {
       case "invalid metadata":
@@ -1727,10 +2814,6 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
         break;
       case "PR identity":
         step.pr = { id: "other-pr" };
-        break;
-      case "main":
-      case "final main":
-        step.main = f.commit(f.tree("before\n", "advanced\n"), [f.base]);
         break;
       case "head":
         step.pr = { headRefOid: f.base };
@@ -1763,8 +2846,8 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       case "conflicting":
         step.pr = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" };
         break;
-      case "known BLOCKED":
-        step.pr = { mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" };
+      case "known HAS_HOOKS":
+        step.pr = { mergeable: "MERGEABLE", mergeStateStatus: "HAS_HOOKS" };
         break;
       case "known mergeable reverts":
         step.pr = { mergeable: "UNKNOWN" };
@@ -1829,14 +2912,44 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     }
     if (finalRead) {
       expect(run.output).toContain("PR or main changed during observation");
+      expect(run.output).toContain("lock-recover, then rerun merge-run");
+      expect(run.output).toContain(
+        fault === "final UNKNOWN mergeable"
+          ? 'mergeable: observed="UNKNOWN"; expected="MERGEABLE"'
+          : `mergeStateStatus: observed="${fault === "final UNKNOWN status" ? "UNKNOWN" : "BEHIND"}"; expected="CLEAN"`,
+      );
+      for (const [label, expected] of [
+        ["observation", { main: f.base, pr: observedPr, transport: "graphql" }],
+        [
+          "reread",
+          { main: step.main ?? f.base, pr: { ...observedPr, ...step.pr }, transport: "graphql" },
+        ],
+      ] as const) {
+        const prefix = `Merge stability ${label}: `;
+        const snapshots = run.stderr
+          .split("\n")
+          .filter((line) => line.startsWith(prefix))
+          .map((line) => JSON.parse(line.slice(prefix.length)));
+        expect(snapshots, run.output).toEqual([expected]);
+      }
     }
     if (projectionDrift) {
       expect(run.output).toContain("PR or main changed while waiting for mergeability");
     }
-    if (fault === "known BLOCKED") {
+    if (fault === "known HAS_HOOKS") {
       expect(run.output).toContain(
-        "auto-merge admission requires MERGEABLE with CLEAN or BEHIND status",
+        "auto-merge admission requires MERGEABLE with CLEAN, BEHIND, or BLOCKED status",
       );
+    }
+    if (fault === "conflicting") {
+      const prefix = `Merge admission rejected (observation 2, prepared head ${f.head}): `;
+      const rejected = run.stderr
+        .split("\n")
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => JSON.parse(line.slice(prefix.length)));
+      expect(rejected, run.output).toEqual([
+        { main: f.base, pr: { ...observedPr, ...step.pr }, transport: "graphql" },
+      ]);
     }
   });
   it.each(["OPEN", "MERGED"])(
@@ -1951,7 +3064,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     );
     // A valid retained record with criss-cross (or unrelated) source/main history.
     const previous = f.git(["rev-parse", outcomeRef]);
-    const record = { ...f.record(), head, main };
+    const record = { ...f.record(), head, localHead: head, main };
     const blob = f.git(["hash-object", "-w", "--stdin"], JSON.stringify(record));
     const tree = f.git(["mktree"], `100644 blob ${blob}\toutcome.json\n`);
     f.git(["update-ref", outcomeRef, f.commit(tree, [head, main, previous])]);
@@ -2004,6 +3117,9 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       expect(run.status, run.output).toBe(1);
       expect(f.state().mutations).toBe(0);
       expect(readFileSync(capture, "utf8")).toBe(output);
+      expect(run.output).toContain("Legacy .local/merge-output.log: present");
+      expect(run.output).toContain("investigate; see scripts/AGENTS.md merge-outcome doctrine");
+      expect(run.output).not.toContain("lock-recover, then rerun merge-run");
       expect(() => f.record()).toThrow();
     },
   );
@@ -2015,6 +3131,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     { auto: false, admin: true, mergeState: "BLOCKED", route: "admin" },
     { auto: false, admin: true, mergeState: "BEHIND", route: "admin" },
     { auto: true, admin: false, mergeState: "BEHIND", route: "auto" },
+    { auto: true, admin: false, mergeState: "BLOCKED", route: "auto" },
     { auto: true, admin: false, mergeState: "CLEAN", route: "immediate" },
   ])(
     "submits verified attribution with pinned head for %j",
@@ -2387,6 +3504,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     "recovery-extra",
     "recovery-unretained",
     "recovery-method",
+    "recovery-repo",
   ])("fails closed on %s outcome evidence", (fault) => {
     const f = fixture();
     f.save({ ...f.state(), mode: "unapplied" });
@@ -2398,6 +3516,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       const record = {
         ...original,
         method: fault === "recovery-method" ? "merge" : original.method,
+        repo: fault === "recovery-repo" ? { ...original.repo, id: 1103012935 } : original.repo,
         recovery: {
           outcome: previous,
           attempt: original.attempt,
@@ -2419,7 +3538,10 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
       f.git(["symbolic-ref", outcomeRef, "refs/heads/topic"]);
     }
     if (fault === "mismatched") {
-      f.save({ ...f.state(), repo: { ...f.state().repo, id: "other-repo" } });
+      f.save({
+        ...f.state(),
+        repoAuthority: { ...f.state().repoAuthority, node_id: "other-repo" },
+      });
     }
     if (fault === "missing-head") {
       rmSync(join(f.repo, ".git/objects", f.head.slice(0, 2), f.head.slice(2)));
@@ -2471,7 +3593,7 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
         next.pr.autoMergeRequest = { mergeMethod: "MERGE" };
       }
       if (gate === "auto-ineligible") {
-        next.pr.mergeStateStatus = "BLOCKED";
+        next.pr.mergeStateStatus = "HAS_HOOKS";
       }
       f.save(next);
       const run = f.run(true);
@@ -2640,12 +3762,43 @@ describePosix("native merge outcome with real Git and supervised lock recovery",
     expect(f.record().phase).toBe("complete");
     expect(f.state().posts).toBe(1);
   });
+
+  it.each([false, true])(
+    "checks local/hosted preparation before cleanup (different tree=%s)",
+    (differentTree) => {
+      const f = fixture();
+      const localHead = f.commit(
+        f.tree(differentTree ? "unpublished\n" : "after\n"),
+        [f.base],
+        "Local prepared commit\n",
+      );
+      f.git(["-C", f.worktree, "reset", "--hard", localHead]);
+      f.prepare(f.head, f.base, localHead);
+      const run = f.run();
+      if (differentTree) {
+        expect(run.status, run.output).not.toBe(0);
+        expect(f.state().mutations).toBe(0);
+        expect(f.git(["rev-parse", "pr-123-prep"])).toBe(localHead);
+        expect(existsSync(f.worktree)).toBe(true);
+      } else {
+        expect(run.status, run.output).toBe(0);
+        expect(run.output).not.toContain("cleanup pending");
+        expect(f.record().phase).toBe("complete");
+        expect(existsSync(f.worktree)).toBe(false);
+        expect(f.git(["for-each-ref", "--format=%(refname)", "refs/heads/pr-123-prep"])).toBe("");
+        // Both verified identities survive removal of all disposable prepare artifacts.
+        f.git(["merge-base", "--is-ancestor", localHead, outcomeRef]);
+        f.git(["reflog", "expire", "--expire=now", "--all"]);
+        f.git(["gc", "--prune=now"]);
+        expect(f.git(["show", `${localHead}:owner.txt`])).toBe("after");
+      }
+    },
+  );
 });
 
 describePosix("merge_outcome_repo_identity", () => {
-  // gh reports the repository id as a REST database number while PR ids stay GraphQL
-  // node strings, so admission has to accept both scalars. Requiring a string here
-  // failed every merge closed on a current gh.
+  // Local historical records contain either scalar. Remote admission separately
+  // binds the whole retained object to the authoritative repository pair.
   const identity = (repo: unknown) =>
     spawnSync(
       "bash",
@@ -2659,7 +3812,7 @@ describePosix("merge_outcome_repo_identity", () => {
       { encoding: "utf8" },
     );
 
-  it("accepts the numeric repository id gh actually returns", () => {
+  it("accepts a historical numeric repository id", () => {
     const run = identity({
       id: 1103012935,
       nameWithOwner: "openclaw/openclaw",
@@ -2704,19 +3857,177 @@ describePosix("merge_outcome_repo_identity", () => {
 });
 
 describePosix("repository identity across gh id representations", () => {
-  // The fixture's default state models current gh: a numeric CLI id and a GraphQL node
-  // id. This covers the other host shape, where gh reports the node id from both
-  // sources, so neither representation regresses.
-  it("merges when gh reports the node id from both sources", () => {
+  const canonicalRepo = {
+    id: "R_kgDOQb6kRw",
+    nameWithOwner: "fixture/repo",
+    url: "https://github.com/fixture/repo",
+  };
+  const historicalIds = [
+    { name: "node", id: "R_kgDOQb6kRw", nextId: 1103012935 },
+    { name: "numeric", id: 1103012935, nextId: "R_kgDOQb6kRw" },
+  ];
+  const retainRepository = (f: ReturnType<typeof fixture>, repo: unknown) => {
+    const previous = f.git(["rev-parse", outcomeRef]);
+    const parents = f.git(["show", "-s", "--format=%P", previous]).split(" ");
+    const blob = f.git(["hash-object", "-w", "--stdin"], JSON.stringify({ ...f.record(), repo }));
+    const tree = f.git(["mktree"], `100644 blob ${blob}\toutcome.json\n`);
+    const historical = f.commit(tree, [...parents, previous], "Historical repository identity\n");
+    f.git(["update-ref", outcomeRef, historical, previous]);
+    return historical;
+  };
+
+  it.each(historicalIds)("records the canonical node identity with a $name CLI id", ({ id }) => {
     const f = fixture();
-    f.save({
-      ...f.state(),
-      repo: { ...f.state().repo, id: "R_kgDOQb6kRw" },
-      repoNodeId: null,
-    });
+    f.save({ ...f.state(), repo: { ...f.state().repo, id } });
     const run = f.run();
     expect(run.status, run.output).toBe(0);
+    expect(f.record().repo).toEqual(canonicalRepo);
     expect(f.record().phase).toBe("complete");
     expect(f.state().mutations).toBe(1);
+  });
+
+  it.each(historicalIds)(
+    "recovers the historical $name identity after CLI shape drift without rewriting its evidence",
+    ({ id, nextId }) => {
+      const f = fixture();
+      f.save({ ...f.state(), mode: "unapplied", repo: { ...f.state().repo, id } });
+      const first = f.run();
+      expect(first.status, first.output).toBe(1);
+      f.recover();
+      const repo = { ...canonicalRepo, id };
+      const previous = retainRepository(f, repo);
+      const bytes = f.git(["show", `${previous}:outcome.json`]);
+      const attempt = f.record().attempt;
+      const captures = f.captures();
+      f.save({ ...f.state(), repo: { ...f.state().repo, id: nextId } });
+
+      const observed = f.run();
+      expect(observed.status, observed.output).toBe(1);
+      expect(observed.output).toContain("prior dispatch unresolved");
+      expect(f.git(["rev-parse", outcomeRef])).toBe(previous);
+      expect(f.captures()).toEqual(captures);
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(0);
+      f.recover();
+      f.save({ ...f.state(), mode: "success" });
+
+      const recovered = f.run(false, f.repo, "squash", previous);
+      expect(recovered.status, recovered.output).toBe(0);
+      expect(f.record()).toMatchObject({
+        phase: "complete",
+        recovery: { outcome: previous, attempt, actor: "fixture-operator" },
+      });
+      expect(f.record().repo).toEqual(repo);
+      expect(f.git(["show", `${previous}:outcome.json`])).toBe(bytes);
+      f.git(["merge-base", "--is-ancestor", previous, outcomeRef]);
+      expect(f.state().mutations).toBe(2);
+      expect(f.state().posts).toBe(1);
+      expect(existsSync(f.worktree)).toBe(false);
+    },
+  );
+
+  it.each(historicalIds)(
+    "completes the historical $name receipt after CLI shape drift without another dispatch",
+    ({ id, nextId }) => {
+      const f = reconciledMergeAfterCleanup();
+      const repo = { ...canonicalRepo, id };
+      const previous = retainRepository(f, repo);
+      const bytes = f.git(["show", `${previous}:outcome.json`]);
+      f.save({ ...f.state(), repo: { ...f.state().repo, id: nextId } });
+
+      const completed = f.complete(previous);
+      expect(completed.status, completed.output).toBe(0);
+      expect(f.record().phase).toBe("complete");
+      expect(f.record().repo).toEqual(repo);
+      expect(f.git(["show", `${previous}:outcome.json`])).toBe(bytes);
+      f.git(["merge-base", "--is-ancestor", previous, outcomeRef]);
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(1);
+      expect(existsSync(f.worktree)).toBe(false);
+    },
+  );
+
+  it.each(
+    [
+      { name: "extra key", repo: { ...canonicalRepo, allow: true } },
+      { name: "numeric string", repo: { ...canonicalRepo, id: "1103012935" } },
+      { name: "unknown node id", repo: { ...canonicalRepo, id: "R_other" } },
+      { name: "unknown numeric id", repo: { ...canonicalRepo, id: 1103012936 } },
+      {
+        name: "other repository",
+        repo: {
+          ...canonicalRepo,
+          nameWithOwner: "fixture/other",
+          url: "https://github.com/fixture/other",
+        },
+      },
+    ].flatMap((fault) =>
+      [false, true].map((completion) => ({ name: fault.name, repo: fault.repo, completion })),
+    ),
+  )(
+    "refuses retained $name before side effects (completion=$completion)",
+    ({ repo, completion }) => {
+      const f = completion ? reconciledMergeAfterCleanup() : fixture();
+      if (!completion) {
+        f.save({ ...f.state(), mode: "unapplied" });
+        expect(f.run().status).toBe(1);
+        f.recover();
+      }
+      const previous = retainRepository(f, repo);
+      const bytes = f.git(["show", `${previous}:outcome.json`]);
+      const captures = completion ? [] : f.captures();
+      f.save({ ...f.state(), mode: "success" });
+
+      const result = completion ? f.complete(previous) : f.run(false, f.repo, "squash", previous);
+      expect(result.status, result.output).toBe(1);
+      expect(f.git(["rev-parse", outcomeRef])).toBe(previous);
+      expect(f.git(["show", `${previous}:outcome.json`])).toBe(bytes);
+      expect(f.state().mutations).toBe(1);
+      expect(f.state().posts).toBe(0);
+      expect(existsSync(f.worktree)).toBe(!completion);
+      if (!completion) {
+        expect(f.captures()).toEqual(captures);
+        expect(f.git(["--git-dir=" + f.remote, "rev-parse", "topic"])).toBe(f.head);
+      }
+    },
+  );
+
+  it.each([
+    { name: "missing numeric id", authority: { id: undefined } },
+    { name: "numeric string", authority: { id: "1103012935" } },
+    { name: "zero numeric id", authority: { id: 0 } },
+    { name: "fractional numeric id", authority: { id: 1.5 } },
+    { name: "missing node id", authority: { node_id: undefined } },
+    { name: "empty node id", authority: { node_id: "" } },
+    { name: "numeric node id", authority: { node_id: 1103012935 } },
+    { name: "different name", authority: { full_name: "fixture/other" } },
+    { name: "different host", authority: { html_url: "https://elsewhere.invalid/fixture/repo" } },
+  ])("rejects $name in repository authority before recording intent", ({ authority }) => {
+    const f = fixture();
+    f.save({ ...f.state(), repoAuthority: { ...f.state().repoAuthority, ...authority } });
+    const result = f.run();
+    expect(result.status, result.output).toBe(1);
+    expect(f.state().mutations).toBe(0);
+    expect(f.state().posts).toBe(0);
+    expect(() => f.record()).toThrow();
+    expect(f.captures()).toEqual([]);
+    expect(existsSync(f.worktree)).toBe(true);
+  });
+
+  it.each([false, true])("requires repository authority for completion=%s", (completion) => {
+    const f = completion ? reconciledMergeAfterCleanup() : fixture();
+    const previous = completion ? f.git(["rev-parse", outcomeRef]) : undefined;
+    f.save({ ...f.state(), repoAuthorityUnavailable: true });
+    const result = previous ? f.complete(previous) : f.run();
+    expect(result.status, result.output).toBe(1);
+    expect(result.output).toContain("repository metadata unavailable");
+    expect(f.state().mutations).toBe(completion ? 1 : 0);
+    expect(f.state().posts).toBe(0);
+    if (previous) {
+      expect(f.git(["rev-parse", outcomeRef])).toBe(previous);
+    } else {
+      expect(() => f.record()).toThrow();
+    }
+    expect(existsSync(f.worktree)).toBe(!completion);
   });
 });

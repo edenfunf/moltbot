@@ -3,7 +3,7 @@ import { sortAndLimitBy, sortAndLimitByWork } from "./sort-and-limit.js";
 import { runSynchronousWork } from "./synchronous-work.js";
 
 describe("sortAndLimitBy", () => {
-  it.each([1, 5, 50, 200, 201, undefined])(
+  it.each([1, 5, 50, 100, 200, 201, 1000, 1024, 1025, 2050, 4096, undefined])(
     "matches stable full ordering without mutating input for limit %s",
     (limit) => {
       const entries = Array.from({ length: 2051 }, (_, id) => ({ id, rank: (id * 37) % 23 }));
@@ -21,6 +21,25 @@ describe("sortAndLimitBy", () => {
     },
   );
 
+  it.each([1, -1])("bounds first-page work for rows ordered in direction %s", (direction) => {
+    const entries = Array.from({ length: 2_300 }, (_, id) => ({ id, rank: id * direction }));
+    let comparisons = 0;
+    const selected = runSynchronousWork(
+      sortAndLimitByWork(
+        entries,
+        100,
+        (a, b) => {
+          comparisons++;
+          return a.rank - b.rank;
+        },
+        () => true,
+      ),
+    );
+    expect(selected).toEqual(entries.toSorted((a, b) => a.rank - b.rank).slice(0, 100));
+    // Allow binary insertion while filling the page, then linear work along either run.
+    expect(comparisons).toBeLessThan(entries.length + 100 * 8);
+  });
+
   it("bounds comparison work when selecting a large result window", () => {
     const entries = Array.from({ length: 1_000 }, (_, id) => ({ id, rank: (id * 617) % 1_009 }));
     let comparisons = 0;
@@ -31,5 +50,23 @@ describe("sortAndLimitBy", () => {
     expect(selected).toEqual(entries.toSorted((a, b) => a.rank - b.rank).slice(0, 200));
     // Two endpoint comparisons plus at most eight comparisons within a 200-row window.
     expect(comparisons).toBeLessThanOrEqual(entries.length * 10);
+  });
+
+  it("bounds comparison work for a wide cooperative result window", () => {
+    const entries = Array.from({ length: 100_003 }, (_, id) => ({ id, rank: -id }));
+    let comparisons = 0;
+    const selected = runSynchronousWork(
+      sortAndLimitByWork(
+        entries,
+        1000,
+        (a, b) => {
+          comparisons++;
+          return a.rank - b.rank;
+        },
+        () => true,
+      ),
+    );
+    expect(selected).toEqual(entries.toReversed().slice(0, 1000));
+    expect(comparisons).toBeLessThan(entries.length * 3);
   });
 });

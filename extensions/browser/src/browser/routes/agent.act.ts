@@ -16,6 +16,7 @@ import {
   hoverChromeMcpElement,
   pressChromeMcpKey,
   resizeChromeMcpPage,
+  selectChromeMcpOption,
   type ChromeMcpOperationOptions,
 } from "../chrome-mcp.js";
 import type { BrowserActRequest } from "../client-actions.types.js";
@@ -137,7 +138,7 @@ export function registerBrowserAgentActRoutes(
         profileCtx,
         targetId,
         enforceCurrentUrlAllowed: shouldEnforceCurrentUrlForAct(action),
-        run: async ({ cdpUrl, tab, signal, resolveTabUrl }) => {
+        run: async ({ cdpUrl, tab, signal, resolveTabUrl, assertCurrent }) => {
           const evaluateEnabled = ctx.state().resolved.evaluateEnabled;
           const navigationPolicy = browserNavigationPolicyForProfile(ctx, profileCtx);
           let verificationDeadline: ReturnType<typeof createExistingSessionDeadline> | undefined;
@@ -312,8 +313,6 @@ export function registerBrowserAgentActRoutes(
                       x: action.x,
                       y: action.y,
                       doubleClick: action.doubleClick ?? false,
-                      button: action.button as "left" | "right" | "middle" | undefined,
-                      delayMs: action.delayMs,
                     }),
                   );
                   return await jsonOk(undefined, { resolveCurrentTarget: true });
@@ -369,7 +368,7 @@ export function registerBrowserAgentActRoutes(
                   return await jsonOk(undefined, { resolveCurrentTarget: true });
                 case "select":
                   await runGuardedAction((target) =>
-                    fillChromeMcpElement({
+                    selectChromeMcpOption({
                       ...target,
                       uid: action.ref!,
                       value: action.values[0] ?? "",
@@ -434,12 +433,13 @@ export function registerBrowserAgentActRoutes(
                   );
                   clearSnapshotKeysForTab(ctx, profileCtx.profile.name, tab.targetId);
                   return await jsonOk();
+                case "insertText":
                 case "batch":
                   return jsonActError(
                     res,
                     501,
                     ACT_ERROR_CODES.unsupportedForExistingSession,
-                    EXISTING_SESSION_LIMITS.act.batch,
+                    EXISTING_SESSION_LIMITS.act[action.kind],
                   );
               }
             }
@@ -448,6 +448,9 @@ export function registerBrowserAgentActRoutes(
             if (!pw) {
               return;
             }
+            if (assertCurrent) {
+              await assertCurrent();
+            }
             const result = await pw.executeActViaPlaywright({
               cdpUrl,
               action,
@@ -455,6 +458,7 @@ export function registerBrowserAgentActRoutes(
               evaluateEnabled,
               ...navigationPolicy,
               signal,
+              ...(assertCurrent ? { assertCurrent } : {}),
             });
             const resultTargetOptions = {
               resolveCurrentTarget: true,

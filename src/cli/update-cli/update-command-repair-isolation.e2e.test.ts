@@ -119,12 +119,9 @@ describe("staged CLI repair isolation", () => {
               "CREATE TABLE isolation_evidence(value TEXT); INSERT INTO isolation_evidence VALUES ('live-uncheckpointed');",
             );
             try {
-              const liveFiles = [
-                state.configPath,
-                databasePath,
-                `${databasePath}-wal`,
-                `${databasePath}-shm`,
-              ];
+              // SQLite may rewrite transient lock metadata in -shm when the
+              // rehearsal opens this WAL database; durable serving bytes may not move.
+              const liveFiles = [state.configPath, databasePath, `${databasePath}-wal`];
               const ledgerEnv = { ...state.env, OPENCLAW_STATE_DIR: state.path("ledger") };
               const run = createUpdateRun(
                 { trigger: "chat", origin: { requester } },
@@ -157,19 +154,21 @@ describe("staged CLI repair isolation", () => {
                 env: state.env,
                 run: updateRun,
                 phase: "validating",
-                result: {
+                mode: "npm",
+                validation: {
                   status: "error",
-                  mode: "npm",
-                  reason: "candidate-proof-missing",
+                  reason: "runtime-verification-failed",
+                  phase: "runtime",
                   steps: [],
                   durationMs: 0,
+                  logTail: ["Candidate repair marker is absent."],
                 },
                 validate: async (_signal, assertCurrent, rehearsal) => {
                   assertCurrent();
                   // The first oracle follows worker startup and requester registry
                   // preparation. Neither may migrate or touch serving artifacts.
                   for (const { file, identity } of before) {
-                    expect(await fileIdentity(file)).toEqual(identity);
+                    expect(await fileIdentity(file), file).toEqual(identity);
                   }
                   if (rehearsal) {
                     oracleTargets.push({
@@ -281,7 +280,7 @@ describe("staged CLI repair isolation", () => {
                 expect.arrayContaining([
                   expect.objectContaining({
                     step: "repairing",
-                    detail: expect.stringContaining("candidate rehearsal"),
+                    detail: expect.stringContaining("update checks"),
                   }),
                 ]),
               );

@@ -20,6 +20,7 @@ vi.mock("../secrets/store/secret-store.js", () => {
     writeSecretStoreEntry: secretStoreMocks.writeEntry,
   };
 });
+import { createDeferred } from "../../test/helpers/promise.js";
 import {
   getRuntimeAuthProfileStoreCredentialsRevision,
   getRuntimeAuthProfileStoreSnapshotsRevision,
@@ -227,6 +228,7 @@ function createSecretsReloadHarness(params: SecretsReloadHarnessParams) {
   const respond = params.respond ?? vi.fn();
   const gatewayAux = createGatewayAuxHandlers({
     log: {},
+    getNativeApprovalRouteCoordinator: () => undefined,
     activateRuntimeSecrets: params.activateRuntimeSecrets,
     buildReloadPlan: params.buildReloadPlan,
     sharedGatewaySessionGenerationState: params.sharedGatewaySessionGenerationState ?? {
@@ -496,14 +498,8 @@ describe("gateway aux handlers", () => {
       },
     });
     activateSecretsRuntimeSnapshot(createSourceSnapshot(sourceConfig));
-    let releaseFirst: (() => void) | undefined;
-    const firstBlocked = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let firstStarted: (() => void) | undefined;
-    const firstEntered = new Promise<void>((resolve) => {
-      firstStarted = resolve;
-    });
+    const { promise: firstBlocked, resolve: releaseFirst } = createDeferred();
+    const { promise: firstEntered, resolve: firstStarted } = createDeferred();
     const activateRuntimeSecrets = vi
       .fn()
       .mockImplementationOnce(async () => {

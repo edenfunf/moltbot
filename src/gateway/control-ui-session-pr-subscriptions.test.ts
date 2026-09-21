@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { createRetainedCache } from "../infra/retained-cache.js";
 import type { ControlUiSessionPullRequests } from "./control-ui-contract.js";
-import { createSessionPullRequestCache } from "./control-ui-session-pr-cache.js";
 import {
   createControlUiSessionPullRequestSubscriptions,
   parseControlUiSessionPullRequestsSubscribeParams,
@@ -34,7 +34,7 @@ describe("control UI session PR subscriptions", () => {
   ])(
     "retires cache retention before late completion on $cleanup with failing=$failing",
     async ({ cleanup, failing }) => {
-      const cache = createSessionPullRequestCache<number>();
+      const cache = createRetainedCache<number>();
       const entered = createDeferred();
       const held = createDeferred();
       const signals: AbortSignal[] = [];
@@ -691,10 +691,8 @@ describe("control UI session PR subscriptions", () => {
 
   it("does not publish a superseded replace-set after its load completes", async () => {
     vi.useFakeTimers();
-    let resolveFirst!: (value: ControlUiSessionPullRequests) => void;
-    const first = new Promise<ControlUiSessionPullRequests>((resolve) => {
-      resolveFirst = resolve;
-    });
+    const { promise: first, resolve: resolveFirst } =
+      createDeferred<ControlUiSessionPullRequests>();
     const load = vi.fn(async ({ sessionKey }: { sessionKey: string }) =>
       sessionKey === "old" ? await first : READY,
     );
@@ -716,10 +714,8 @@ describe("control UI session PR subscriptions", () => {
 
   it("delivers a shared cached key after its earlier hydration was superseded", async () => {
     vi.useFakeTimers();
-    let resolveBlocked!: (value: ControlUiSessionPullRequests) => void;
-    const blocked = new Promise<ControlUiSessionPullRequests>((resolve) => {
-      resolveBlocked = resolve;
-    });
+    const { promise: blocked, resolve: resolveBlocked } =
+      createDeferred<ControlUiSessionPullRequests>();
     const load = vi.fn(async ({ sessionKey }: { sessionKey: string }) =>
       sessionKey.startsWith("blocked") ? await blocked : READY,
     );

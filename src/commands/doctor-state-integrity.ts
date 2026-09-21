@@ -9,6 +9,7 @@ import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/s
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { isSharedAuthStoreOwner } from "../agents/agent-delete-safety.js";
+import { readAgentRosterProperty } from "../agents/agent-scope-config.js";
 import {
   listAgentIds,
   resolveDefaultAgentDir,
@@ -48,6 +49,7 @@ import type { HealthFinding, HealthRepairEffect } from "../flows/health-checks.j
 import { safeRealpathSync } from "../infra/boundary-path.js";
 import { findGitRoot } from "../infra/git-root.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
+import { resolveEnvironmentValue } from "../infra/process-env.js";
 import {
   loadLegacySessionStore,
   updateLegacySessionStore,
@@ -108,6 +110,11 @@ type RuntimeDirLabel = "Sessions dir" | "Session store dir" | "OAuth dir";
 export type StateIntegrityHealthIssue =
   | {
       kind: "mac-cloud-state-dir";
+      path: string;
+      storage: string;
+    }
+  | {
+      kind: "windows-cloud-state-dir";
       path: string;
       storage: string;
     }
@@ -651,6 +658,79 @@ export function detectMacCloudSyncedStateDir(
   return null;
 }
 
+/** Detects Windows state directories under OneDrive sync roots. */
+export function detectWindowsCloudSyncedStateDir(
+  stateDir: string,
+  deps?: {
+    platform?: NodeJS.Platform;
+    env?: NodeJS.ProcessEnv;
+    resolveRealPath?: (targetPath: string) => string | null;
+  },
+): {
+  path: string;
+  storage: "OneDrive" | "OneDrive for Business";
+} | null {
+  const platform = deps?.platform ?? process.platform;
+  if (platform !== "win32") {
+    return null;
+  }
+
+  // The OneDrive sync client maintains these variables, so they are the
+  // canonical sync-root source; path-shape heuristics would misfire on
+  // ordinary local folders that merely contain "OneDrive" in a segment.
+  const env = deps?.env ?? process.env;
+  const roots: { storage: "OneDrive" | "OneDrive for Business"; root: string }[] = [];
+  const addRoot = (storage: "OneDrive" | "OneDrive for Business", root: string | undefined) => {
+    if (root && root.trim() !== "") {
+      roots.push({ storage, root });
+    }
+  };
+  addRoot("OneDrive", resolveEnvironmentValue(env, "OneDrive", platform));
+  addRoot("OneDrive", resolveEnvironmentValue(env, "OneDriveConsumer", platform));
+  addRoot("OneDrive for Business", resolveEnvironmentValue(env, "OneDriveCommercial", platform));
+  if (roots.length === 0) {
+    return null;
+  }
+
+  const resolveRealPath = deps?.resolveRealPath ?? tryResolveRealPath;
+  // A state dir that does not exist yet cannot be resolved directly, and
+  // falling back to the lexical path misreads a not-yet-created leaf beneath a
+  // OneDrive-named junction that actually resolves to local storage. Resolve
+  // through the nearest existing ancestor, as the Linux detectors do, so the
+  // junction is followed even when the leaf is absent.
+  const resolvedStatePath =
+    resolvePathThroughExistingAncestor(stateDir, resolveRealPath, path) ?? path.resolve(stateDir);
+
+  for (const { storage, root } of roots) {
+    // Windows filesystems are case-insensitive by default; compare folded.
+    if (isPathUnderRoot(resolvedStatePath.toLowerCase(), root.toLowerCase())) {
+      return { path: resolvedStatePath, storage };
+    }
+  }
+
+  return null;
+}
+
+type WindowsCloudSyncedStateDir = NonNullable<ReturnType<typeof detectWindowsCloudSyncedStateDir>>;
+
+/** Formats the warning for state stored under a OneDrive sync root. */
+export function formatWindowsCloudSyncedStateDirWarning(
+  displayStateDir: string,
+  windowsCloudSyncedStateDir: WindowsCloudSyncedStateDir,
+): string {
+  return [
+    `- State directory is under Windows cloud-synced storage (${displayStateDir}; ${windowsCloudSyncedStateDir.storage}).`,
+    "- This can cause slow I/O, sync/lock races, and Files On-Demand dehydration for sessions and credentials.",
+    "- Prefer a local non-synced state dir (for example: %USERPROFILE%\\.openclaw).",
+    // No one-shot `OPENCLAW_STATE_DIR=... openclaw doctor` hint here: that
+    // retargets only the doctor process, while the managed Gateway keeps
+    // using the synced directory, so it reads as a fix but is not one.
+    "- To relocate: stop the Gateway, move the whole state directory, set",
+    "  OPENCLAW_STATE_DIR to the new path for the Gateway service (not just",
+    "  one shell), then restart it and re-run doctor to verify.",
+  ].join("\n");
+}
+
 function isPairingPolicy(value: unknown): boolean {
   return normalizeOptionalLowercaseString(value) === "pairing";
 }
@@ -703,9 +783,11 @@ function shouldRequireOAuthDir(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boo
   if ([...withPersistedAuth].some((channelId) => !withoutPersistedAuth.has(channelId))) {
     return true;
   }
-  // Pairing allowlists are persisted under credentials/<channel>-allowFrom.json.
+  // Pairing allowlists are persisted under credentials/<channel>-allowFrom.json, so a
+  // channel id with no effective plugin owner can never pair and must not require the dir.
   for (const [channelId, channelCfg] of Object.entries(channels)) {
-    if (channelId === "defaults" || channelId === "modelByChannel") {
+    const scopedChannelId = normalizeOptionalLowercaseString(channelId);
+    if (!scopedChannelId || !withPersistedAuth.has(scopedChannelId)) {
       continue;
     }
     if (hasPairingPolicy(channelCfg)) {
@@ -744,6 +826,15 @@ export function detectStateIntegrityHealthIssues(
       kind: "mac-cloud-state-dir",
       path: cloudSyncedStateDir.path,
       storage: cloudSyncedStateDir.storage,
+    });
+  }
+
+  const windowsCloudSyncedStateDir = detectWindowsCloudSyncedStateDir(stateDir, { env });
+  if (windowsCloudSyncedStateDir) {
+    issues.push({
+      kind: "windows-cloud-state-dir",
+      path: windowsCloudSyncedStateDir.path,
+      storage: windowsCloudSyncedStateDir.storage,
     });
   }
 
@@ -859,6 +950,15 @@ export function stateIntegrityIssueToHealthFinding(
         path: issue.path,
         fixHint: "Move OPENCLAW_STATE_DIR to local non-synced storage such as ~/.openclaw.",
       };
+    case "windows-cloud-state-dir":
+      return {
+        checkId: STATE_INTEGRITY_CHECK_ID,
+        severity: "warning",
+        message: `State directory is under Windows cloud-synced storage (${issue.storage}), which can cause slow I/O, sync races, and Files On-Demand dehydration.`,
+        path: issue.path,
+        fixHint:
+          "Move OPENCLAW_STATE_DIR to local non-synced storage such as %USERPROFILE%\\.openclaw.",
+      };
     case "linux-sd-state-dir":
       return {
         checkId: STATE_INTEGRITY_CHECK_ID,
@@ -939,6 +1039,7 @@ export function stateIntegrityIssueToRepairEffect(
 ): HealthRepairEffect {
   switch (issue.kind) {
     case "mac-cloud-state-dir":
+    case "windows-cloud-state-dir":
     case "linux-sd-state-dir":
     case "linux-volatile-state-dir":
       return {
@@ -1021,6 +1122,7 @@ export async function noteStateIntegrity(
   const displayConfigPath = configPath ? shortenHomePath(configPath) : undefined;
   const requireOAuthDir = shouldRequireOAuthDir(cfg, env);
   const cloudSyncedStateDir = detectMacCloudSyncedStateDir(stateDir);
+  const windowsCloudSyncedStateDir = detectWindowsCloudSyncedStateDir(stateDir);
   const linuxSdBackedStateDir = detectLinuxSdBackedStateDir(stateDir);
   const linuxVolatileStateDir = detectLinuxVolatileStateDir(stateDir);
 
@@ -1032,6 +1134,11 @@ export async function noteStateIntegrity(
         "- Prefer a local non-synced state dir (for example: ~/.openclaw).",
         `  Set locally: OPENCLAW_STATE_DIR=~/.openclaw ${formatCliCommand("openclaw doctor")}`,
       ].join("\n"),
+    );
+  }
+  if (windowsCloudSyncedStateDir) {
+    warnings.push(
+      formatWindowsCloudSyncedStateDirWarning(displayStateDir, windowsCloudSyncedStateDir),
     );
   }
   if (linuxSdBackedStateDir) {
@@ -1222,12 +1329,14 @@ export async function noteStateIntegrity(
 
   const orphanAgentDirs = listOrphanAgentDirs(cfg, stateDir);
   if (orphanAgentDirs.length > 0) {
+    const authoredAgentRosterPath =
+      readAgentRosterProperty(cfg)?.kind === "list" ? "agents.list" : "agents.entries";
     warnings.push(
       [
-        `- Found ${countLabel(orphanAgentDirs.length, "agent directory", "agent directories")} on disk without a matching agents.list entry.`,
+        `- Found ${countLabel(orphanAgentDirs.length, "agent directory", "agent directories")} on disk without a matching ${authoredAgentRosterPath} entry.`,
         "  These agents can still have sessions/auth state on disk, but config-driven routing, identity, and model selection will ignore them.",
         `  Examples: ${formatOrphanAgentDirPreview(orphanAgentDirs)}`,
-        `  Restore the missing agents.list entries or remove stale dirs after confirming they are no longer needed: ${shortenHomePath(path.join(stateDir, "agents"))}`,
+        `  Restore the missing ${authoredAgentRosterPath} entries or remove stale dirs after confirming they are no longer needed: ${shortenHomePath(path.join(stateDir, "agents"))}`,
       ].join("\n"),
     );
   }

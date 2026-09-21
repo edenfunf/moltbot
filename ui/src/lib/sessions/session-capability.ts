@@ -4,6 +4,8 @@ import type {
   SessionOwner,
   SessionsAssignOwnerParams,
   SessionsDeleteResult,
+  SessionsPatchManyParams,
+  SessionsPatchManyResult,
   SessionsRecoverResult,
 } from "../../../../packages/gateway-protocol/src/index.js";
 import type { SessionCatalogPullRequestSummary } from "../../../../packages/gateway-protocol/src/schema/sessions-catalog.js";
@@ -11,10 +13,7 @@ import type { GatewayBrowserClient, GatewayEventFrame, GatewayHelloOk } from "..
 import type {
   GatewaySessionRow,
   SessionBranch,
-  SessionCompactionCheckpoint,
   SessionsBranchesSwitchResult,
-  SessionsCompactionBranchResult,
-  SessionsCompactionRestoreResult,
   SessionsForkResult,
   SessionsListResult,
   SessionsRewindResult,
@@ -76,6 +75,9 @@ export type SessionListOptions = {
   includeGlobal?: boolean;
   includeUnknown?: boolean;
   configuredAgentsOnly?: boolean;
+  excludeSubagents?: boolean;
+  excludeCron?: boolean;
+  excludeSystem?: boolean;
   includeDerivedTitles?: boolean;
   includeLastMessage?: boolean;
   archivedFilter?: SessionArchivedFilter;
@@ -87,6 +89,10 @@ export type SessionRefreshOptions = SessionListOptions & {
   // Sidebar startup hydration must not block session creation or drop the open session.
   backgroundHydrate?: boolean;
 };
+
+export type SessionRefreshOutcome =
+  | { status: "refreshed" | "stale" }
+  | { status: "failed"; error: string };
 
 export type SessionListScope = Readonly<Omit<SessionListOptions, "offset" | "append">>;
 
@@ -121,7 +127,7 @@ export type SessionDeleteOutcome = Pick<SessionsDeleteResult, "deleted" | "workt
 
 export type SessionDeleteBatchResult = {
   deleted: string[];
-  errors: string[];
+  errors: { target: SessionDeleteTarget; error: unknown }[];
   preservedWorktrees: PreservedSessionWorktree[];
 };
 
@@ -183,6 +189,8 @@ export type SessionCapability = {
     ) => GitHubPublicationBinding | null;
   };
   readonly state: SessionState;
+  /** Memory-only roster presentation; never authority for mutations or live row observations. */
+  readonly presentation: Pick<SessionState, "result" | "agentId" | "resultCached">;
   /** Advances only when a canonical sessions.list result is published. */
   readonly canonicalListRevision: number;
   whenCachedRosterSettled: () => Promise<void>;
@@ -202,18 +210,23 @@ export type SessionCapability = {
     listener: (snapshot: SessionListSnapshot) => void,
   ) => { refresh: () => Promise<void>; dispose: () => void };
   refreshList: (options?: SessionRefreshOptions) => Promise<void>;
-  /** Admits history through the deletion fence, even when outside the shared roster. */
+  /** Admits history through lifecycle fences; defaults-only never authorizes row publication. */
   reconcile: (
     row: GatewaySessionRow | undefined,
     defaults?: SessionsListResult["defaults"],
-    options?: SessionReconcileOptions & { sourceCanonicalListRevision?: number },
-  ) => boolean;
+    options?: SessionReconcileOptions & {
+      sourceCanonicalListRevision?: number;
+      sourceListScope?: SessionListScope;
+    },
+  ) => boolean | "defaults-only";
   /** Captures request ordering before a supplemental row read begins. */
   captureReconcile: () => SessionCapability["reconcile"];
   /** Owns a routed descriptor through reads and events until its consumer retires. */
   observeRow: (
     target: SessionRowTarget,
     listener: (row: GatewaySessionRow | null) => void,
+    /** Matching events can omit descriptor-only fields; re-read those without watching roster revisions. */
+    options?: { onInvalidate?: (reason?: string) => void },
   ) => SessionRowObservation;
   /** Preserve an existing row observation through a local presentation copy. */
   inheritRow: (
@@ -226,8 +239,14 @@ export type SessionCapability = {
   reconcileChanged: (payload: unknown, options?: SessionReconcileOptions) => SessionChangedResult;
   reconcileRunTerminal: (terminal: SessionRunTerminal) => boolean;
   refresh: (options?: SessionRefreshOptions) => Promise<void>;
-  /** Forces the remembered roster query; null means the attempt retired or failed. */
-  refreshReplacement: (agentId?: string | null) => Promise<SessionsListResult | null>;
+  /** Schedules background list refreshes without replacing queued foreground queries. */
+  invalidate: () => void;
+  /** Refreshes the remembered query without superseding queued foreground intent. */
+  refreshReplacement: () => Promise<SessionsListResult | null>;
+  /** Reconciles an operation's agent without claiming the foreground query. */
+  reconcileMutation: (agentId?: string | null) => Promise<SessionRefreshOutcome>;
+  /** Captures freshness of this conversation's permission facts. */
+  capturePermissionObservation: (key: string, agentId?: string | null) => () => boolean;
   createResult: (
     params?: SessionCreateParams,
     options?: { reconciliation?: SessionCreateReconciliation },
@@ -235,8 +254,12 @@ export type SessionCapability = {
   create: (params?: SessionCreateParams) => Promise<string | null>;
   recover: (params: { key: string; agentId?: string }) => Promise<SessionsRecoverResult | null>;
   patch: SessionPatchRoute;
+  patchMany: (
+    targets: SessionsPatchManyParams["targets"],
+    patch: SessionsPatchManyParams["patch"],
+  ) => Promise<SessionsPatchManyResult | null>;
   archiveVisibility: (key: string) => SessionArchiveVisibility | undefined;
-  setArchivePending: (key: string, pending: boolean) => void;
+  beginArchive: (key: string, sessionId: string | undefined) => (() => void) | null;
   assignOwner: (
     key: string,
     owner: SessionsAssignOwnerParams["owner"],
@@ -284,20 +307,6 @@ export type SessionCapability = {
     options?: { agentId?: string | null; includeApprovals?: boolean },
   ) => Promise<SessionMessageSubscription>;
   unsubscribeMessages: (subscription: SessionMessageSubscription) => Promise<void>;
-  listCheckpoints: (
-    key: string,
-    options?: { agentId?: string | null },
-  ) => Promise<SessionCompactionCheckpoint[]>;
-  branchCheckpoint: (
-    key: string,
-    checkpointId: string,
-    options?: { agentId?: string | null },
-  ) => Promise<SessionsCompactionBranchResult>;
-  restoreCheckpoint: (
-    key: string,
-    checkpointId: string,
-    options?: { agentId?: string | null },
-  ) => Promise<SessionsCompactionRestoreResult>;
   rewind: (
     key: string,
     entryId: string,

@@ -6,14 +6,18 @@ import {
   resolveDefaultAgentId,
 } from "../../agents/agent-scope-config.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
+import {
+  copyReplyPayloadMetadata,
+  type ReplyPayload,
+  formatBtwTextForExternalDelivery,
+} from "../../auto-reply/reply-payload.js";
 import {
   normalizeReplyPayloadOutcome,
   type NormalizeReplyOutcome,
   type NormalizeReplySkipReason,
 } from "../../auto-reply/reply/normalize-reply.js";
+import { resolvePendingFinalDeliveryCompletion } from "../../auto-reply/reply/pending-final-delivery.js";
 import { createReplyMediaPathNormalizer } from "../../auto-reply/reply/reply-media-paths.runtime.js";
-import { formatBtwTextForExternalDelivery } from "../../auto-reply/reply/reply-payloads-base.js";
 import {
   filterMessagingToolMediaDuplicates,
   hasEnabledDeliveryOperation,
@@ -53,39 +57,21 @@ import type { OutboundSessionContext } from "../../infra/outbound/session-contex
 import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../../runtime.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
-import { hasAnyNonEmptyString as hasNonEmptyStringArray } from "../delivery-evidence-values.js";
+import {
+  hasAnyNonEmptyString as hasNonEmptyStringArray,
+  normalizeSentMediaUrlsForDelivery,
+} from "../delivery-evidence-values.js";
 import type { MessagingToolSend } from "../embedded-agent-messaging.types.js";
 import type { EmbeddedAgentRunMeta } from "../embedded-agent-runner/types.js";
 import { isNestedAgentLane } from "../lanes.js";
-import { isAgentRunRestartAbortReason } from "../run-termination.js";
+import {
+  createAgentCommandDeliveryGuard,
+  createRestartOnlyAbortSignal,
+} from "./delivery-authority.js";
 import type { AgentCommandOpts } from "./types.js";
 
 type RunResult = Awaited<ReturnType<(typeof import("../embedded-agent.js"))["runEmbeddedAgent"]>>;
 type DurableSendResult = Awaited<ReturnType<typeof sendDurableMessageBatchCore>>;
-
-function createRestartOnlyAbortSignal(source: AbortSignal | undefined): {
-  signal?: AbortSignal;
-  dispose: () => void;
-} {
-  if (!source) {
-    return { dispose: () => {} };
-  }
-  const controller = new AbortController();
-  const onAbort = () => {
-    if (isAgentRunRestartAbortReason(source.reason)) {
-      controller.abort(source.reason);
-    }
-  };
-  if (source.aborted) {
-    onAbort();
-  } else {
-    source.addEventListener("abort", onAbort, { once: true });
-  }
-  return {
-    signal: controller.signal,
-    dispose: () => source.removeEventListener("abort", onAbort),
-  };
-}
 
 /** Aggregate delivery status for an agent command result. */
 type AgentCommandDeliveryStatus = {
@@ -352,44 +338,6 @@ async function normalizeReplyMediaPathsForDelivery(params: {
     result.push(await normalizeMediaPaths(payload));
   }
   return { payloads: result, normalizeMediaPaths };
-}
-
-async function normalizeSentMediaUrlsForDelivery(params: {
-  sentMediaUrls: readonly string[];
-  normalizeMediaPaths?: (payload: ReplyPayload) => Promise<ReplyPayload>;
-}): Promise<string[]> {
-  const normalizedUrls: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of params.sentMediaUrls) {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      continue;
-    }
-    if (!seen.has(trimmed)) {
-      seen.add(trimmed);
-      normalizedUrls.push(trimmed);
-    }
-    if (!params.normalizeMediaPaths) {
-      continue;
-    }
-    try {
-      const normalized = await params.normalizeMediaPaths({
-        mediaUrl: trimmed,
-        mediaUrls: [trimmed],
-      });
-      for (const mediaUrl of [normalized.mediaUrl, ...(normalized.mediaUrls ?? [])]) {
-        const candidate = mediaUrl?.trim();
-        if (!candidate || seen.has(candidate)) {
-          continue;
-        }
-        seen.add(candidate);
-        normalizedUrls.push(candidate);
-      }
-    } catch {
-      // Keep the original evidence. Delivery normalization will report invalid media separately.
-    }
-  }
-  return normalizedUrls;
 }
 
 const UNRESOLVED_RESPONSE_PREFIX_VAR_PATTERN = /\{[a-zA-Z][a-zA-Z0-9.]*\}/;
@@ -961,6 +909,9 @@ export async function deliverAgentCommandResult(
   if (deliver && deliveryChannel && !isInternalMessageChannel(deliveryChannel)) {
     if (deliveryTarget && !deliveryStatus) {
       params.assertDeliveryCurrent?.();
+      const assertPlatformSendCurrent = createAgentCommandDeliveryGuard(params);
+      // The outbound projection contains transport data, not private payload metadata.
+      const pendingFinalCompletion = resolvePendingFinalDeliveryCompletion(payloads);
       const restartAbort = createRestartOnlyAbortSignal(opts.abortSignal);
       let send: DurableSendResult;
       try {
@@ -970,6 +921,12 @@ export async function deliverAgentCommandResult(
           to: deliveryTarget,
           accountId: resolvedAccountId,
           payloads: deliveryPayloads,
+          ...(pendingFinalCompletion
+            ? {
+                deliveryCompletion: pendingFinalCompletion,
+                deliveryIntentId: pendingFinalCompletion.deliveryId,
+              }
+            : {}),
           session: outboundSession,
           identity: resolveAgentOutboundIdentity(cfg, deliveryAgentId),
           replyPayloadSendingHook: {
@@ -991,6 +948,8 @@ export async function deliverAgentCommandResult(
           durability: bestEffortDeliver ? "best_effort" : "required",
           signal: restartAbort.signal,
           onDeliveryIntent: restartAbort.dispose,
+          onPlatformSendDispatch: async () => assertPlatformSendCurrent(),
+          assertDirectAdapterHandoff: assertPlatformSendCurrent,
           onError: logDeliveryError,
           onPayload: logPayload,
           deps: createOutboundSendDeps(deps),

@@ -93,20 +93,29 @@ function restoreMatrixStyleChunks(
   spoiler: MatrixSpoilerMarkers | undefined,
   underline: MatrixSpoilerMarkers | undefined,
 ): string[] {
+  if (!spoiler && !underline) {
+    return chunks;
+  }
   const stack: MatrixChunkStyle[] = [];
   const syntax = {
-    spoiler: { open: "||", close: "||", markers: spoiler },
-    underline: { open: "<u>", close: "</u>", markers: underline },
+    spoiler: { open: "||", close: "||" },
+    underline: { open: "<u>", close: "</u>" },
   } as const;
   return chunks.map((chunk) => {
     let restored = stack.map((style) => syntax[style].open).join("");
     for (const character of chunk) {
-      const opening = (Object.keys(syntax) as MatrixChunkStyle[]).find(
-        (style) => character === syntax[style].markers?.open,
-      );
-      const closing = (Object.keys(syntax) as MatrixChunkStyle[]).find(
-        (style) => character === syntax[style].markers?.close,
-      );
+      const opening =
+        character === spoiler?.open
+          ? "spoiler"
+          : character === underline?.open
+            ? "underline"
+            : undefined;
+      const closing =
+        character === spoiler?.close
+          ? "spoiler"
+          : character === underline?.close
+            ? "underline"
+            : undefined;
       if (opening) {
         stack.push(opening);
         restored += syntax[opening].open;

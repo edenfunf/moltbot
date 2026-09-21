@@ -28,7 +28,7 @@ import {
   type RestartSentinelPayload,
   writeRestartSentinel,
 } from "../../infra/restart-sentinel.js";
-import { scheduleGatewaySigusr1Restart, triggerOpenClawRestart } from "../../infra/restart.js";
+import { scheduleGatewayRestart, triggerOpenClawRestart } from "../../infra/restart.js";
 import { parseActivationCommand } from "../group-activation.js";
 import { parseSendPolicyCommand } from "../send-policy.js";
 import {
@@ -325,27 +325,16 @@ export const handleFastCommand: CommandHandler = defineAuthorizedTextCommand(
     const targetSessionEntry = params.sessionStore?.[params.sessionKey] ?? params.sessionEntry;
     const resetsToDefault = isSessionDefaultDirectiveValue(rawMode);
     const nextMode = resetsToDefault ? undefined : normalizeFastMode(rawMode);
-    if (nextMode === undefined) {
-      if (resetsToDefault) {
-        if (targetSessionEntry && params.sessionStore && params.sessionKey) {
-          delete targetSessionEntry.fastMode;
-          if (
-            !(await persistCommandSession({
-              ...params,
-              sessionEntry: targetSessionEntry,
-              touchedFields: ["fastMode"],
-            }))
-          ) {
-            return sessionEntryPersistenceConflictReply();
-          }
-        }
-        return sessionCommandReply("⚙️ Fast mode reset to default.");
-      }
+    if (nextMode === undefined && !resetsToDefault) {
       return sessionCommandReply("⚙️ Usage: /fast status|auto|on|off|default");
     }
 
     if (targetSessionEntry && params.sessionStore && params.sessionKey) {
-      targetSessionEntry.fastMode = nextMode;
+      if (resetsToDefault) {
+        delete targetSessionEntry.fastMode;
+      } else {
+        targetSessionEntry.fastMode = nextMode;
+      }
       if (
         !(await persistCommandSession({
           ...params,
@@ -358,9 +347,11 @@ export const handleFastCommand: CommandHandler = defineAuthorizedTextCommand(
     }
 
     return sessionCommandReply(
-      nextMode === "auto"
-        ? "⚙️ Fast mode set to auto."
-        : `⚙️ Fast mode ${nextMode ? "enabled" : "disabled"}.`,
+      resetsToDefault
+        ? "⚙️ Fast mode reset to default."
+        : nextMode === "auto"
+          ? "⚙️ Fast mode set to auto."
+          : `⚙️ Fast mode ${nextMode ? "enabled" : "disabled"}.`,
     );
   },
 );
@@ -532,11 +523,11 @@ export const handleSessionCommand: CommandHandler = async (params, allowTextComm
 export const handleRestartCommand: CommandHandler = defineGatewayControlCommand(
   "/restart",
   async (params) => {
-    const hasSigusr1Listener = process.listenerCount("SIGUSR1") > 0;
+    const hasRestartListener = process.listenerCount("SIGUSR2") > 0;
     const sentinelPayload = buildRestartCommandSentinel(params);
-    if (hasSigusr1Listener) {
+    if (hasRestartListener) {
       let sentinelWritten = false;
-      scheduleGatewaySigusr1Restart({
+      scheduleGatewayRestart({
         reason: "/restart",
         // The routed restart acknowledgement and scheduler must own the same
         // pending session key to avoid cross-session overwrite (#86742).
@@ -556,7 +547,7 @@ export const handleRestartCommand: CommandHandler = defineGatewayControlCommand(
           : undefined,
       });
       return sessionCommandReply(
-        "⚙️ Restarting OpenClaw in-process (SIGUSR1); back in a few seconds.",
+        "⚙️ Restarting OpenClaw in-process (SIGUSR2); back in a few seconds.",
       );
     }
     let sentinelWritten = false;

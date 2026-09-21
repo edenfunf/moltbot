@@ -10,6 +10,10 @@ The regular publish parent runs from the protected
 `release-publish/<tooling-sha12>-<epoch>` tag minted at the pinned Tooling SHA;
 use the candidate helper's printed command. Do not dispatch npm/plugin/ClawHub
 publication from a moving main parent. Docker-only recovery may use main.
+Extended-stable direct npm workflow recovery is a separate supported main route;
+follow [trusted-main npm recovery](extended-stable-publish.md#trusted-main-npm-recovery)
+for plugin source inputs and the matching core evidence handoff. It does not use
+the regular publish parent or authorize ClawHub publication.
 Tideclaw alpha uses its matching alpha branch and its owning skill.
 
 Publication promotes previously qualified bytes. Bind the successful Full
@@ -66,6 +70,13 @@ Unlike package publication, npm selector management requires `NPM_TOKEN`.
 Prefer repairing that workflow's token path. Point `latest` or `beta` only at
 the operator-approved already-published version, then verify cache-bypassed
 registry readback.
+
+Immediately after publishing or promoting to `latest`, dispatch that same
+release-ledger workflow to repair the beta floor: raise missing or older beta
+selectors to each package's own latest, preserve newer betas, and verify the
+selected core/plugin roster. The scheduled repair is only a backstop. Use the
+documented owner recovery for packages the ledger does not cover; do not lower
+a newer beta merely to make the selectors equal.
 
 If the workflow is unavailable, use the approved `$one-password` / `$npm`
 workflow in its persistent tmux session and private credential locators.

@@ -1651,23 +1651,22 @@ describe("server-channels auto restart", () => {
     expect(startAccount).toHaveBeenCalledTimes(1);
   });
 
-  it("restarts only running accounts after a host thaw", async () => {
+  it("restarts only running accounts after a host thaw when diagnostics fail", async () => {
     const starts: string[] = [];
     const stops: string[] = [];
-    installTestRegistry(
-      createTestPlugin({
-        listAccountIds: () => ["running", "manual"],
-        startAccount: async (context) => {
-          starts.push(context.accountId);
-          await new Promise<void>((resolve) => {
-            context.abortSignal.addEventListener("abort", () => resolve(), { once: true });
-          });
-        },
-        stopAccount: async (context) => {
-          stops.push(context.accountId);
-        },
-      }),
-    );
+    const plugin = createTestPlugin({
+      listAccountIds: () => ["running", "manual"],
+      startAccount: async (context) => {
+        starts.push(context.accountId);
+        await new Promise<void>((resolve) => {
+          context.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+      stopAccount: async (context) => {
+        stops.push(context.accountId);
+      },
+    });
+    installTestRegistry(plugin);
     const manager = createManager();
     await manager.startChannels();
     await vi.waitFor(() => expect(starts).toHaveLength(2));
@@ -1675,6 +1674,9 @@ describe("server-channels auto restart", () => {
     starts.length = 0;
     stops.length = 0;
 
+    plugin.config.inspectAccount = () => {
+      throw new Error("diagnostic inspection unavailable");
+    };
     const restarted = await restartRunningChannelAccounts(manager, {
       shouldContinue: () => true,
       onError: () => {},
@@ -4531,10 +4533,7 @@ describe("server-channels auto restart", () => {
 
   it("injects a narrow Gateway approval resolver into the channel task runtime", async () => {
     const request = vi.fn(async () => ({ applied: true, approval: {} }));
-    let releaseAccountStart = () => {};
-    const accountStartReady = new Promise<void>((resolve) => {
-      releaseAccountStart = resolve;
-    });
+    const { promise: accountStartReady, resolve: releaseAccountStart } = createDeferred();
     const nativeApprovalRuntime = {
       current: undefined as GatewayNativeApprovalRuntime | undefined,
     };

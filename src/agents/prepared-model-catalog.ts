@@ -44,6 +44,8 @@ import {
 import { normalizeThinkingCatalogProviders } from "./thinking-runtime.js";
 import { resolveDefaultAgentWorkspaceDir } from "./workspace.js";
 
+export { withPreparedModelRuntimeReadBatch } from "./prepared-model-runtime.owner.js";
+
 export type LoadPreparedModelCatalogParams = {
   agentId?: string;
   agentDir?: string;
@@ -85,7 +87,7 @@ async function materializeRequestedModelCatalog(
   if (!snapshot.loadFullModelCatalog) {
     return snapshot;
   }
-  // Only an explicit refresh request initializes or refreshes inventory.
+  // Explicit refresh waits for acquisition; ordinary reads return saved rows during renewal.
   const inventoryCatalog =
     refreshFullCatalog === true
       ? await refreshPreparedModelRuntimeCatalog(snapshot, {
@@ -107,7 +109,7 @@ async function materializeRequestedModelCatalog(
   return materializePreparedModelCatalogOwner(snapshot, modelCatalog);
 }
 
-/** Carries a completed catalog and its paired auth without acquiring or refreshing facts. */
+/** Carries the published catalog and paired auth while expired inventory renews separately. */
 export function materializePreparedModelCatalogOwner(
   snapshot: PreparedModelRuntimeSnapshot,
   modelCatalog: ModelCatalogSnapshot | undefined = snapshot.readFullModelCatalog?.(),
@@ -241,7 +243,7 @@ export function getPublishedPreparedModelCatalogOwnerSnapshot(
   return getPreparedModelRuntimeSnapshot(activationFull);
 }
 
-/** Returns the newest published catalog without starting discovery. */
+/** Returns the newest published catalog while expired inventory renews in the background. */
 export function getPreparedModelCatalogSnapshot(
   params: LoadPreparedModelCatalogParams = {},
 ): ModelCatalogSnapshot | undefined {
@@ -339,7 +341,7 @@ async function withPreparedModelCatalogOwnerPolicy<T>(
   read: (snapshot: PreparedModelRuntimeSnapshot) => T | Promise<T>,
   preparePublishedOwner = preparePublishedCatalogOwner,
 ): Promise<T> {
-  // Ordinary reads stay passive; explicit refresh keeps its existing writable default.
+  // Ordinary reads return published rows; explicit refresh keeps its writable default.
   const request = {
     ...params,
     readOnly: params.readOnly ?? params.refreshFullCatalog !== true,
@@ -406,6 +408,8 @@ export async function loadProviderScopedThinkingCatalog(params: {
   config: OpenClawConfig;
   provider: string;
   model: string;
+  /** Concrete runtime selected by the turn owner, including session overrides. */
+  agentRuntime?: string;
   agentId?: string;
   agentDir?: string;
   workspaceDir?: string;
@@ -415,25 +419,49 @@ export async function loadProviderScopedThinkingCatalog(params: {
   const request = { ...params, readOnly: true };
   const publishedOwner = getPreparedModelCatalogOwnerSnapshot(request);
   const owner = (await resolveReadOnlyPublishedModelCatalogOwner(request, "exact"))?.snapshot;
-  const catalog = owner
-    ? (publishedOwner ? await materializeRequestedModelCatalog(owner, true, undefined) : owner)
-        .modelCatalog
-    : { entries: [], routeVariants: [] };
-  const agentId = params.agentId ?? resolveAmbientOwnerAgentId(params.config);
-  const { augmentModelCatalogWithAgentHarness } = await import("./harness/model-catalog.js");
-  const snapshot = await augmentModelCatalogWithAgentHarness({
-    cfg: params.config,
-    agentId,
-    agentDir: params.agentDir ?? resolveAgentDir(params.config, agentId),
-    workspaceDir:
-      params.workspaceDir ??
-      resolveAgentWorkspaceDir(params.config, agentId) ??
-      resolveDefaultAgentWorkspaceDir(),
-    defaultProvider: params.provider,
-    defaultModel: `${params.provider}/${params.model}`,
-    snapshot: catalog,
-  });
-  const entries = normalizeThinkingCatalogProviders(snapshot.entries);
+  let snapshot: ModelCatalogSnapshot;
+  if (owner?.loadNativeModelCatalog && params.agentRuntime && params.agentRuntime !== "openclaw") {
+    snapshot = await owner.loadNativeModelCatalog({
+      provider: params.provider,
+      modelId: params.model,
+      runtime: params.agentRuntime,
+    });
+  } else {
+    const catalog = owner
+      ? (publishedOwner ? await materializeRequestedModelCatalog(owner, true, undefined) : owner)
+          .modelCatalog
+      : { entries: [], routeVariants: [] };
+    const agentId = params.agentId ?? resolveAmbientOwnerAgentId(params.config);
+    const { augmentModelCatalogWithAgentHarness } = await import("./harness/model-catalog.js");
+    snapshot = await augmentModelCatalogWithAgentHarness({
+      cfg: params.config,
+      agentId,
+      agentDir: params.agentDir ?? resolveAgentDir(params.config, agentId),
+      workspaceDir:
+        params.workspaceDir ??
+        resolveAgentWorkspaceDir(params.config, agentId) ??
+        resolveDefaultAgentWorkspaceDir(),
+      defaultProvider: params.provider,
+      defaultModel: `${params.provider}/${params.model}`,
+      agentRuntime: params.agentRuntime,
+      snapshot: catalog,
+    });
+  }
+  let entries = snapshot.entries;
+  if (params.agentRuntime) {
+    const entry = findModelInCatalog(entries, params.provider, params.model);
+    if (entry) {
+      // A logical row may belong to another picker runtime; retain only the selected donor.
+      const { selectModelCatalogRuntimeEntry } = await import("./model-catalog-view.js");
+      const selected = selectModelCatalogRuntimeEntry({
+        entry,
+        routeVariants: snapshot.routeVariants,
+        runtimeId: params.agentRuntime,
+      }).entry;
+      entries = entries.map((candidate) => (candidate === entry ? selected : candidate));
+    }
+  }
+  entries = normalizeThinkingCatalogProviders(entries);
   if (params.requiredInputRoute !== undefined) {
     const entry = findModelInCatalog(entries, params.provider, params.model);
     if (

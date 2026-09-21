@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 354540,
-  "reason": "Main crossed the startup enforcement limit after concurrent landings (main alone 354388 B vs 354270 B limit); this PR adds 119 B for provider auth markers in the model picker; measured 354540 B on the rebased tree. Fixed 358400 B cap retained.",
-  "updatedAt": "2026-09-11"
+  "startupJsGzipBytes": 365261,
+  "reason": "Approved #153178 rebase measurement with frozen Pako 3.0.2: 365172 B rounds up to 365261 B (356.7 KiB), above the previous 364954 B baseline. The existing 512 B growth and 64 B build-variance allowances remain unchanged, giving an explicit 365837 B enforcement limit.",
+  "updatedAt": "2026-09-20"
 }
