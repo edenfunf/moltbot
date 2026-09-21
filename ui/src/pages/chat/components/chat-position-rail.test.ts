@@ -323,6 +323,8 @@ describe("conversation position rail", () => {
           );
           const focusedOffset = marks.scrollTop;
           activeMessage.mockReturnValue("message-77");
+          publishVisibility(root.querySelector(".chat-bubble")!);
+          expect([...marks.querySelectorAll('[tabindex="0"]')]).toEqual([marker(60)]);
           await flush();
           expect(document.activeElement).toBe(marker(60));
           expect(marks.scrollTop).toBe(focusedOffset);

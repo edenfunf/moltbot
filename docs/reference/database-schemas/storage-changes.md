@@ -24,6 +24,15 @@ and publishes the result. Avoid exposing a generic SQL callback to application
 code or adding an asynchronous wrapper around an existing asynchronous facade.
 The plugin KV API already has asynchronous methods over its SQLite owner.
 
+Operator approval lookups, pending replay, verdicts, expiry, and allow-once
+consumption execute in the shared-state worker. Lookups and pending scans retain
+their expiry and corrupt-row repair transactions; history pages use the read-only
+worker. The approval manager retains live authority and decision handoffs, checks
+authority at transaction and commit admission, and joins accepted mutations before
+retiring their local bindings. Startup orphan closure and pruning remain boot
+admission operations. Stored bytes, schemas, retention, and update behavior are
+unchanged.
+
 Task maintenance awaits global plugin-state expiry in the shared-state worker.
 The sweep samples expiry time inside its admitted write transaction and deletes
 at most 1,024 rows. Writer waits leave the Gateway event loop available, while
@@ -1068,6 +1077,12 @@ and synchronous statement snapshot. Streamed chronological reads, export snapsho
 and session and export-state writes retain their existing owners until their
 snapshot and write-drainage lifecycles move together.
 
+Transcript artifact ownership recovery streams raw utterances in sequence order
+through the shared-state worker and returns their canonical JSONL SHA-256 digest.
+Metadata and summary reads keep their existing separate timing; this does not
+create an atomic snapshot across them. Artifact replacement, manifest repair,
+and export leases retain their existing owners.
+
 SQLite worker transport preserves complete result values. Results within the
 64 MiB inline reply budget keep their existing reply path; larger results are
 serialized once and transferred in 8 MiB frames. The original operation retains
@@ -1413,20 +1428,24 @@ Periodic incremental vacuum uses the same write-admission boundary, so it can
 service reclamation approval before taking the writer lock. Its 512-page limit
 is unchanged; passive checkpoints remain outside the write transaction.
 
-Reclamation page maintenance uses a PASSIVE checkpoint and at most 512 pages of
-incremental vacuum per pass. PASSIVE does not wait for readers, but does not cap
-the number of WAL frames copied. Before pruning retained archives, disk-budget
-enforcement drains the initially observed free pages in units of at most 512,
-yields between units, and reacquires the database owner after each yield. It
-preserves physical checkpointing before measuring pressure, so unreclaimed pages
-do not cause unnecessary archive deletion. Full logical deletion with resumable
-physical cleanup remains a separate design; existing deletion visibility and rollback
-semantics are unchanged.
+The WAL owner supplies one checkpoint-before-vacuum operation for periodic,
+reclamation, and archive maintenance. An incomplete checkpoint skips vacuum.
+Each unit releases at most 512 pages and uses zero busy timeout for online lock
+admission; checkpoint frame copying itself is not bounded by that page limit.
+Archive pruning drains its initially observed free pages in these units and stops
+before deleting archives when checkpointing is incomplete. Its outcome records
+completion, checkpoint facts, and physical bytes before and after. Budget cleanup
+remains deferred until the checkpoint owner reports completion, preserving retained
+data instead of adding writes behind a pinned WAL.
 
 Queued archive pruning prepares cold connections through the same asynchronous
-admission owner while retaining its existing writer section. Each page-drain
-pass keeps its checkpoints, freelist reads, and bounded vacuum in one synchronous
-phase on the admitted connection. Archive-row and unpublished-name reads follow
+admission owner while retaining its existing writer section. File-backed page
+drains use the existing reclamation worker, acquired before the caller's writer
+section. Each unit checks current authority before checkpointing and vacuum,
+authorizes commit, and joins native settlement. Cache eviction between units can
+refresh the host claim only for the same physical database; no dispatched mutation
+is replayed. Incognito maintenance retains its in-process owner.
+Archive-row and unpublished-name reads follow
 validation. After removing a derived archive file, pruning reacquires before the
 canonical row-deletion transaction; an acquisition failure propagates without
 deleting that recovery row.
@@ -1518,8 +1537,28 @@ Doctor's local device-token inventory executes in the shared-state worker. The
 detector awaits its result and preserves role ordering, malformed-row omission,
 and best-effort diagnostic behavior. Lint keeps this read in its private active
 state view and joins worker cleanup before retiring that snapshot; source-path
-legacy-file checks retain their separate environment. Device identity, pairing
-reads, and client token operations retain their existing owners.
+legacy-file checks retain their separate environment. Device identity creation
+retains its existing owner.
+
+Device pairing lists and lookups execute in the shared-state read-only workers.
+The pairing snapshot cache checks SQLite `data_version` there, including commits
+from a separate CLI connection. Workers project lists and node identity bindings;
+the Gateway installs bindings against the pairing revision without reopening
+SQLite. Historical inspection snapshots never publish live node authority.
+
+Pairing, approval, role-token, bootstrap, and node-surface mutations execute in
+the shared-state writer. Each synchronous transaction reads the authoritative
+rows and obtains current host policy or connection admission before mutation and
+again before commit. Commit receipts publish the revision and changed node
+bindings before callers continue; uncertain outcomes are not replayed. Node
+prompt preparation refreshes the published facts, and Web Push retains pairing
+and subscription admission through network start, releasing both before provider
+completion. APNs registration checks pairing in its worker transaction and
+revalidates the exact live node connection through the same broker admission.
+
+The cutover changes no schema, persisted record representation, config, retention,
+or update behavior. Doctor/import transactions keep their synchronous maintenance
+owner; regular CLI pairing uses the same worker operations as the Gateway.
 
 An adapter must make these contracts explicit and verify them against a real
 database:

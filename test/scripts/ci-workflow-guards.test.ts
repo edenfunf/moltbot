@@ -16,7 +16,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { connect } from "node:net";
 import { devNull, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8673,21 +8672,18 @@ server.listen(0, "127.0.0.1", () => {
         ).toBe('module.exports = "cache-proof-v1";\n');
 
         await stopRegistry();
+        const registryAtStop = {
+          closed: registryDidClose,
+          exitCode: registryServer.exitCode,
+          signalCode: registryServer.signalCode,
+        };
         signal.throwIfAborted();
-        expect(registryDidClose, "registry closed before source deletion/offline install").toBe(
-          true,
-        );
-        await expect(
-          new Promise<void>((resolve, reject) => {
-            const socket = connect({ host: "127.0.0.1", port, signal });
-            socket.once("error", reject);
-            socket.once("connect", () => {
-              socket.destroy();
-              resolve();
-            });
-          }),
-        ).rejects.toMatchObject({ code: "ECONNREFUSED" });
-        signal.throwIfAborted();
+        expect(
+          registryAtStop.closed,
+          "registry closed before source deletion/offline install",
+        ).toBe(true);
+        // This direct child owns the listener; its released port may already have a new owner.
+        expect(registryAtStop.exitCode !== null || registryAtStop.signalCode !== null).toBe(true);
         rmSync(registry, { force: true, recursive: true });
         const cachedIdentity = statSync(restoredPackageFile);
         const cachedLockfile = readFileSync(path.join(workspace, "pnpm-lock.yaml"), "utf8");

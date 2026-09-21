@@ -15,9 +15,17 @@ import type {
 } from "../cron/store/run-recovery-read.types.js";
 import type { FleetCellRecord } from "../fleet/registry.types.js";
 import type {
+  ListTerminalOperatorApprovalsInput,
+  ListTerminalOperatorApprovalsResult,
+} from "../gateway/operator-approval-store.types.js";
+import type {
   WorkerPlacementConflictBinding,
   WorkerSessionPlacementReadResult,
 } from "../gateway/worker-environments/placement-read-projection.types.js";
+import type {
+  DevicePairingReadCommand,
+  DevicePairingReadReply,
+} from "../infra/device-pairing-read.types.js";
 import type { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";
 import type {
   ConversationRef,
@@ -57,6 +65,11 @@ export type OpenClawStateReadAuthority = {
 
 export type OpenClawStateReadCommand =
   | { type: "conversationBindings.inspect"; conversation: ConversationRef }
+  | DevicePairingReadCommand
+  | {
+      type: "operatorApprovals.history";
+      input: ListTerminalOperatorApprovalsInput;
+    }
   | PluginBlobReadCommand
   | CronRunRecoveryReadCommand
   | { type: "exec-approvals.read" }
@@ -101,6 +114,13 @@ export type OpenClawStateReadReply = (
       type: "conversationBindings.inspect";
       sourceAdmitted: true;
       record: SessionBindingRecord | null;
+    }
+  | DevicePairingReadReply
+  | {
+      ok: true;
+      type: "operatorApprovals.history";
+      sourceAdmitted: true;
+      history: ListTerminalOperatorApprovalsResult;
     }
   | PluginBlobReadReply
   | {
@@ -217,6 +237,8 @@ export type OpenClawStateReadOutcome =
 
 export type OpenClawStateReadPhase = "before-read" | "read" | "unobserved";
 export type OpenClawStateReadOptions = {
+  /** Publication and authority reads must not inherit an inspection snapshot. */
+  current?: boolean;
   mapError?: (error: unknown, phase: OpenClawStateReadPhase) => unknown;
 };
 
