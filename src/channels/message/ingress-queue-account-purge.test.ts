@@ -9,7 +9,8 @@ import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
-import { createChannelIngressQueue, purgeChannelIngressQueueAccount } from "./ingress-queue.js";
+import { purgeChannelIngressQueueAccount } from "./ingress-queue-account-purge.js";
+import { createChannelIngressQueue } from "./ingress-queue.js";
 
 type ChannelIngressTestDatabase = Pick<OpenClawStateKyselyDatabase, "channel_ingress_events">;
 

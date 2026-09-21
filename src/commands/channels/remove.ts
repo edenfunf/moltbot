@@ -3,7 +3,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import {
   type ChannelIngressQueueAccountPurge,
   purgeChannelIngressQueueAccount,
-} from "../../channels/message/ingress-queue.js";
+} from "../../channels/message/ingress-queue-account-purge.js";
 import {
   applyChannelAccountRemoval,
   type ChannelAccountMutationPlugin,

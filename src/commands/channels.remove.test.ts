@@ -1,9 +1,7 @@
 // Channels remove tests cover config mutation, plugin catalog repair hints, and account removal behavior.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createChannelIngressQueue,
-  purgeChannelIngressQueueAccount,
-} from "../channels/message/ingress-queue.js";
+import { purgeChannelIngressQueueAccount } from "../channels/message/ingress-queue-account-purge.js";
+import { createChannelIngressQueue } from "../channels/message/ingress-queue.js";
 import type { ChannelPluginCatalogEntry } from "../channels/plugins/catalog.js";
 import {
   deleteAccountFromConfigSection,
@@ -109,10 +107,10 @@ vi.mock("./channel-setup/plugin-install.js", async () => {
   return createMockChannelSetupPluginInstallModule(actual);
 });
 
-vi.mock("../channels/message/ingress-queue.js", async () => {
-  const actual = await vi.importActual<typeof import("../channels/message/ingress-queue.js")>(
-    "../channels/message/ingress-queue.js",
-  );
+vi.mock("../channels/message/ingress-queue-account-purge.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../channels/message/ingress-queue-account-purge.js")
+  >("../channels/message/ingress-queue-account-purge.js");
   return {
     ...actual,
     // Real purge unless a test arms a failure, so the state store stays authoritative.

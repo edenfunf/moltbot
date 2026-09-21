@@ -4,7 +4,6 @@
  * Stores, claims, completes, and tombstones inbound channel events in OpenClaw state.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
 import {
@@ -12,7 +11,6 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../../infra/kysely-sync.js";
-import { resolveDatabasePath } from "../../state/openclaw-state-db-maintenance.js";
 import type {
   ChannelIngressEvents,
   DB as OpenClawStateKyselyDatabase,
@@ -270,13 +268,13 @@ type ChannelIngressRow = Selectable<ChannelIngressEvents>;
 // scrub marker written by older versions. Invalid JSON cannot collide with enqueue output.
 const FAILED_NULL_PAYLOAD_SENTINEL = "OPENCLAW_CHANNEL_INGRESS_FAILED_NULL_V1";
 
-function normalizePart(value: string | undefined, fallback: string): string {
+export function normalizePart(value: string | undefined, fallback: string): string {
   const normalized = value?.trim();
   return normalized ? normalized : fallback;
 }
 
 // Keep inherited lookups for HOME/etc. without enumerating large Kubernetes service envs.
-function createStateDirEnv(
+export function createStateDirEnv(
   stateDir: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
@@ -324,7 +322,7 @@ export function getChannelIngressKysely(db: DatabaseSync) {
   return getNodeSqliteKysely<ChannelIngressDatabase>(db);
 }
 
-function affectedRows(result: { numAffectedRows?: bigint }): number {
+export function affectedRows(result: { numAffectedRows?: bigint }): number {
   return Number(result.numAffectedRows ?? 0n);
 }
 
@@ -575,7 +573,7 @@ function normalizedCandidateIds(ids: Iterable<string> | undefined): string[] | u
   return ids === undefined ? undefined : [...ids].map((id) => id.trim()).filter(Boolean);
 }
 
-function queueNameForParts(channelId: string, accountId: string): string {
+export function queueNameForParts(channelId: string, accountId: string): string {
   // JSON tuple encoding keeps channel/account scopes unambiguous even when ids contain separators.
   return JSON.stringify([channelId, accountId]);
 }
@@ -627,74 +625,6 @@ export async function listChannelIngressQueueAccountIdsReadOnly(params: {
   } finally {
     handle.release();
   }
-}
-
-/** Ingress rows dropped when a channel account is removed. */
-export type ChannelIngressQueueAccountPurge = {
-  /** Rows removed across every status. */
-  discarded: number;
-  /** Removed rows that were still awaiting an answer, so the removal dropped inbound work. */
-  undelivered: number;
-  /** Removed dead letters, which an operator could have resubmitted until now. */
-  recoverable: number;
-};
-
-/**
- * Drops every ingress row a removed channel account owned.
- *
- * Retention prunes on admission, so an account that never admits again keeps its rows
- * forever; removal is the last point that can dispose of them. Callers report
- * `undelivered` and `recoverable` because those rows are inbound work, not residue.
- *
- * Selection is an exact match on the queue name, so a caller that cannot reproduce the
- * name a plugin composed removes nothing rather than something else: the failure
- * direction here is always "too few".
- */
-export function purgeChannelIngressQueueAccount(params: {
-  channelId: string;
-  accountId?: string;
-  stateDir?: string;
-}): ChannelIngressQueueAccountPurge {
-  const queueName = queueNameForParts(
-    normalizePart(params.channelId, "unknown"),
-    normalizePart(params.accountId, "default"),
-  );
-  // Removal must not be what creates the store. A host that never queued an inbound
-  // event has nothing to discard, and the creating opener would migrate a fresh
-  // database just to delete zero rows - the same reason the listing sibling above
-  // takes the non-creating path.
-  const env = params.stateDir ? createStateDirEnv(params.stateDir) : process.env;
-  if (!existsSync(resolveDatabasePath({ env }))) {
-    return { discarded: 0, undelivered: 0, recoverable: 0 };
-  }
-  const database = openChannelIngressDatabase(params.stateDir);
-  return runOpenClawStateWriteTransaction(
-    (tx) => {
-      const kysely = getChannelIngressKysely(tx.db);
-      const countByStatus = (statuses: ["pending", "claimed"] | ["failed"]): number =>
-        executeSqliteQueryTakeFirstSync(
-          tx.db,
-          kysely
-            .selectFrom("channel_ingress_events")
-            .select((eb) => eb.fn.countAll<number>().as("count"))
-            .where("queue_name", "=", queueName)
-            .where("status", "in", statuses),
-        )?.count ?? 0;
-      const undelivered = countByStatus(["pending", "claimed"]);
-      // Dead letters are work too: `channels dead-letters resubmit` can replay them until
-      // this deletion drops them, so reporting them only as part of `discarded` would
-      // describe recoverable inbound events as routine cleanup.
-      const recoverable = countByStatus(["failed"]);
-      const discarded = affectedRows(
-        executeSqliteQuerySync(
-          tx.db,
-          kysely.deleteFrom("channel_ingress_events").where("queue_name", "=", queueName),
-        ),
-      );
-      return { discarded, undelivered, recoverable };
-    },
-    { path: database.path },
-  );
 }
 
 /** Creates a durable channel/account-scoped ingress queue backed by the OpenClaw state database. */
