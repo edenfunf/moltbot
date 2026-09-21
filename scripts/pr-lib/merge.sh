@@ -496,6 +496,7 @@ merge_run() {
   local replacement_head="${4:-}" replacement_artifacts="" recovery_captures=()
   local body_path="${5:-}" captured_body="" merge_body_snapshot=""
   local legacy_directory="${6:-}" legacy_refusal="" legacy_captures=()
+  local cancel_auto="${7:-false}"
   [ -z "$body_path" ] || body_path=$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' -- "$body_path") || return 1
   if [ -n "$replacement_head" ] &&
     { [ -z "$recovery_oid" ] || ! [[ "$replacement_head" =~ ^[0-9a-f]{40}$ ]]; }; then
@@ -505,6 +506,11 @@ merge_run() {
   local MERGE_OUTCOME_REF MERGE_OUTCOME_OID MERGE_OUTCOME_RECORD MERGE_REPO
   local MERGE_REPO_URL MERGE_REPO_HOST MERGE_REPO_NAME MERGE_OBSERVATION MERGE_TRANSPORT=rest
   merge_outcome_init "$pr" || return 1
+  if [ "$cancel_auto" = true ]; then
+    [ -n "$recovery_oid" ] && [ -z "$replacement_head$body_path$legacy_directory" ] && [ "$auto_merge_requested" = false ] || return 2
+    merge_outcome_cancel_auto "$pr" "$recovery_oid"
+    return
+  fi
   if [ -n "$legacy_directory" ]; then
     [ -z "$MERGE_OUTCOME_OID" ] && [ -n "$recovery_oid" ] && [ -n "$replacement_head" ] || {
       merge_outcome_stop "legacy recovery requires no recorded outcome, the pinned original capture, and an explicit current head"; return 1;
@@ -512,9 +518,11 @@ merge_run() {
   elif [ -n "$recovery_oid" ]; then
     if [ "$recovery_oid" != "$MERGE_OUTCOME_OID" ] ||
       ! printf '%s\n' "$MERGE_OUTCOME_RECORD" | jq -e '
-        .phase == "intent" and .accepted == false and .route == "immediate"
+        .phase == "intent" and
+        ((.accepted == false and .route == "immediate") or
+         (.accepted == true and .route == "auto" and .cancellation.state == "confirmed"))
       ' >/dev/null; then
-      merge_outcome_stop "operator recovery requires the exact retained unaccepted immediate intent; no attempt was authorized"
+      merge_outcome_stop "operator recovery requires the exact unaccepted immediate intent or confirmed auto cancellation; no attempt was authorized"
       return 1
     fi
     recovery_record="$MERGE_OUTCOME_RECORD"

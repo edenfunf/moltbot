@@ -124,6 +124,8 @@ export const databaseWorkerCoreTestFiles = [
   "src/hooks/hooks-install.test.ts",
   "src/infra/state-migrations.audit-logs.windows.test.ts",
   "src/infra/state-migrations.media-persistence.lifecycle-recovery.test.ts",
+  "src/skills/library/resource-read.test.ts",
+  "src/skills/library/service.test.ts",
   "src/skills/workshop/collection-restore.test.ts",
   "src/skills/workshop/experience-review.apply.test.ts",
   "src/skills/workshop/policy.test.ts",
