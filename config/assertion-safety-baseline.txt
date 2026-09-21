@@ -965,7 +965,7 @@ extensions/qa-lab/src/live-transports/whatsapp/whatsapp-live.setup.ts	1
 extensions/qa-lab/src/mantis/crabbox-runtime.ts	2
 extensions/qa-lab/src/mantis/discord-smoke.runtime.ts	3
 extensions/qa-lab/src/mantis/run.runtime.ts	1
-extensions/qa-lab/src/mantis/slack-desktop-smoke.runtime.ts	4
+extensions/qa-lab/src/mantis/slack-desktop-smoke.runtime.ts	1
 extensions/qa-lab/src/mantis/visual-task.runtime.ts	2
 extensions/qa-lab/src/manual-lane.runtime.ts	2
 extensions/qa-lab/src/model-catalog.runtime.ts	2
@@ -1883,7 +1883,7 @@ src/agents/subagents/registry/subagent-session-cleanup.ts	2
 src/agents/subagents/spawn/acp-spawn-admission.ts	1
 src/agents/subagents/spawn/acp-spawn-parent-stream.ts	11
 src/agents/subagents/spawn/subagent-spawn-session-patch.ts	1
-src/agents/subagents/spawn/subagent-spawn.ts	2
+src/agents/subagents/spawn/subagent-spawn.ts	1
 src/agents/subagents/swarm/swarm-output-schema.ts	1
 src/agents/subagents/swarm/swarm-scheduler.ts	1
 src/agents/system-prompt-report.ts	2
@@ -2573,7 +2573,6 @@ src/flows/doctor-removed-workspaces-state-check.ts	2
 src/flows/search-setup.ts	1
 src/gateway/agent-runtime-identity-token.ts	1
 src/gateway/agent-turn/agent-dedupe.ts	3
-src/gateway/agent-turn/agent-job.ts	1
 src/gateway/agent-turn/agent-restart-recovery-context.ts	1
 src/gateway/agent-turn/agent-run-dispatch.ts	1
 src/gateway/agent-turn/agent-session-persist.ts	3
@@ -3631,7 +3630,7 @@ ui/src/pages/agents/memory/memory-panel.ts	2
 ui/src/pages/agents/memory/view.ts	1
 ui/src/pages/agents/model-config.ts	3
 ui/src/pages/agents/panels-overview.ts	3
-ui/src/pages/agents/panels-status-files.ts	10
+ui/src/pages/agents/panels-status-files.ts	1
 ui/src/pages/agents/panels-tools-skills.ts	1
 ui/src/pages/channels/view.config.ts	1
 ui/src/pages/channels/view.detail.ts	1

@@ -235,7 +235,10 @@ export async function reloadGatewayPlugins(
     let nextRegistry = preflight.pluginRegistry;
     resourceHandoffIds = selectResourceHandoff(nextRegistry, requestedIds);
     channels.collectTargets(nextRegistry, changedPluginIds);
-    recovery.capture(changedPluginIds);
+    for (const warning of recovery.capture(changedPluginIds)) {
+      log.warn(warning);
+      recordWarning(warning);
+    }
     await params.checkpoint?.();
     assertCurrent();
     // No yield between the final work check, admission fence, and invalidation.
@@ -713,6 +716,7 @@ export async function reloadGatewayPlugins(
       activated ? "applied" : restored ? "restored" : phase === "prepare" ? "unchanged" : "failed",
       changedPluginIds,
       pluginRuntime.registry,
+      recovery.unavailablePluginIds,
       restartDrainSignal.aborted ? undefined : log.error,
     );
     recovery.dispose();
