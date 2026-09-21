@@ -920,13 +920,12 @@ describe("channelsRemoveCommand", () => {
     );
   });
 
-  it("keeps the ingress rows when the channel is the multi-channel plugin's own id", async () => {
+  it("keeps the ingress rows when the channel is the plugin's own id beside a declared sibling", async () => {
     // `channelPluginIdBelongsToManifest` accepts a channel whose id IS the plugin id even
     // when `channels` does not list it, so this shape is absent from the declared list and
-    // must not be read as "no manifest claims this channel" - the queue is still shared.
-    manifestMocks.plugins = [
-      { id: "external-chat", channels: ["external-chat-text", "external-chat-voice"] },
-    ];
+    // must not be read as "no manifest claims this channel". One declared sibling is
+    // enough to share the queue: counting only `channels` would see a single channel.
+    manifestMocks.plugins = [{ id: "external-chat", channels: ["external-chat-voice"] }];
     armExternalChatRemoval({ pluginId: "external-chat" });
     const queue = createChannelIngressQueue<{ text: string }>({
       channelId: "external-chat",

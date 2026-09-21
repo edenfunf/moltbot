@@ -85,8 +85,7 @@ function resolveIngressQueueOwner(params: {
   // A channel is registered under a declared channel id OR under the plugin's own id -
   // `channelPluginIdBelongsToManifest` accepts either - so a channel named after the
   // plugin is absent from `channels` and would fall through the first lookup into the
-  // no-manifest branch, purging a queue that may be shared. Match both, and let the
-  // same declared-channel count decide.
+  // no-manifest branch, purging a queue that may be shared. Match both.
   const owner =
     plugins.find((plugin) => plugin.channels.some((channel) => channel.toLowerCase() === id)) ??
     plugins.find((plugin) => plugin.id.toLowerCase() === id);
@@ -95,7 +94,11 @@ function resolveIngressQueueOwner(params: {
     // typed, which is what a bundled channel's queue is keyed by anyway.
     return { pluginId: params.channelId };
   }
-  return owner.channels.length > 1 ? { sharedWithPluginId: owner.id } : { pluginId: owner.id };
+  // The queue is exclusive only when this channel is the one channel it serves. Count
+  // the removed channel alongside the declared ones: a channel matched through the
+  // plugin id is not in `channels`, so a single declared sibling still shares its queue.
+  const served = new Set([id, ...owner.channels.map((channel) => channel.toLowerCase())]);
+  return served.size > 1 ? { sharedWithPluginId: owner.id } : { pluginId: owner.id };
 }
 
 /**
