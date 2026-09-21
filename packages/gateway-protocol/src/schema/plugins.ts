@@ -468,6 +468,9 @@ export const PluginDiscoveryDetailSchema = closedObject({
   repositoryUrl: Type.Optional(NonEmptyString),
   documentationUrl: Type.Optional(NonEmptyString),
   compatibility: Type.Optional(PluginDiscoveryCompatibilitySchema),
+  contracts: Type.Optional(Type.Record(NonEmptyString, Type.Array(NonEmptyString))),
+  providers: Type.Optional(Type.Array(NonEmptyString)),
+  channels: Type.Optional(Type.Array(NonEmptyString)),
   configuration: Type.Array(PluginDiscoveryConfigFieldSchema),
   mcpServers: Type.Array(NonEmptyString),
   skills: Type.Array(

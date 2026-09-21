@@ -249,7 +249,7 @@ describe("PluginsPage", () => {
     );
 
     expect(page.messages[installIdentity]).toBeUndefined();
-    expect(page.messages["plugin:bluebubbles"]?.kind).toBe("success");
+    expect(page.messages["plugin:bluebubbles"]).toBeUndefined();
     expect(page.result?.plugins.map((plugin) => plugin.id)).toEqual(["bluebubbles"]);
     expect(page.messages["plugin:workboard"]?.text).toBe("Unrelated message.");
   });

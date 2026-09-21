@@ -5,8 +5,8 @@ import { isDeepStrictEqual } from "node:util";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../../infra/sqlite-handle-lifecycle.js";
 import {
-  publishSqliteWalCheckpointHealth,
-  type SqliteWalHealth,
+  publishSqliteWalCheckpointObservation,
+  type SqliteWalCheckpointSnapshot,
 } from "../../infra/sqlite-wal-checkpoint.js";
 import { captureStateDatabaseCoordinatorRuntime } from "../../infra/state-database-coordinator.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -95,7 +95,7 @@ type WorkerCleanup = { cleanupWarnings: string[]; settled: boolean };
 export type SqliteReclamationWorkerMessage =
   | SqliteMutationWorkerMessage<SqliteSessionReclamationResult>
   | { type: "lease"; receipt: OpenClawAgentDatabaseWorkerLeaseReceipt }
-  | { type: "checkpoint"; operationId: number; health: SqliteWalHealth }
+  | { type: "checkpoint"; operationId: number; snapshot: SqliteWalCheckpointSnapshot }
   | ({ type: "closed" } & WorkerCleanup);
 
 const log = createSubsystemLogger("session-sqlite");
@@ -508,7 +508,7 @@ export class SqliteReclamationWorker {
       this.stateContext.admission.assertCurrent();
       this.assertPathCurrent();
       // Native close keeps its admitted custody after new requests are revoked.
-      publishSqliteWalCheckpointHealth(this.options.path, message.health);
+      publishSqliteWalCheckpointObservation(this.options.path, message.snapshot);
     } catch {
       // A retired state owner cannot publish late diagnostics or change native settlement.
     }

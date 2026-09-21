@@ -136,7 +136,7 @@ describe("renderPluginCatalogResults", () => {
       expect(
         container.querySelectorAll(".plugin-catalog-grid--results .plugin-catalog-card"),
       ).toHaveLength(official === null ? 0 : 1);
-      expect(container.querySelector(".plugin-catalog-results__empty") !== null).toBe(
+      expect(container.querySelector("openclaw-panel-empty-state") !== null).toBe(
         official === null,
       );
       expect(container.querySelector(".plugin-catalog-pagination")).toBeNull();
@@ -213,7 +213,7 @@ describe("renderPluginCatalogResults", () => {
     expect(warnings).toHaveLength(1);
     const warning = warnings.item(0);
     expect(warning?.textContent).toContain("ClawHub is unavailable");
-    expect(container.querySelector(".plugin-catalog-results__empty")).toBeNull();
+    expect(container.querySelector("openclaw-panel-empty-state")).toBeNull();
     warning?.querySelector<HTMLButtonElement>("button")?.click();
     expect(onRetry).toHaveBeenCalledOnce();
   });
@@ -304,7 +304,7 @@ describe("renderPluginCatalogResults", () => {
     },
   );
 
-  it("shows the generic placeholder when a package icon cannot decode, then accepts a new icon", async () => {
+  it("shows initials when a package icon cannot decode, then accepts a new icon", async () => {
     const entry = plugin("slack", {
       catalog: {
         name: "Slack",
@@ -323,7 +323,11 @@ describe("renderPluginCatalogResults", () => {
     await vi.waitFor(() =>
       expect(container.querySelector(".plugin-catalog-card__art img")).toBeNull(),
     );
-    expect(container.querySelector(".plugin-catalog-card__art svg")).not.toBeNull();
+    expect(
+      container
+        .querySelector(".plugin-catalog-card__art .plugins-tile--fallback")
+        ?.textContent?.trim(),
+    ).toBe("SL");
     render(renderPluginCatalogResults(props), container);
     expect(container.querySelector(".plugin-catalog-card__art img")).toBeNull();
     render(

@@ -10,12 +10,10 @@ type PluginLifecycleProps = {
   inspection: PluginsInspectResult | null;
   mutationBlockedReason: string | null;
   canMutate: boolean;
-  reloadBlockedReason: string | null;
   busy: Readonly<Record<string, boolean>>;
   onSetEnabled: (pluginId: string, enabled: boolean, rowKey: string) => void;
   onSettings: () => void;
   settingsHref: string;
-  onReload: (pluginId: string, rowKey: string) => void;
   onUninstall: (pluginId: string, rowKey: string) => void;
 };
 
@@ -25,7 +23,6 @@ export function renderPluginLifecycle(
 ): TemplateResult {
   const key = pluginRowKey(plugin.id);
   const busy = Boolean(props.busy[key]);
-  const canReload = props.reloadBlockedReason === null;
   const action = (
     label: string,
     className: string,
@@ -40,8 +37,7 @@ export function renderPluginLifecycle(
         class=${`btn oc-action ${className}`}
         ?disabled=${!blockedReason && (!allowed || busy)}
         aria-disabled=${!allowed || busy ? "true" : nothing}
-        aria-label=${className.includes("plugins-reload") ? t("pluginsPage.reloadNamed", { name: plugin.name }) : `${label} ${plugin.name}`}
-        title=${className.includes("plugins-reload") ? t("pluginsPage.reloadHint") : nothing}
+        aria-label=${`${label} ${plugin.name}`}
         @click=${() => {
           if (allowed && !busy) {
             onClick();
@@ -52,19 +48,19 @@ export function renderPluginLifecycle(
       </button>`,
     );
   return html`
+    ${action(t(plugin.enabled ? "pluginsPage.detailDisable" : "pluginsPage.detailEnable"), "oc-action-secondary", props.mutationBlockedReason ?? (plugin.state === "needs-setup" ? t("pluginsPage.setupRequiredNotice") : null), props.canMutate && plugin.state !== "needs-setup", () => props.onSetEnabled(plugin.id, !plugin.enabled, key))}
+    ${plugin.removable ? action(t("pluginsPage.uninstall"), "oc-action-secondary", props.mutationBlockedReason, props.canMutate, () => props.onUninstall(plugin.id, key)) : nothing}
     <a
-      class="btn primary oc-action oc-action-primary"
+      class="btn btn--icon oc-action oc-action-icon oc-action-secondary"
       href=${props.settingsHref}
+      aria-label=${t("pluginsPage.detailSettings")}
       @click=${(event: MouseEvent) => {
         if (shouldHandleNavigationClick(event)) {
           event.preventDefault();
           props.onSettings();
         }
       }}
-      >${icons.settings} ${t("pluginsPage.detailSettings")}</a
+      >${icons.settings}</a
     >
-    ${action(t(plugin.enabled ? "pluginsPage.detailDisable" : "pluginsPage.detailEnable"), "oc-action-secondary", props.mutationBlockedReason ?? (plugin.state === "needs-setup" ? t("pluginsPage.setupRequiredNotice") : null), props.canMutate && plugin.state !== "needs-setup", () => props.onSetEnabled(plugin.id, !plugin.enabled, key))}
-    ${action(t("pluginsPage.detailReload"), "plugins-reload oc-action-secondary", props.reloadBlockedReason, canReload, () => props.onReload(plugin.id, key))}
-    ${plugin.removable ? action(t("pluginsPage.uninstall"), "oc-action-secondary", props.mutationBlockedReason, props.canMutate, () => props.onUninstall(plugin.id, key)) : nothing}
   `;
 }

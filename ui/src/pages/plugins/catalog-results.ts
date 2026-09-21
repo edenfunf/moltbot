@@ -3,7 +3,7 @@ import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import { strokeIcon } from "../../components/icons-tools.ts";
 import { icons } from "../../components/icons.ts";
-import { imageWithFallback } from "../../components/image-with-fallback.ts";
+import { renderPanelEmptyState } from "../../components/panel-empty-state.ts";
 import { t } from "../../i18n/index.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { shouldHandleNavigationClick } from "../../lib/navigation-click.ts";
@@ -11,12 +11,15 @@ import type {
   PluginDiscoveryCategory,
   PluginDiscoveryEntry,
   PluginDiscoveryResult,
+  PluginInstallRequest,
 } from "../../lib/plugins/index.ts";
+import { renderArtTile } from "./consent-dialog.ts";
 import {
   renderPluginCardIdentity,
   renderPluginCardSummary,
   renderPluginStateStatus,
 } from "./plugin-card.ts";
+import { renderPluginRowMessage, type PluginRowMessage } from "./plugin-row-message.ts";
 import { resolvePluginCatalogIconUrl } from "./presentation.ts";
 
 export type PluginDiscoveryIntent = "all" | "bundled" | "trending" | "official" | "featured";
@@ -40,6 +43,9 @@ export type PluginCatalogResultsProps = {
   iconUrls: Readonly<Record<string, string>>;
   pluginIconUrls: Readonly<Record<string, string>>;
   canInstall: boolean;
+  busy?: Readonly<Record<string, boolean>>;
+  messages?: Readonly<Record<string, PluginRowMessage>>;
+  onContinueInstall?: (id: string, request: PluginInstallRequest) => void;
   entryHref: (id: string) => string;
   onIntentChange: (intent: PluginDiscoveryIntent) => void;
   onCategoryChange: (category: string | null) => void;
@@ -128,18 +134,11 @@ function renderCatalogIcon(
     },
     props,
   );
-  return html`${imageWithFallback(iconUrl, (url, onError) =>
-    url
-      ? html`<img
-          class="plugins-icon"
-          src=${url}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          @error=${onError}
-        />`
-      : categoryIcon(plugin.catalog.icon),
-  )}`;
+  return renderArtTile(
+    plugin.local.pluginId ?? plugin.id,
+    plugin.catalog.name,
+    iconUrl ?? undefined,
+  );
 }
 
 export function formatCompactCount(value: number): string {
@@ -160,7 +159,12 @@ function renderCatalogCard(
 ): TemplateResult {
   const installedState = plugin.local.state === "not-installed" ? null : plugin.local.state;
   const installed = plugin.local.installed && installedState !== null;
-  const canInstall = props.canInstall && plugin.local.action === "install";
+  const busy = Boolean(props.busy?.[`install:${plugin.id}`]);
+  const canInstall =
+    props.canInstall &&
+    plugin.local.action === "install" &&
+    !busy &&
+    !props.messages?.[`install:${plugin.id}`]?.savedInstall;
   return html`<article
     class="plugin-catalog-card oc-card oc-card-interactive"
     data-plugin-id=${plugin.id}
@@ -203,6 +207,7 @@ function renderCatalogCard(
                 type="button"
                 class="btn btn--sm plugin-catalog-card__install oc-action oc-action-secondary"
                 aria-label=${t("pluginsPage.installNamed", { name: plugin.catalog.name })}
+                aria-busy=${busy ? "true" : nothing}
                 ?disabled=${!canInstall}
                 @click=${(event: MouseEvent) => {
                   event.preventDefault();
@@ -212,12 +217,18 @@ function renderCatalogCard(
                   }
                 }}
               >
-                ${t("pluginsPage.install")}
+                ${
+                  busy
+                    ? html`<span class="btn__spinner" aria-hidden="true"></span>
+                        <span class="sr-only" role="status">${t("pluginsPage.installing")}</span>`
+                    : t("pluginsPage.install")
+                }
               </button>`
         }
       </div>
     </div>
     ${renderPluginCardSummary(plugin.catalog.summary || t("pluginsPage.optionalCapability"))}
+    ${renderPluginRowMessage(props.messages?.[`install:${plugin.id}`], { busy, onContinue: props.canInstall && props.onContinueInstall ? (request) => props.onContinueInstall?.(plugin.id, request) : undefined })}
   </article>`;
 }
 
@@ -374,9 +385,11 @@ function renderRawResults(props: PluginCatalogResultsProps): TemplateResult {
     return html`<p class="plugin-catalog-results__empty">${t("pluginsPage.discoveryOffline")}</p>`;
   }
   if (items.length === 0) {
-    return html`<p class="plugin-catalog-results__empty">
-      ${t("pluginsPage.noDiscoveryResults")}
-    </p>`;
+    return renderPanelEmptyState({
+      icon: icons.search,
+      heading: t("pluginsPage.noDiscoveryResults"),
+      description: t("pluginsPage.noDiscoveryResultsHint"),
+    });
   }
   const official = items.filter((plugin) => plugin.catalog.official);
   const community = items.filter((plugin) => !plugin.catalog.official);
@@ -439,9 +452,11 @@ function renderGroupedCatalog(props: PluginCatalogResultsProps): TemplateResult 
     !props.error &&
     !props.remoteError
   ) {
-    return html`<p class="plugin-catalog-results__empty">
-      ${t("pluginsPage.noDiscoveryResults")}
-    </p>`;
+    return renderPanelEmptyState({
+      icon: icons.search,
+      heading: t("pluginsPage.noDiscoveryResults"),
+      description: t("pluginsPage.noDiscoveryResultsHint"),
+    });
   }
   return html`
     ${props.error ? renderError(props.error, props.onRetry) : nothing}

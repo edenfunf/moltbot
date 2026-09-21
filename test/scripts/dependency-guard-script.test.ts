@@ -303,14 +303,24 @@ describe("dependency guard script", () => {
   });
 
   it.each([
-    { lateApproval: false, writeError: false },
-    { lateApproval: true, writeError: false },
-    { lateApproval: false, writeError: true },
+    { lateApproval: false, writeError: false, headChanged: false },
+    { lateApproval: true, writeError: false, headChanged: false },
+    { lateApproval: false, writeError: true, headChanged: false },
+    { lateApproval: false, writeError: false, headChanged: true },
   ])(
-    "preserves autoscrub with late approval=$lateApproval and write error=$writeError",
-    ({ lateApproval, writeError }) => {
+    "preserves autoscrub with late approval=$lateApproval, write error=$writeError, head changed=$headChanged",
+    ({ lateApproval, writeError, headChanged }) => {
       const result = runDependencyGuard(
         {
+          [`GET ${pullPath}`]: {
+            responses: [
+              pullRequest,
+              pullRequest,
+              headChanged
+                ? { ...pullRequest, head: { ...pullRequest.head, sha: staleSha } }
+                : pullRequest,
+            ],
+          },
           [`GET ${pullPath}/files`]: [{ filename: "pnpm-lock.yaml" }],
           [`GET ${issuePath}/comments`]: {
             responses: [
@@ -339,8 +349,13 @@ describe("dependency guard script", () => {
         );
       }
       const writes = result.calls.filter((call) => call.path === "/graphql");
-      expect(writes).toHaveLength(lateApproval ? 0 : 1);
-      if (!lateApproval) {
+      expect(writes).toHaveLength(lateApproval || headChanged ? 0 : 1);
+      if (headChanged) {
+        expect(result.stdout).toContain("Superseded");
+        expect(result.calls.some((call) => call.body?.body)).toBe(false);
+        expect(result.stderr).not.toContain("Autoscrub failed");
+      }
+      if (!lateApproval && !headChanged) {
         expect(writes[0]?.body?.variables?.input).toMatchObject({
           expectedHeadOid: headSha,
           fileChanges: {

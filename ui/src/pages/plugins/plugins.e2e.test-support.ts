@@ -446,12 +446,6 @@ const localCalendarDisabled = {
   removable: false,
 } satisfies PluginCatalogItem;
 
-const localCalendarEnabled = {
-  ...localCalendarDisabled,
-  enabled: true,
-  state: "enabled",
-} satisfies PluginCatalogItem;
-
 let browser: Browser;
 let server: ControlUiE2eServer;
 
@@ -671,7 +665,6 @@ export {
   installMockGateway,
   inventory,
   localCalendarDisabled,
-  localCalendarEnabled,
   localOnlyDiscoveryPlugin,
   matrixConfigSchema,
   matrixDiscoveryPlugin,

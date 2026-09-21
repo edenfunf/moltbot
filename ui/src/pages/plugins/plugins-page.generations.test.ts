@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import { i18n } from "../../i18n/index.ts";
+import type { PluginDiscoveryDetailResult } from "../../lib/plugins/index.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
   createClient,
@@ -173,8 +174,8 @@ it.each(["pending", "failed"] as const)(
           },
         });
       }
-      if (method === "plugins.reload") {
-        throw new Error("Synthetic reload refused");
+      if (method === "plugins.setEnabled") {
+        throw new Error("Synthetic enable refused");
       }
       throw new Error(`Unexpected request: ${method}`);
     });
@@ -185,7 +186,7 @@ it.each(["pending", "failed"] as const)(
         ok: true,
         generation: 1,
         descriptors: [],
-        methods: ["plugins.reload"],
+        methods: ["plugins.setEnabled"],
         controlUiTabs: [],
         controlUiWidgetKinds: [],
         pluginSurfaceUrls: {},
@@ -215,14 +216,14 @@ it.each(["pending", "failed"] as const)(
         await waitForFast(() => expect(page.loading).toBe(false));
         await page.updateComplete;
       }
-      const reload = page.querySelector<HTMLButtonElement>(".plugins-reload");
-      expect(reload).not.toBeNull();
-      reload!.click();
+      const enable = page.querySelector<HTMLButtonElement>('[aria-label="Enable Beta"]');
+      expect(enable).not.toBeNull();
+      enable!.click();
       await waitForFast(() =>
-        expect(request.mock.calls.some(([method]) => method === "plugins.reload")).toBe(true),
+        expect(request.mock.calls.some(([method]) => method === "plugins.setEnabled")).toBe(true),
       );
-      expect(request.mock.calls.filter(([method]) => method === "plugins.reload")).toEqual([
-        ["plugins.reload", { plugins: [{ pluginId: beta.id }] }],
+      expect(request.mock.calls.filter(([method]) => method === "plugins.setEnabled")).toEqual([
+        ["plugins.setEnabled", { pluginId: beta.id, enabled: true }],
       ]);
       expect(page.detail?.pluginId).toBe(beta.id);
       expect(page.querySelector(".plugin-catalog-detail")?.textContent).toContain(beta.name);
@@ -234,6 +235,94 @@ it.each(["pending", "failed"] as const)(
         expect(Object.keys(page.busy)).toEqual([]);
       });
       await page.updateComplete;
+    }
+  },
+);
+
+it("keeps known catalog content when installation switches to local inspection", async () => {
+  const plugin = { ...createPlugin({ version: "1.2.3" }), catalogId: "ch_d29ya2JvYXJk" };
+  const catalog = createDiscoveryDetail({ ...plugin, installed: false });
+  catalog.plugin.id = plugin.catalogId;
+  delete catalog.plugin.local.pluginId;
+  catalog.detail.readme = "# Known catalog guide";
+  const inspection = deferred<ReturnType<typeof createInspectResult>>();
+  const enrichment = deferred<PluginDiscoveryDetailResult>();
+  let catalogReads = 0;
+  const { client, request } = createClient(async (method) => {
+    if (method === "plugins.catalog.get") {
+      return ++catalogReads === 1 ? catalog : enrichment.promise;
+    }
+    if (method === "plugins.inspect") {
+      return inspection.promise;
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  const harness = createGateway(client);
+  const { page } = await mountPage(
+    createContext(harness.gateway),
+    createPluginsRouteData(
+      harness.gateway,
+      createResult([]),
+      createPluginsRouteLocation(`/plugins/${plugin.catalogId}`),
+    ),
+  );
+  await vi.waitFor(() => expect(page.textContent).toContain("Known catalog guide"));
+  page.applyMutationResult({ ok: true, plugin, restartRequired: false });
+  await vi.waitFor(() =>
+    expect(request).toHaveBeenCalledWith("plugins.inspect", { pluginId: plugin.id }),
+  );
+  await page.updateComplete;
+  expect(page.querySelector('[aria-label="Enable Workboard"]')).not.toBeNull();
+  expect(page.textContent).toContain("Known catalog guide");
+  inspection.resolve(createInspectResult());
+  await vi.waitFor(() => expect(catalogReads).toBe(2));
+  expect(page.textContent).toContain("Known catalog guide");
+  enrichment.resolve({
+    ...catalog,
+    detail: { ...catalog.detail, readme: "# Updated catalog guide" },
+  });
+  await vi.waitFor(() => expect(page.textContent).toContain("Updated catalog guide"));
+  expect(page.textContent).not.toContain("Known catalog guide");
+});
+
+it.each([false, true])(
+  "retains same-plugin inspection while refresh settles (failed: %s)",
+  async (failed) => {
+    const plugin = createPlugin();
+    const fresh = deferred<ReturnType<typeof createInspectResult>>();
+    const initial = createInspectResult();
+    initial.components.skills = ["Known skill"];
+    let inspections = 0;
+    const { client } = createClient(async (method) => {
+      if (method === "plugins.inspect") {
+        return ++inspections === 1 ? initial : fresh.promise;
+      }
+      if (method === "plugins.list") {
+        return createResult(plugin);
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const harness = createGateway(client);
+    const { page } = await mountPage(
+      createContext(harness.gateway),
+      createPluginsRouteData(
+        harness.gateway,
+        createResult(plugin),
+        createPluginsRouteLocation("/settings/plugins/workboard"),
+      ),
+    );
+    await vi.waitFor(() => expect(page.textContent).toContain("Known skill"));
+    await page.refreshCatalog();
+    await vi.waitFor(() => expect(inspections).toBe(2));
+    await page.updateComplete;
+    expect(page.textContent).toContain("Known skill");
+    if (failed) {
+      fresh.reject(new Error("Inspection unavailable"));
+      await vi.waitFor(() => expect(page.textContent).toContain("Inspection unavailable"));
+      expect(page.textContent).toContain("Known skill");
+    } else {
+      fresh.resolve(createInspectResult());
+      await vi.waitFor(() => expect(page.textContent).not.toContain("Known skill"));
     }
   },
 );
