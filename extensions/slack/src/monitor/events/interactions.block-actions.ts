@@ -4,12 +4,7 @@ import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway
 import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
-import {
-  APPROVAL_AUTHORITY_REQUIRED_TEXT,
-  isApprovalAuthorityError,
-  isApprovalKindMismatchError,
-  isApprovalNotFoundError,
-} from "openclaw/plugin-sdk/error-runtime";
+import { isApprovalKindMismatchError } from "openclaw/plugin-sdk/error-runtime";
 import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
 import {
   parseStrictFiniteNumber,
@@ -60,6 +55,7 @@ import {
 import { resolveSlackDeferredActionTarget } from "../deferred-action-routing.js";
 import { resolveSlackListenerEventScope, type SlackEventScope } from "../event-scope.js";
 import { escapeSlackMrkdwn } from "../mrkdwn.js";
+import { describeSlackApprovalResolveFailure } from "./approval-resolve-failure.js";
 
 type InteractionMessageBlock = {
   type?: string;
@@ -727,21 +723,13 @@ async function handleSlackApprovalInteraction(params: {
     params.ctx.runtime.log?.(
       `slack:interaction approval resolve failed id=${params.approval.approvalId}: ${String(error)}`,
     );
-    // The clicker must see an outcome: pruned/expired records and gateway
-    // outages otherwise ack the click silently (Discord's sibling responds).
-    if (isApprovalAuthorityError(error)) {
-      await respondEphemeral(params.respond, APPROVAL_AUTHORITY_REQUIRED_TEXT);
-      return true;
+    // Pruned/expired records and Gateway outages otherwise ack the click silently.
+    const failure = describeSlackApprovalResolveFailure(error);
+    await respondEphemeral(params.respond, failure.text);
+    if (failure.unexpected) {
+      throw error;
     }
-    if (isApprovalNotFoundError(error)) {
-      await respondEphemeral(params.respond, "This approval is no longer pending.");
-      return true;
-    }
-    await respondEphemeral(
-      params.respond,
-      "Could not reach the Gateway to resolve this approval. Try again.",
-    );
-    throw error;
+    return true;
   }
   return true;
 }
