@@ -89,8 +89,8 @@ export function createNativeApprovalControlRegistry<
           return { kind: "not-found", binding };
         }
         if (isApprovalAuthorityError(error)) {
-          // The approval is still waiting, so the control outlives the refusal: whoever the
-          // account does list can use the same control.
+          // A refusal answers who may decide, not whether the approval is still open, so it
+          // gives no reason to retire the control; the claim is released for the next tap.
           resolving.delete(token);
           return { kind: "not-authorized", binding };
         }

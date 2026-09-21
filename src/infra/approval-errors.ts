@@ -18,6 +18,13 @@ function gatewayCodeOf(err: Error): string | null {
   return readErrorCode(Reflect.get(err, "gatewayCode"));
 }
 
+function readApprovalErrorDetailsCode(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return readErrorCode(Reflect.get(value, "code"));
+}
+
 function readApprovalErrorDetailsReason(value: unknown): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -37,16 +44,14 @@ export function isApprovalKindMismatchError(err: unknown): boolean {
 
 /**
  * Detects a decision the channel would not let this reviewer make. Distinct from not-found:
- * the approval is still waiting, so the control that carried it stays usable and the operator
- * can be told what would make the decision land.
+ * it answers who may decide, not whether the approval exists or is still open, so a control
+ * that carried it has no reason to be retired.
  */
 export function isApprovalAuthorityError(err: unknown): boolean {
   if (!(err instanceof Error) || gatewayCodeOf(err) !== FORBIDDEN) {
     return false;
   }
-  return (
-    readApprovalErrorDetailsReason(Reflect.get(err, "details")) === APPROVAL_AUTHORITY_REQUIRED
-  );
+  return readApprovalErrorDetailsCode(Reflect.get(err, "details")) === APPROVAL_AUTHORITY_REQUIRED;
 }
 
 /** What an operator can do about a decision their channel would not let them make. */

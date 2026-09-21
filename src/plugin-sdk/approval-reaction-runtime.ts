@@ -128,8 +128,8 @@ export async function settleApprovalReaction(params: {
 }): Promise<"denied" | "resolved" | "not-found"> {
   const { request, logVerboseMessage } = params;
   const { channel, approvalId, senderId } = request;
-  // Every refusal keeps the reaction binding: the approval is still waiting, so the control
-  // stays usable for whoever the account does list.
+  // A refusal answers who may decide, not whether the approval is still open, so none of
+  // these retire the reaction binding.
   const deny = (why: string): "denied" => {
     logVerboseMessage?.(
       `${channel}: approval reaction denied id=${approvalId} sender=${senderId}; ${why}`,
@@ -155,7 +155,7 @@ export async function settleApprovalReaction(params: {
       return "not-found";
     }
     if (isApprovalAuthorityError(error)) {
-      // The approver list changed while this reaction was in flight; replaying refuses again.
+      // The Gateway's live configuration refuses this reviewer; replaying refuses again.
       return deny("the account no longer lists this approver");
     }
     params.onError?.(error);

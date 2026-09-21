@@ -61,7 +61,7 @@ describe("isApprovalAuthorityError", () => {
   const failure = (gatewayCode: string, reason?: string) =>
     Object.assign(new Error("refused"), {
       gatewayCode,
-      ...(reason ? { details: { reason } } : {}),
+      ...(reason ? { details: { code: reason } } : {}),
     });
 
   it.each([
@@ -78,7 +78,7 @@ describe("isApprovalAuthorityError", () => {
 // wrong kind with a refusal, so a refusal has to keep the search going just as not-found does.
 describe("isApprovalKindMismatchError", () => {
   it.each([
-    [{ gatewayCode: "FORBIDDEN", details: { reason: "APPROVAL_AUTHORITY_REQUIRED" } }, true],
+    [{ gatewayCode: "FORBIDDEN", details: { code: "APPROVAL_AUTHORITY_REQUIRED" } }, true],
     [{ gatewayCode: "INVALID_REQUEST", details: { reason: "APPROVAL_NOT_FOUND" } }, true],
     [{ gatewayCode: "UNAVAILABLE" }, false],
   ])("%j continues the search: %s", (fields, expected) => {

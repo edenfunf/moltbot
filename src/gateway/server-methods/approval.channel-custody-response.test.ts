@@ -108,6 +108,6 @@ describe("approval.resolve channel custody responses", () => {
 
     const error = respond.mock.calls[0]?.[2];
     expect(error?.code).toBe(code);
-    expect(error?.details?.reason).toBe(reason);
+    expect(error?.details?.code ?? error?.details?.reason).toBe(reason);
   });
 });

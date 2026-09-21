@@ -63,8 +63,8 @@ describe("native approval controls", () => {
       result: "second",
     });
   });
-  // A refusal is not a missing approval: the request is still waiting for someone the account
-  // lists, so the control has to survive or that approver has nothing left to press.
+  // A refusal is not a missing approval: it answers who may decide, so the control survives
+  // it, while a missing approval retires the control.
   it.each([
     ["FORBIDDEN", "APPROVAL_AUTHORITY_REQUIRED", "not-authorized", true],
     ["INVALID_REQUEST", "APPROVAL_NOT_FOUND", "not-found", false],
@@ -77,7 +77,10 @@ describe("native approval controls", () => {
       });
       const binding = { token: "tok", expiresAtMs: Date.now() + 60_000, approvalId: "a1" };
       registry.register(binding);
-      const failure = Object.assign(new Error("refused"), { gatewayCode, details: { reason } });
+      const failure = Object.assign(new Error("refused"), {
+        gatewayCode,
+        details: gatewayCode === "FORBIDDEN" ? { code: reason } : { reason },
+      });
       await expect(
         registry.settle(binding.token, async () => {
           throw failure;

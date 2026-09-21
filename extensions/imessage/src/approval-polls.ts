@@ -583,8 +583,8 @@ export async function maybeResolveIMessageApprovalPollVote(params: {
       return true;
     }
     if (isApprovalAuthorityError(error)) {
-      // A refusal is terminal but the approval is still waiting: keep the binding so a vote
-      // from someone the account lists can still land, and do not retry this one.
+      // A refusal answers who may decide, not whether the approval is still open: do not
+      // retry this vote, and keep the binding so a vote from a listed approver can land.
       info("approval poll vote denied: the account does not list this approver", {
         approvalId: target.approvalId,
         senderId: event.actorHandle,

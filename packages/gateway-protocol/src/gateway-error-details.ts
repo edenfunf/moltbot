@@ -19,8 +19,6 @@ export const ErrorCodes = {
   FORBIDDEN: "FORBIDDEN",
   /** Approval resolution referenced a missing or expired approval request. */
   APPROVAL_NOT_FOUND: "APPROVAL_NOT_FOUND",
-  /** The reviewer's own channel does not let them decide this approval. */
-  APPROVAL_AUTHORITY_REQUIRED: "APPROVAL_AUTHORITY_REQUIRED",
   /** Gateway service or required backend is temporarily unavailable. */
   UNAVAILABLE: "UNAVAILABLE",
 } as const;
@@ -44,6 +42,8 @@ export const GatewayErrorDetailCodes = {
   GITHUB_PUBLICATION_SELECTION_REJECTED: "GITHUB_PUBLICATION_SELECTION_REJECTED",
   SESSION_WORKSPACE_RECOVERY_REQUIRED: "SESSION_WORKSPACE_RECOVERY_REQUIRED",
   TASK_WORKTREE_SOURCE_REQUIRED: "TASK_WORKTREE_SOURCE_REQUIRED",
+  /** A FORBIDDEN resolve whose reviewer the channel does not let decide this approval. */
+  APPROVAL_AUTHORITY_REQUIRED: "APPROVAL_AUTHORITY_REQUIRED",
 } as const;
 
 /** Missing cron automation identified by its exact store key. */

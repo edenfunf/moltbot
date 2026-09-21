@@ -167,8 +167,8 @@ async function maybeResolveMatrixApprovalReaction(params: {
       return true;
     }
     if (isApprovalAuthorityError(err)) {
-      // Refused, not transient: replaying would refuse again, and the approval is still
-      // waiting, so the reaction binding stays for whoever the account does list.
+      // Refused, not transient: replaying would refuse again. A refusal answers who may
+      // decide, not whether the approval is still open, so the anchors stay.
       params.logVerboseMessage(
         `matrix: approval reaction denied id=${params.target.approvalId} sender=${params.senderId}; the account does not list this approver`,
       );

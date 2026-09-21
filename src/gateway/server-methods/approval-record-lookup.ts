@@ -1,6 +1,10 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
+import {
+  ErrorCodes,
+  errorShape,
+  GatewayErrorDetailCodes,
+} from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { ChannelApprovalKind } from "../../infra/approval-types.js";
 import type {
@@ -249,7 +253,7 @@ export function respondApprovalAuthorityRequired(respond: RespondFn): void {
       // FORBIDDEN alone also carries missing-scope failures, which would send an operator
       // looking at an approver list for a problem that is not one.
       details: {
-        reason: ErrorCodes.APPROVAL_AUTHORITY_REQUIRED,
+        code: GatewayErrorDetailCodes.APPROVAL_AUTHORITY_REQUIRED,
         remediation: "List this reviewer as an approver for the channel account.",
       },
     }),
