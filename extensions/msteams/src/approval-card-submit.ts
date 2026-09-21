@@ -104,7 +104,9 @@ export async function maybeHandleMSTeamsApprovalCardSubmit(params: {
         ? "card token already consumed"
         : outcome.kind === "in-flight"
           ? "card token resolve already in flight"
-          : `approval expired or no longer exists id=${outcome.binding.approvalId}`,
+          : outcome.kind === "not-authorized"
+            ? `approval refused: the account does not list this approver id=${outcome.binding.approvalId}`
+            : `approval expired or no longer exists id=${outcome.binding.approvalId}`,
     );
     return true;
   }

@@ -50,8 +50,10 @@ export function isApprovalAuthorityError(err: unknown): boolean {
 }
 
 /** What an operator can do about a decision their channel would not let them make. */
+// The Gateway refuses before it reads the approval's status, so this says nothing about whether
+// the request is still waiting — only who can decide it.
 export const APPROVAL_AUTHORITY_REQUIRED_TEXT =
-  "That decision needs an approver listed for this channel. The request is still waiting, so a listed approver can still decide it.";
+  "That decision needs an approver listed for this channel. Ask a listed approver to decide it.";
 
 /**
  * Detects approval-not-found failures across gateway error shapes.
