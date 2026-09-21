@@ -86,6 +86,7 @@ function createFixture(diagnostics?: FixtureDiagnostics) {
   const cli = join(bin, "crabbox"),
     plan = join(root, "inventory.json"),
     calls = join(root, "native-calls.jsonl"),
+    nodePolicy = join(root, "node-policy.jsonl"),
     state = join(root, "state");
   for (const path of [source, staging, bin, home, join(state, "crabbox", "claims")]) {
     mkdirSync(path, { recursive: true });
@@ -135,11 +136,13 @@ function createFixture(diagnostics?: FixtureDiagnostics) {
   ) => writeFileSync(plan, JSON.stringify({ claims, gate }));
   inventory();
   writeFileSync(calls, "");
+  writeFileSync(nodePolicy, "");
   writeFileSync(
     cli,
-    `#!${nodeExecutable}
+    `#!/usr/bin/env -S ${JSON.stringify(nodeExecutable)} ${nodeArgs.join(" ")}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(nodePolicy)}, JSON.stringify({entry:'claims-cli', nodeArgs:process.execArgv.filter(flag=>${JSON.stringify(nodeArgs)}.includes(flag))}) + '\\n');
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
 if (JSON.stringify(args) !== JSON.stringify(['claims','list','--json'])) process.exit(91);
 const plan = JSON.parse(fs.readFileSync(${JSON.stringify(plan)}, 'utf8'));
@@ -253,11 +256,11 @@ ${body}`,
     options: { paths?: string[]; before?: string; prelude?: string; localGitSeed?: boolean } = {},
   ) => {
     const names = options.paths ?? ["source.txt"];
-    const selection = `const fs=require('node:fs');const paths=${JSON.stringify(names)}.filter(path=>fs.lstatSync(path,{throwIfNoEntry:false}));process.stdout.write(JSON.stringify({candidate:{files:paths.length},topFiles:paths.map(path=>({path})),localGitSeed:${options.localGitSeed ? "{source:'local'}" : "undefined"}}));`;
+    const selection = `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(nodePolicy)},JSON.stringify({entry:'source-selection',nodeArgs:process.execArgv.filter(flag=>${JSON.stringify(nodeArgs)}.includes(flag))})+'\\n');const paths=${JSON.stringify(names)}.filter(path=>fs.lstatSync(path,{throwIfNoEntry:false}));process.stdout.write(JSON.stringify({candidate:{files:paths.length},topFiles:paths.map(path=>({path})),localGitSeed:${options.localGitSeed ? "{source:'local'}" : "undefined"}}));`;
     const result = await program(
       `
 ${options.before ?? ""}
-const cap = prepareCrabboxSourceCapsule({repoRoot:ctx.repository,syncRoot:ctx.staging,base:'HEAD',syncPlan:{command:process.execPath,args:['-e',${JSON.stringify(selection)}]}});
+const cap = prepareCrabboxSourceCapsule({repoRoot:ctx.repository,syncRoot:ctx.staging,base:'HEAD',syncPlan:{command:process.execPath,args:${JSON.stringify([...nodeArgs, "-e", selection])}}});
 let artifacts;
 ${after}
 const receipt = JSON.parse(fs.readFileSync(join(cap.staging.root,'staging.json'),'utf8'));
@@ -311,6 +314,11 @@ process.kill(process.pid,'SIGKILL');`,
     env,
     cli,
     calls,
+    nodePolicies: () =>
+      readFileSync(nodePolicy, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { entry: string; nodeArgs: string[] }),
     command,
     program,
     prepare,
@@ -380,6 +388,13 @@ describe.skipIf(process.platform === "win32")(
           const recovered = await f.recover(stage);
           expect(recovered.status, recovered.stderr + recovered.stdout).toBe(0);
           expect(recovered.report).toMatchObject({ id: stage.receipt.id, recovered: true });
+          const policies = f.nodePolicies();
+          expect(new Set(policies.map(({ entry }) => entry))).toEqual(
+            new Set(["source-selection", "claims-cli"]),
+          );
+          for (const policy of policies) {
+            expect(policy.nodeArgs, policy.entry).toEqual(resolveVitestNodeArgs());
+          }
           expect(readdirSync(f.staging)).toEqual([]);
           expect(readFileSync(join(f.source, "source.txt"), "utf8")).toBe("retained source\n");
           expect(f.git("rev-parse", "HEAD")).toBe(before);

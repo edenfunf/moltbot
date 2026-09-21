@@ -6,7 +6,10 @@ import path from "node:path";
 import { assert, beforeAll, describe, expect, it, vi } from "vitest";
 import { listExtensionTestFilesForRoots } from "../../scripts/lib/extension-test-plan.mts";
 import { readTestSelectorSourceFacts } from "../../scripts/lib/test-selector-source-facts.mts";
-import { resolveVitestPretestBuildMode } from "../../scripts/lib/vitest-build-prerequisites.mts";
+import {
+  resolveVitestPretestBuildMode,
+  resolveVitestRuntimeConfigScopes,
+} from "../../scripts/lib/vitest-build-prerequisites.mts";
 import { resolveDefaultVitestNoOutputTimeoutMs } from "../../scripts/lib/vitest-process-env.mts";
 import { resolveVitestRuntimeCliSelections } from "../../scripts/lib/vitest-runtime-selection.mts";
 import { resolveShardTimingKey } from "../../scripts/lib/vitest-shard-metadata.mts";
@@ -327,28 +330,16 @@ describe("test runtime prerequisites", () => {
     ],
     ["agents-core", ["simple-completion-runtime.plugin-scope.test.ts"], "runtime"],
     ["agents", ["simple-completion-runtime.plugin-scope.test.ts"], "runtime"],
-    [
-      "agents-core",
-      [
-        "agent-command-local.test.ts",
-        "simple-completion-runtime.plugin-scope.test.ts",
-        "prepared-model-catalog-worker.custody.integration.test.ts",
-        "prepared-model-catalog-worker.integration.test.ts",
-        "runtime-plugins.context-engine.integration.test.ts",
-      ],
-      undefined,
-    ],
-    [
-      "agents",
-      [
-        "agent-command-local.test.ts",
-        "simple-completion-runtime.plugin-scope.test.ts",
-        "prepared-model-catalog-worker.custody.integration.test.ts",
-        "prepared-model-catalog-worker.integration.test.ts",
-        "runtime-plugins.context-engine.integration.test.ts",
-      ],
-      undefined,
-    ],
+    ...(["agents-core", "agents"] as const).map(
+      (project) =>
+        [
+          project,
+          resolveVitestRuntimeConfigScopes(`test/vitest/vitest.${project}.config.ts`).map(
+            ({ file, dir }) => path.posix.relative(dir, file),
+          ),
+          undefined,
+        ] as const,
+    ),
     ["gateway-core", ["gateway-*.test.ts"], undefined],
     ["gateway-server", ["server-sidecar-retention.test.ts"], "runtime"],
     ["gateway-server", ["server.config-patch.test.ts"], "runtime"],

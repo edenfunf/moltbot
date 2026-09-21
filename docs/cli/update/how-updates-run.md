@@ -142,6 +142,12 @@ The updater retains them in the run report shown by `openclaw update status`,
 including when an intentional open channel policy requires no configuration change.
 Error findings and failed check execution still refuse the update.
 
+These checks do not run an agent turn or require a usable model-auth route.
+OAuth-only installations and installations without provider credentials can update.
+Auth diagnostics are advisory; optional inference repair runs through triage only
+after a failed update has settled. It uses the normal runtime credential resolver,
+including shared profiles and OAuth refresh.
+
 The new version answers the updater's native service capability probe before
 loading configuration or initializing debug capture. Probing capability does not
 open or migrate shared state, so the old Gateway can keep serving while its
@@ -228,8 +234,12 @@ TMPDIR=/var/tmp openclaw update --yes
 
 Subsequent updates use the new updater's measured destination selection.
 
-Schema checks also use private SQLite copies so inspection does not create or
-modify WAL sidecars beside live databases. Inspection budgets include database
+Live snapshots use SQLite read transactions and private backups while writers
+continue. Artifact-preserving planning and Doctor checks retain byte-neutral
+copies that leave source SHM unchanged. WAL copies capture a bounded prefix
+within one verified WAL generation, so appended commits do not require a quiet database.
+Incomplete WAL families and crash journals are recovered privately without
+creating missing source sidecars. Inspection budgets include database
 and journal sizes, cold startup, and repeated IO passes for every discovered
 store. Metadata checks remain cancellable. Copy progress renews the watchdog,
 and larger caller allowances are preserved. Workers stop before their private
@@ -239,6 +249,18 @@ Inspection failures report the database or known scope, inspection phase, elapse
 time, and the next action. Check access to the named path, concurrent writers,
 and storage performance before retrying. Older candidate workers that cannot
 report their current database identify the known scope instead.
+
+If the initial config inspection encounters SQLite lock contention or a changing
+snapshot source, the updater repeats that read once. A successful read records a
+warning and lets target selection continue. Corruption and other inspection errors
+remain failures. A pre-staging failure retains its original diagnostic and next
+action in update history once fresh database admission succeeds; unresolved
+recovery ownership still prevents terminal publication.
+
+This inspection behavior belongs to the invoking updater. A published 2026.9.4
+updater can still fail before staging the candidate. In that case, use the
+installation's [manual update method](/install/updating/update-methods), then run
+`openclaw update repair` from the updated installation.
 
 Before stopping the previous Gateway, the updater waits for affirmative readiness.
 Its observation window uses the canary's measured startup time with headroom for

@@ -150,6 +150,7 @@ export const gatewayMethodsIsolatedTestFiles = [
   "src/gateway/server-methods/tasks.test.ts",
   "src/gateway/server-methods/agent.task-runtime.test.ts",
   "src/gateway/server-methods/agent.test.ts",
+  "src/gateway/server-methods/agent.visitor-access.test.ts",
   "src/gateway/server-methods/board.runtime-boundaries.test.ts",
   "src/gateway/server-methods/chat.reset-visible-yield.test.ts",
   "src/gateway/server-methods/environments.pairing-snapshot.test.ts",

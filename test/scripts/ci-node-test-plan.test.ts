@@ -3025,8 +3025,6 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     const runtimeTargets = [
       "test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts",
       "src/infra/update-managed-service-handoff-lifecycle.test.ts",
-      "src/infra/update-managed-service-handoff-repair-validating.test.ts",
-      "src/infra/update-managed-service-handoff-repair-verifying.test.ts",
       ...doctorRuntimeTargets,
       "src/commands/doctor-plugin-install-config.process.test.ts",
       "src/gateway/gateway-active-memory.test.ts",
