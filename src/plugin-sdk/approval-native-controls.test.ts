@@ -63,4 +63,27 @@ describe("native approval controls", () => {
       result: "second",
     });
   });
+  // A refusal is not a missing approval: the request is still waiting for someone the account
+  // lists, so the control has to survive or that approver has nothing left to press.
+  it.each([
+    ["FORBIDDEN", "APPROVAL_AUTHORITY_REQUIRED", "not-authorized", true],
+    ["INVALID_REQUEST", "APPROVAL_NOT_FOUND", "not-found", false],
+  ] as const)(
+    "a %s/%s resolve settles as %s and keeps the control: %s",
+    async (gatewayCode, reason, kind, retained) => {
+      type Binding = { token: string; expiresAtMs: number; approvalId: string };
+      const registry = createNativeApprovalControlRegistry<Binding>({
+        releaseClaimOnLookupExpiry: false,
+      });
+      const binding = { token: "tok", expiresAtMs: Date.now() + 60_000, approvalId: "a1" };
+      registry.register(binding);
+      const failure = Object.assign(new Error("refused"), { gatewayCode, details: { reason } });
+      await expect(
+        registry.settle(binding.token, async () => {
+          throw failure;
+        }),
+      ).resolves.toMatchObject({ kind });
+      expect(Boolean(registry.get(binding.token))).toBe(retained);
+    },
+  );
 });
