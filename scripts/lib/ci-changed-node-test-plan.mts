@@ -22,9 +22,9 @@ import {
 import { listAvailableExtensionIds } from "./changed-extensions.mts";
 import { isTestOnlyPath } from "./changed-path-facts.mjs";
 import {
-  createNodeTestShards,
   createSelectedNodeTestShardBundles,
   isPolicyTestOwnedPath,
+  nodeTestConfigRequiresCanonicalMetadata,
   packNodeTestGroups,
   resolvePolicyTestTargets,
   type NodeTestShardGroup,
@@ -39,7 +39,6 @@ import {
   shouldSplitExtensionTestProcesses,
   splitExtensionTestJobTargets,
 } from "./extension-test-plan.mts";
-import { isExclusiveCiTestConfig } from "./local-check-runtime.mts";
 import { buildPluginSdkEntrySources, publicPluginSdkEntrypoints } from "./plugin-sdk-entries.mts";
 import {
   mergeVitestPretestBuildModes,
@@ -107,23 +106,6 @@ const SERIAL_CHANGED_TARGET_RE = /^extensions\/memory-core\//u;
 const BOUNDARY_NODE_TEST_CONFIG = "test/vitest/vitest.boundary.config.ts";
 const publicPluginSdkEntrySources = Object.values(
   buildPluginSdkEntrySources(publicPluginSdkEntrypoints),
-);
-
-const fullNodeTestShards = createNodeTestShards({
-  includeReleaseOnlyPluginShards: false,
-});
-const configsRequiringCanonicalMetadata = new Set(
-  fullNodeTestShards
-    .filter(
-      (shard) =>
-        shard.env ||
-        shard.shardName.startsWith("core-tooling") ||
-        shard.configs.some(isExclusiveCiTestConfig),
-    )
-    .flatMap((shard) => shard.configs),
-);
-const splitNodeTestConfigs = new Set(
-  fullNodeTestShards.filter((shard) => shard.includePatterns).flatMap((shard) => shard.configs),
 );
 
 // Inputs `build:ci-artifacts` consumes: runtime/plugin/package sources plus
@@ -344,11 +326,6 @@ function resolvePreciseChangedTargets(
   const targets = [...new Set([...plan.targets, ...additionalTargets])];
   if (
     targets.length > MAX_CHANGED_NODE_TEST_TARGETS ||
-    targets.some(
-      (target) =>
-        /^test\/vitest\/vitest\.full-.*\.config\.ts$/u.test(target) ||
-        splitNodeTestConfigs.has(target),
-    ) ||
     targets.some(
       (target) =>
         !isTestFileTarget(target) || findUnmatchedExplicitTestTargets([target], cwd).length > 0,
@@ -755,7 +732,7 @@ export function createChangedNodeTestShards(
   const onlyDeferredProofTargets = targetPlans.length > 0 && prTargetPlans.length === 0;
   const canonicalTargets = prTargetPlans
     .filter(({ plans }) =>
-      plans.some(({ config }) => configsRequiringCanonicalMetadata.has(config)),
+      plans.some(({ config }) => nodeTestConfigRequiresCanonicalMetadata(config)),
     )
     .map(({ target }) => target);
   // Canonical shard inventories describe this checkout, never a caller's

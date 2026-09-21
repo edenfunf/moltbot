@@ -389,9 +389,6 @@ importers:
       tar:
         specifier: 7.5.22
         version: 7.5.22
-      tree-sitter-bash:
-        specifier: 0.25.1
-        version: 0.25.1
       tslog:
         specifier: 5.2.0
         version: 5.2.0
@@ -588,6 +585,9 @@ importers:
       tinyglobby:
         specifier: 0.2.17
         version: 0.2.17
+      tree-sitter-bash:
+        specifier: 0.25.1
+        version: 0.25.1
       tsdown:
         specifier: 0.23.0
         version: 0.23.0(tsx@4.23.13)(typescript@6.0.3)(unrun@0.3.1)

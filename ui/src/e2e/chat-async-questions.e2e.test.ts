@@ -2,7 +2,10 @@ import path from "node:path";
 import { expect as expectBrowser } from "playwright/test";
 import { expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
-import { defaultControlUiFeatureMethods } from "../test-helpers/control-ui-e2e.ts";
+import {
+  reconnectMockGateway,
+  defaultControlUiFeatureMethods,
+} from "../test-helpers/control-ui-e2e.ts";
 import {
   captureUiProof,
   controlUiSessionUrl,
@@ -70,7 +73,6 @@ suite.define(() => {
           const dock = page.locator(".agent-chat__question-dock");
           await expectBrowser(dock).toBeVisible();
           const draft = dock.getByRole("textbox", { name: `Your own answer for ${title}` });
-          await draft.fill("New project contributors");
           const nextFinal = {
             role: "assistant",
             content: "The summary is finalized and the task is complete.",
@@ -124,7 +126,7 @@ suite.define(() => {
           await expectBrowser(summary).toContainText("No longer pending");
           await summary.getByRole("button", { name: "Answer", exact: true }).click();
           await expectBrowser(dock).toBeVisible();
-          await expectBrowser(draft).toHaveValue("New project contributors");
+          await expectBrowser(draft).toHaveValue("");
           expect(await gateway.getRequests("chat.send")).toHaveLength(0);
           expect(await gateway.getRequests("question.resolve")).toHaveLength(0);
 
@@ -157,6 +159,149 @@ suite.define(() => {
       });
     },
   );
+
+  it("keeps an unfinished answer through later completion, reload, and reconnect", async () => {
+    await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
+      const prompt = {
+        ...questionMessage,
+        runId: "draft-run",
+        __openclaw: { id: "draft-question", seq: 1 },
+      };
+      const history = [prompt];
+      const gateway = await installMockGateway(page, { historyMessages: history });
+      await page.goto(`${suite.server.baseUrl}chat`);
+      const dock = page.locator(".agent-chat__question-dock");
+      const draft = dock.getByRole("textbox", { name: `Your own answer for ${title}` });
+      await draft.fill("New contributors and maintainers");
+      await captureUiProof(
+        suite,
+        page,
+        "async-question-draft-protection",
+        "before-later-completion.png",
+      );
+      const ownFinal = {
+        role: "assistant",
+        content: "Draft ready.",
+        runId: "draft-run",
+        phase: "final_answer",
+        __openclaw: { id: "draft-final", seq: 2, runTerminal: true },
+      };
+      const laterFinal = {
+        role: "assistant",
+        content: "Other work finished.",
+        runId: "later-run",
+        phase: "final_answer",
+        __openclaw: { id: "later-final", seq: 3, runTerminal: true },
+      };
+      await gateway.setHistoryMessages([...history, ownFinal, laterFinal]);
+      for (const message of [ownFinal, laterFinal]) {
+        const { __openclaw: identity } = message;
+        await gateway.emitGatewayEvent("session.message", {
+          sessionKey: "agent:main:main",
+          messageId: identity.id,
+          messageSeq: identity.seq,
+          message,
+        });
+      }
+      await expectBrowser(
+        page.locator(".chat-thread-inner").getByText("Other work finished.", { exact: true }),
+      ).toBeVisible();
+      await expectBrowser(draft).toHaveValue("New contributors and maintainers");
+      // Observe the owning IndexedDB transaction, not a timeout, before simulating a reload.
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            if (!(await indexedDB.databases()).some((db) => db.name === "openclaw-control-ui")) {
+              return false;
+            }
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+              const request = indexedDB.open("openclaw-control-ui");
+              request.addEventListener("success", () => resolve(request.result), { once: true });
+              request.addEventListener(
+                "error",
+                () => reject(request.error ?? new Error("Could not open question draft database")),
+                { once: true },
+              );
+            });
+            try {
+              const records = await new Promise<
+                Array<{ questionDrafts?: Array<{ answers: Array<{ freeText: string }> }> }>
+              >((resolve, reject) => {
+                const request = db
+                  .transaction("composerDrafts", "readonly")
+                  .objectStore("composerDrafts")
+                  .getAll();
+                request.addEventListener("success", () => resolve(request.result), { once: true });
+                request.addEventListener(
+                  "error",
+                  () => reject(request.error ?? new Error("Could not read question drafts")),
+                  { once: true },
+                );
+              });
+              return records.some((record) =>
+                record.questionDrafts?.some((question) =>
+                  question.answers.some(
+                    (answer) => answer.freeText === "New contributors and maintainers",
+                  ),
+                ),
+              );
+            } finally {
+              db.close();
+            }
+          }),
+        )
+        .toBe(true);
+      await page.reload();
+      await expectBrowser(draft).toHaveValue("New contributors and maintainers");
+      await reconnectMockGateway(page, gateway, "question-draft-reconnect");
+      await expectBrowser(draft).toHaveValue("New contributors and maintainers");
+      await captureUiProof(
+        suite,
+        page,
+        "async-question-draft-protection",
+        "after-reload-reconnect.png",
+      );
+      expect(await gateway.getRequests("chat.send")).toHaveLength(0);
+      expect(await gateway.getRequests("question.resolve")).toHaveLength(0);
+    });
+  });
+
+  it("dismisses durably with Undo and reopens after reload without resolving or stopping work", async () => {
+    await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
+      const gateway = await installMockGateway(page, { historyMessages: [questionMessage] });
+      await page.goto(`${suite.server.baseUrl}chat`);
+      const dock = page.locator(".agent-chat__question-dock");
+      const draft = dock.getByRole("textbox", { name: `Your own answer for ${title}` });
+      await draft.fill("My project team");
+      await captureUiProof(suite, page, "async-question-dismissal", "before-dismissal.png");
+      await dock.getByRole("button", { name: "Dismiss", exact: true }).click();
+      const toast = page.locator(".app-toast");
+      await expectBrowser(toast).toContainText("Question dismissed. Work continues.");
+      await expectBrowser(dock).toHaveCount(0);
+      await captureUiProof(suite, page, "async-question-dismissal", "after-dismissal-undo.png");
+      await toast.getByRole("button", { name: "Undo", exact: true }).click();
+      await expectBrowser(draft).toHaveValue("My project team");
+      // A visible restored answer is a durability boundary, with no intervening write.
+      await page.reload();
+      await expectBrowser(draft).toHaveValue("My project team");
+      await dock.getByRole("button", { name: "Dismiss", exact: true }).click();
+      // The toast is published after the durable write settles, so reload exercises stored state.
+      await expectBrowser(toast).toContainText("Question dismissed. Work continues.");
+      await page.reload();
+      const summary = page.locator(".chat-question-summary").filter({ hasText: title });
+      await expectBrowser(summary).toContainText("Dismissed");
+      await expectBrowser(dock).toHaveCount(0);
+      await captureUiProof(suite, page, "async-question-dismissal", "after-reload.png");
+      await summary.getByRole("button", { name: "Answer", exact: true }).click();
+      await expectBrowser(draft).toHaveValue("My project team");
+      // A visible restored answer is a durability boundary, with no intervening write.
+      await page.reload();
+      await expectBrowser(draft).toHaveValue("My project team");
+      expect(await gateway.getRequests("chat.send")).toHaveLength(0);
+      expect(await gateway.getRequests("question.resolve")).toHaveLength(0);
+      expect(await gateway.getRequests("chat.abort")).toHaveLength(0);
+    });
+  });
 
   it.each(
     [390, 430].flatMap((width) => (["light", "dark"] as const).map((theme) => ({ width, theme }))),
@@ -504,15 +649,15 @@ suite.define(() => {
       expect(await custom.inputValue()).toBe("Readers new to the project");
       await card.getByRole("button", { name: "Next", exact: true }).click();
       await card.getByText(secondTitle, { exact: true }).waitFor();
-      await card.getByRole("button", { name: "Skip", exact: true }).click();
+      await card.getByRole("button", { name: "Dismiss", exact: true }).click();
       await card.getByText(title, { exact: true }).waitFor();
       expect(await custom.inputValue()).toBe("Readers new to the project");
-      await card.getByRole("button", { name: "Skip", exact: true }).click();
+      await card.getByRole("button", { name: "Dismiss", exact: true }).click();
       await card.waitFor({ state: "detached" });
       expect(await composer.inputValue()).toBe("Continue researching while I decide.");
       const skipped = page.locator(".chat-thread .chat-question-summary");
-      expect(await skipped.filter({ hasText: title }).textContent()).toContain("Skipped");
-      expect(await skipped.filter({ hasText: secondTitle }).textContent()).toContain("Skipped");
+      expect(await skipped.filter({ hasText: title }).textContent()).toContain("Dismissed");
+      expect(await skipped.filter({ hasText: secondTitle }).textContent()).toContain("Dismissed");
       expect(await gateway.getRequests("chat.send")).toHaveLength(0);
     } finally {
       await suite.closeBrowserContext(context);

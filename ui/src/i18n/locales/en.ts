@@ -3896,12 +3896,21 @@ export const en: TranslationMap & {
     goals: {},
     asyncQuestions: {
       title: "Optional · work can continue",
+      dismiss: "Dismiss",
+      dismissing: "Dismissing…",
+      dismissed: "Dismissed",
+      reopening: "Restoring answer…",
+      dismissedReason: "You can still answer this question later.",
+      dismissedNotice: "Question dismissed. Work continues.",
       pendingOne: "{count} unanswered question",
       pendingMany: "{count} unanswered questions",
       inComposer: "Answer above the message box.",
       archived: "No longer pending",
       archivedReason: "The conversation moved on. You can still answer this question.",
       sendFailed: "Could not send your answer. Your draft is preserved.",
+      draftStorageFailed:
+        "This answer is not saved on this device. Keep this page open or copy your answer.",
+      draftConflict: "This question was edited in another tab. Copy your answer before reloading.",
     },
     questions: {
       other: "Type your own answer here",
