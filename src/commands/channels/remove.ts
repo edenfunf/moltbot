@@ -98,6 +98,12 @@ function resolveIngressQueueOwner(params: {
   // the removed channel alongside the declared ones: a channel matched through the
   // plugin id is not in `channels`, so a single declared sibling still shares its queue.
   const served = new Set([id, ...owner.channels.map((channel) => channel.toLowerCase())]);
+  // The reverse holds too: the manifest cannot say whether the plugin-id channel is in
+  // use, but one configured beside the removed channel shares its queue.
+  const pluginChannel = owner.id.toLowerCase();
+  if (Object.keys(params.cfg.channels ?? {}).some((key) => key.toLowerCase() === pluginChannel)) {
+    served.add(pluginChannel);
+  }
   return served.size > 1 ? { sharedWithPluginId: owner.id } : { pluginId: owner.id };
 }
 

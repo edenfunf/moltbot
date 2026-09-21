@@ -943,6 +943,36 @@ describe("channelsRemoveCommand", () => {
     });
   });
 
+  it("keeps the ingress rows when a configured plugin-id channel shares the queue", async () => {
+    // The mirror of the case above: the removed channel is the declared one, and the
+    // implicit plugin-id channel is the sibling. The manifest cannot list it, so the
+    // config entry is what shows it is in use and draining the same queue.
+    manifestMocks.plugins = [{ id: "vendor-chat", channels: ["external-chat"] }];
+    armExternalChatRemoval(
+      { pluginId: "vendor-chat" },
+      {
+        channels: {
+          "external-chat": { enabled: true, token: "token-1" },
+          "vendor-chat": { enabled: true, token: "token-2" },
+        },
+      },
+    );
+    const queue = createChannelIngressQueue<{ text: string }>({
+      channelId: "vendor-chat",
+      accountId: "default",
+    });
+    await queue.enqueue("inbound-1", { text: "belongs to the plugin-id channel too" });
+
+    await deleteExternalChatAccount();
+
+    expect(runtime.log).toHaveBeenCalledWith(
+      'Deleted external-chat account "default". Kept its stored ingress events: plugin "vendor-chat" serves more than one channel and its stored events do not record which.',
+    );
+    await expect(queue.claimNext({ ownerId: "worker" })).resolves.toMatchObject({
+      id: "inbound-1",
+    });
+  });
+
   it("keeps the ingress rows when one plugin serves several channels", async () => {
     // One plugin, two channels, one queue between them: the rows record no channel of
     // their own, so this account's removal cannot tell its rows from its sibling's.
