@@ -434,7 +434,10 @@
     "!dist/plugin-sdk/memory-core-host-engine-knn.d.ts",
     "!dist/plugin-sdk/memory-core-host-engine-indexing.d.ts",
     "!dist/plugin-sdk/sqlite-worker-runtime.d.ts",
-    "!dist/plugin-sdk/worker-task-server.d.ts"
+    "!dist/plugin-sdk/worker-task-server.d.ts",
+    "!dist/plugin-sdk/media-ffmpeg.d.ts",
+    "!dist/plugin-sdk/realtime-voice-playback.d.ts",
+    "!dist/plugin-sdk/text-grapheme.d.ts"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -754,6 +757,9 @@
     "./plugin-sdk/media-mime": {
       "types": "./dist/plugin-sdk/media-mime.d.ts",
       "default": "./dist/plugin-sdk/media-mime.js"
+    },
+    "./plugin-sdk/media-ffmpeg": {
+      "default": "./dist/plugin-sdk/media-ffmpeg.js"
     },
     "./plugin-sdk/embedding-providers": {
       "default": "./dist/plugin-sdk/embedding-providers.js"
@@ -1289,6 +1295,9 @@
     "./plugin-sdk/realtime-voice": {
       "default": "./dist/plugin-sdk/realtime-voice.js"
     },
+    "./plugin-sdk/realtime-voice-playback": {
+      "default": "./dist/plugin-sdk/realtime-voice-playback.js"
+    },
     "./plugin-sdk/realtime-voice-provider": {
       "default": "./dist/plugin-sdk/realtime-voice-provider.js"
     },
@@ -1574,6 +1583,9 @@
     "./plugin-sdk/text-autolink-runtime": {
       "default": "./dist/plugin-sdk/text-autolink-runtime.js"
     },
+    "./plugin-sdk/text-grapheme": {
+      "default": "./dist/plugin-sdk/text-grapheme.js"
+    },
     "./plugin-sdk/text-utility-runtime": {
       "default": "./dist/plugin-sdk/text-utility-runtime.js"
     },
@@ -1664,6 +1676,7 @@
     "android:version:pin": "node --import ./scripts/tsx.mjs scripts/android-pin-version.ts",
     "android:version:sync": "node --import ./scripts/tsx.mjs scripts/android-sync-versioning.ts --write",
     "audit:seams": "node --import ./scripts/tsx.mjs scripts/audit-seams.mts",
+    "bench:plugins:invocation": "node --import ./scripts/tsx.mjs scripts/bench-plugin-invocation.ts",
     "build": "node --import ./scripts/tsx.mjs scripts/build-all.mts",
     "build:ci-artifacts": "node --import ./scripts/tsx.mjs scripts/build-all.mts ciArtifacts",
     "build:docker": "pnpm plugins:assets:build && node --import ./scripts/tsx.mjs scripts/tsdown-build.mts && node --import ./scripts/tsx.mjs scripts/check-cli-bootstrap-imports.mts && node scripts/runtime-postbuild.mjs && node --import ./scripts/tsx.mjs scripts/build-stamp.mts && node --import ./scripts/tsx.mjs scripts/runtime-postbuild-stamp.mts && pnpm plugins:assets:copy && node --import ./scripts/tsx.mjs scripts/write-build-info.ts && node --import ./scripts/tsx.mjs scripts/write-cli-startup-metadata.ts",
