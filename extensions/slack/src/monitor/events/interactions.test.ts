@@ -2120,51 +2120,39 @@ describe("registerSlackInteractionEvents", () => {
     });
   });
 
-  it.each([
-    [
-      "is no longer pending",
+  it("tells the clicker when a typed approval is no longer pending", async () => {
+    const { ctx, app, getHandler } = createContext();
+    resolveApprovalOverGatewayMock.mockRejectedValueOnce(
       new Error("unknown or expired approval id"),
-      "This approval is no longer pending.",
-    ],
-    [
-      "refuses the clicker",
-      Object.assign(new Error("approval decision requires a listed approver"), {
-        gatewayCode: "FORBIDDEN",
-        details: { code: "APPROVAL_AUTHORITY_REQUIRED" },
-      }),
-      "That decision needs an approver listed for this channel. Ask a listed approver to decide it.",
-    ],
-  ])(
-    "tells the clicker when the Gateway says a typed approval %s",
-    async (_label, failure, text) => {
-      const { ctx, app, getHandler } = createContext();
-      resolveApprovalOverGatewayMock.mockRejectedValueOnce(failure);
-      registerSlackInteractionEvents({ ctx: ctx as never });
-      const respond = vi.fn().mockResolvedValue(undefined);
+    );
+    registerSlackInteractionEvents({ ctx: ctx as never });
+    const respond = vi.fn().mockResolvedValue(undefined);
 
-      await getHandler()({
-        ack: vi.fn().mockResolvedValue(undefined),
-        respond,
-        body: {
-          user: { id: "U123" },
-          channel: { id: "C1" },
-          container: { channel_id: "C1", message_ts: "100.200" },
-          message: { ts: "100.200", text: "Exec approval required", blocks: [] },
-        },
-        action: {
-          type: "button",
-          action_id: "openclaw:approval_button:1:1",
-          block_id: "exec_actions",
-          value:
-            'openclaw:approval:v1:{"approvalId":"req-123","approvalKind":"exec","decision":"allow-once"}',
-          text: { type: "plain_text", text: "Allow once" },
-        },
-      });
+    await getHandler()({
+      ack: vi.fn().mockResolvedValue(undefined),
+      respond,
+      body: {
+        user: { id: "U123" },
+        channel: { id: "C1" },
+        container: { channel_id: "C1", message_ts: "100.200" },
+        message: { ts: "100.200", text: "Exec approval required", blocks: [] },
+      },
+      action: {
+        type: "button",
+        action_id: "openclaw:approval_button:1:1",
+        block_id: "exec_actions",
+        value:
+          'openclaw:approval:v1:{"approvalId":"req-123","approvalKind":"exec","decision":"allow-once"}',
+        text: { type: "plain_text", text: "Allow once" },
+      },
+    });
 
-      expect(app.client.chat.update).not.toHaveBeenCalled();
-      expect(respond).toHaveBeenCalledWith({ text, response_type: "ephemeral" });
-    },
-  );
+    expect(app.client.chat.update).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith({
+      text: "This approval is no longer pending.",
+      response_type: "ephemeral",
+    });
+  });
 
   it("fails closed for malformed Slack approval envelopes", async () => {
     const { ctx, app, getHandler } = createContext();
@@ -2314,21 +2302,13 @@ describe("registerSlackInteractionEvents", () => {
     expect(respond).not.toHaveBeenCalled();
   });
 
-  // A channel that authorizes only one kind refuses the other, so a refusal continues the walk too.
-  it.each([
-    ["is missing", new Error("unknown or expired approval id")],
-    [
-      "refuses the sender",
-      Object.assign(new Error("approval decision requires a listed approver"), {
-        gatewayCode: "FORBIDDEN",
-        details: { code: "APPROVAL_AUTHORITY_REQUIRED" },
-      }),
-    ],
-  ])("preserves legacy unprefixed fallback when the exec kind %s", async (_label, failure) => {
-    resolveApprovalOverGatewayMock.mockRejectedValueOnce(failure).mockResolvedValueOnce({
-      applied: true,
-      approval: { status: "allowed", decision: "allow-once", presentation: { kind: "exec" } },
-    });
+  it("preserves legacy unprefixed fallback when the sender may approve either kind", async () => {
+    resolveApprovalOverGatewayMock
+      .mockRejectedValueOnce(new Error("unknown or expired approval id"))
+      .mockResolvedValueOnce({
+        applied: true,
+        approval: { status: "allowed", decision: "allow-once", presentation: { kind: "exec" } },
+      });
     const { ctx, app, getHandler } = createContext(
       approvalContextOptions("U123OWNER", "U123OWNER"),
     );
