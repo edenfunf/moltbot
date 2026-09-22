@@ -6,7 +6,10 @@ import {
   resolveChannelApprovalCapability,
 } from "../../channels/plugins/index.js";
 import { logVerbose } from "../../globals.js";
-import { isApprovalKindMismatchError } from "../../infra/approval-errors.js";
+import {
+  isApprovalKindMismatchError,
+  resolveFirstApprovalKind,
+} from "../../infra/approval-errors.js";
 import { resolveApprovalOverGateway } from "../../infra/approval-gateway-resolver.js";
 import type { ChannelApprovalKind } from "../../infra/approval-types.js";
 import { resolveApprovalCommandAuthorization } from "../../infra/channel-approval-auth.js";
@@ -245,29 +248,17 @@ export async function handleApproveCommandFromContext(
     };
   }
 
-  for (const [index, method] of methods.entries()) {
-    try {
-      await callApprovalMethod(method);
-      break;
-    } catch (error) {
-      const isLastMethod = index === methods.length - 1;
-      if (!isApprovalKindMismatchError(error)) {
-        return {
-          shouldContinue: false,
-          reply: { text: `❌ Failed to submit approval: ${formatApprovalSubmitError(error)}` },
-        };
-      }
-      if (isLastMethod) {
-        const blocked = blockedCommandResult();
-        if (blocked) {
-          return blocked;
-        }
-        return {
-          shouldContinue: false,
-          reply: { text: `❌ Failed to submit approval: ${formatApprovalSubmitError(error)}` },
-        };
-      }
+  try {
+    await resolveFirstApprovalKind(methods, callApprovalMethod);
+  } catch (error) {
+    const blocked = isApprovalKindMismatchError(error) ? blockedCommandResult() : undefined;
+    if (blocked) {
+      return blocked;
     }
+    return {
+      shouldContinue: false,
+      reply: { text: `❌ Failed to submit approval: ${formatApprovalSubmitError(error)}` },
+    };
   }
 
   return {

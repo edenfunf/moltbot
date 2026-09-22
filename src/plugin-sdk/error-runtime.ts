@@ -33,6 +33,6 @@ export { PlatformMessageNotDispatchedError } from "../infra/outbound/deliver-typ
 export {
   APPROVAL_AUTHORITY_REQUIRED_TEXT,
   isApprovalAuthorityError,
-  isApprovalKindMismatchError,
   isApprovalNotFoundError,
+  resolveFirstApprovalKind,
 } from "../infra/approval-errors.ts";

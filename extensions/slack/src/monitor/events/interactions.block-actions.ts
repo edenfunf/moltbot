@@ -4,7 +4,7 @@ import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway
 import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
-import { isApprovalKindMismatchError } from "openclaw/plugin-sdk/error-runtime";
+import { resolveFirstApprovalKind } from "openclaw/plugin-sdk/error-runtime";
 import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
 import {
   parseStrictFiniteNumber,
@@ -771,8 +771,8 @@ async function handleSlackLegacyApprovalInteraction(params: {
     return true;
   }
 
-  for (const [index, resolveMethod] of resolveMethods.entries()) {
-    try {
+  try {
+    await resolveFirstApprovalKind(resolveMethods, async (resolveMethod) => {
       await resolveApprovalOverGateway({
         cfg: params.ctx.cfg,
         approvalId: parsedApproval.approvalId,
@@ -782,28 +782,24 @@ async function handleSlackLegacyApprovalInteraction(params: {
         senderId: resolveMethod === "plugin" ? pluginSenderId : params.parsed.userId,
         resolveMethod,
       });
-      try {
-        await updateSlackInteractionMessage({
-          ctx: params.ctx,
-          eventScope: params.eventScope,
-          channelId: params.parsed.channelId,
-          messageTs: params.parsed.messageTs,
-          text: params.parsed.typedBody.message?.text ?? "",
-          blocks: [],
-        });
-      } catch {
-        // Best-effort cleanup only for historical command-backed controls.
-      }
-      return true;
-    } catch (error) {
-      if (index + 1 < resolveMethods.length && isApprovalKindMismatchError(error)) {
-        continue;
-      }
-      params.ctx.runtime.log?.(
-        `slack:interaction legacy approval resolve failed id=${parsedApproval.approvalId}: ${String(error)}`,
-      );
-      throw error;
-    }
+    });
+  } catch (error) {
+    params.ctx.runtime.log?.(
+      `slack:interaction legacy approval resolve failed id=${parsedApproval.approvalId}: ${String(error)}`,
+    );
+    throw error;
+  }
+  try {
+    await updateSlackInteractionMessage({
+      ctx: params.ctx,
+      eventScope: params.eventScope,
+      channelId: params.parsed.channelId,
+      messageTs: params.parsed.messageTs,
+      text: params.parsed.typedBody.message?.text ?? "",
+      blocks: [],
+    });
+  } catch {
+    // Best-effort cleanup only for historical command-backed controls.
   }
   return true;
 }

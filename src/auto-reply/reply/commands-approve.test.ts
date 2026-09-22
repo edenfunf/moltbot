@@ -569,6 +569,29 @@ describe("handleApproveCommand", () => {
     });
   });
 
+  it("reports a refusal from one kind over not-found from the other", async () => {
+    resolveApprovalOverGatewayMock.mockRejectedValueOnce(
+      Object.assign(new Error("approval decision requires a listed approver"), {
+        gatewayCode: "FORBIDDEN",
+        details: { code: "APPROVAL_AUTHORITY_REQUIRED" },
+      }),
+    );
+    resolveApprovalOverGatewayMock.mockRejectedValueOnce(
+      new Error("unknown or expired approval id"),
+    );
+    const result = await handleApproveCommand(
+      buildApproveParams(
+        "/approve legacy-plugin-123 allow-once",
+        createDiscordApproveCfg({ enabled: true, approvers: ["123"], target: "channel" }),
+        { Provider: "discord", Surface: "discord", SenderId: "123" },
+      ),
+      true,
+    );
+
+    expect(resolveApprovalOverGatewayMock).toHaveBeenCalledTimes(2);
+    expect(result?.reply?.text).toContain("approval decision requires a listed approver");
+  });
+
   it("returns the underlying not-found error for plugin-only approval routing", async () => {
     setActivePluginRegistry(
       createTestRegistry([

@@ -5,6 +5,7 @@ import {
   isApprovalKindMismatchError,
   isApprovalNotFoundError,
   isApprovalStaleError,
+  resolveFirstApprovalKind,
 } from "./approval-errors.js";
 
 describe("isApprovalNotFoundError", () => {
@@ -83,5 +84,46 @@ describe("isApprovalKindMismatchError", () => {
     [{ gatewayCode: "UNAVAILABLE" }, false],
   ])("%j continues the search: %s", (fields, expected) => {
     expect(isApprovalKindMismatchError(Object.assign(new Error("x"), fields))).toBe(expected);
+  });
+});
+
+// A walk across kinds must end with the answer that is true for this reviewer: a refusal from
+// one kind outranks a not-found from the other, in either order.
+describe("resolveFirstApprovalKind", () => {
+  const refusal = Object.assign(new Error("approval decision requires a listed approver"), {
+    gatewayCode: "FORBIDDEN",
+    details: { code: "APPROVAL_AUTHORITY_REQUIRED" },
+  });
+  const notFound = Object.assign(new Error("approval not found"), {
+    gatewayCode: "INVALID_REQUEST",
+    details: { reason: "APPROVAL_NOT_FOUND" },
+  });
+  const walk = (answers: Record<string, Error | "ok">) =>
+    resolveFirstApprovalKind(Object.keys(answers), async (kind) => {
+      const answer = answers[kind];
+      if (answer !== "ok") {
+        throw answer;
+      }
+      return kind;
+    });
+
+  it("returns the first kind that resolves", async () => {
+    await expect(walk({ exec: refusal, plugin: "ok" })).resolves.toBe("plugin");
+  });
+
+  it.each([
+    ["exec refused, plugin missing", { exec: refusal, plugin: notFound }],
+    ["exec missing, plugin refused", { exec: notFound, plugin: refusal }],
+  ])("rethrows the refusal when %s", async (_label, answers) => {
+    await expect(walk(answers)).rejects.toBe(refusal);
+  });
+
+  it("rethrows not-found when no kind refused", async () => {
+    await expect(walk({ exec: notFound, plugin: notFound })).rejects.toBe(notFound);
+  });
+
+  it("stops at a failure that is neither", async () => {
+    const outage = Object.assign(new Error("gateway down"), { gatewayCode: "UNAVAILABLE" });
+    await expect(walk({ exec: outage, plugin: "ok" })).rejects.toBe(outage);
   });
 });

@@ -80,7 +80,8 @@ describe("telegram approval callbacks refused by the Gateway", () => {
   });
 
   it.each([
-    ["keeps the buttons when one kind refuses and the other is missing", [refusal, notFound], 0],
+    ["keeps the buttons when exec refuses and plugin is missing", [refusal, notFound], 0],
+    ["keeps the buttons when exec is missing and plugin refuses", [notFound, refusal], 0],
     ["retires the card when every kind is missing", [notFound, notFound], 1],
   ])("legacy callback %s", async (_label, failures, edits) => {
     const legacy = parseExecApprovalCommandText("/approve 138e9b8c allow-once");
