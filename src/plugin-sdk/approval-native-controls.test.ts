@@ -87,6 +87,10 @@ describe("native approval controls", () => {
         }),
       ).resolves.toMatchObject({ kind });
       expect(Boolean(registry.get(binding.token))).toBe(retained);
+      // The listed approver's next tap on the same control must be able to decide it.
+      await expect(registry.settle(binding.token, async () => "decided")).resolves.toMatchObject({
+        kind: retained ? "settled" : "missing",
+      });
     },
   );
 });

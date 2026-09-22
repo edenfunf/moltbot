@@ -11,6 +11,7 @@ import {
 import type { OpenClawStateDatabaseOptions } from "../../state/openclaw-state-db.js";
 import { ExecApprovalManager } from "../exec-approval-manager.js";
 import { createApprovalHandlers } from "./approval.js";
+import { createExecApprovalHandlers } from "./exec-approval.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
 
 const prepareApprovalChannelCustodyMock = vi.hoisted(() => vi.fn());
@@ -36,19 +37,35 @@ function createContext() {
   } as unknown as GatewayRequestHandlerOptions["context"];
 }
 
-describe("approval.resolve channel custody responses", () => {
-  // The caller holds this approval's control, so "it is not there" is untrue and leaves every
-  // channel retiring a button a listed approver could still use. An approval bound to another
-  // account stays not-found: saying more would confirm that account's id to this one.
+describe("channel custody responses", () => {
+  // A refusal answers who may decide; answering not-found instead leaves every channel retiring
+  // a control a listed approver could still use. An approval bound to another account stays
+  // not-found: saying more would confirm that account's id to this one. The legacy method
+  // refuses before its record lookup, so both methods need the same answer pinned.
   it.each([
-    ["refuses the reviewer", null, "FORBIDDEN", "APPROVAL_AUTHORITY_REQUIRED"],
+    ["approval.resolve", "refuses the reviewer", null, "FORBIDDEN", "APPROVAL_AUTHORITY_REQUIRED"],
     [
+      "approval.resolve",
       "belongs to another account",
       { resolverId: "telegram:ops", authorizes: () => false },
       "INVALID_REQUEST",
       "APPROVAL_NOT_FOUND",
     ],
-  ])("when the channel %s", async (_label, custody, code, reason) => {
+    [
+      "exec.approval.resolve",
+      "refuses the reviewer",
+      null,
+      "FORBIDDEN",
+      "APPROVAL_AUTHORITY_REQUIRED",
+    ],
+    [
+      "exec.approval.resolve",
+      "belongs to another account",
+      { resolverId: "telegram:ops", authorizes: () => false },
+      "INVALID_REQUEST",
+      "APPROVAL_NOT_FOUND",
+    ],
+  ])("%s when the channel %s", async (method, _label, custody, code, reason) => {
     const databaseOptions = createDatabaseOptions();
     const manager = new ExecApprovalManager({
       approvalKind: "exec",
@@ -77,24 +94,26 @@ describe("approval.resolve channel custody responses", () => {
     void decision.catch(() => {});
     prepareApprovalChannelCustodyMock.mockReturnValue(custody);
 
-    const handlers = createApprovalHandlers({
-      execApprovalManager: manager,
-      pluginApprovalManager: manager as never,
-      systemAgentApprovalManager: manager as never,
-      databaseOptions,
-    } as never);
+    const handlers =
+      method === "approval.resolve"
+        ? createApprovalHandlers({
+            execApprovalManager: manager,
+            pluginApprovalManager: manager as never,
+            systemAgentApprovalManager: manager as never,
+            databaseOptions,
+          } as never)
+        : createExecApprovalHandlers(manager);
     const respond = vi.fn();
-    const body = {
-      id: record.id,
-      kind: "exec",
-      decision: "allow-once",
-      reviewer: { channel: "telegram", accountId: "ops", senderId: "owner" },
-    };
+    const reviewer = { channel: "telegram", accountId: "ops", senderId: "owner" };
+    const body =
+      method === "approval.resolve"
+        ? { id: record.id, kind: "exec", decision: "allow-once", reviewer }
+        : { id: record.id, decision: "allow-once", reviewer };
     await expectDefined(
-      handlers["approval.resolve"],
-      "approval.resolve handler test invariant",
+      handlers[method],
+      `${method} handler test invariant`,
     )({
-      req: { id: "req-1", type: "req", method: "approval.resolve", params: body },
+      req: { id: "req-1", type: "req", method, params: body },
       params: body,
       client: {
         connId: "conn-1",
