@@ -241,9 +241,9 @@ export function respondUnknownOrExpiredApproval(respond: RespondFn): void {
 }
 
 /**
- * A reviewer the channel will not let decide. Distinct from an approval that is gone: the
- * caller is holding this approval's control, so answering that it no longer exists is untrue,
- * unactionable, and leaves every channel retiring a control a listed approver can still use.
+ * A reviewer the channel will not let decide. This answers who may decide, not whether the
+ * approval still exists: answering not-found instead leaves every channel retiring a control
+ * that a listed approver could still use.
  */
 export function respondApprovalAuthorityRequired(respond: RespondFn): void {
   respond(
