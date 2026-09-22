@@ -5,7 +5,7 @@ import type { PluginInstallRequest } from "../../lib/plugins/index.ts";
 import type { PluginInstallPolicyWarningDetails } from "./install-policy-warning.ts";
 
 export type PluginRowMessage = {
-  kind: "success" | "error" | "warning";
+  kind: "error" | "warning";
   text: string;
   savedInstall?: string;
   installPolicyWarning?: {
@@ -27,11 +27,7 @@ export function renderPluginRowMessage(
   }
   return html`<div
     class="plugins-row-message plugins-row-message--${message.kind} oc-banner ${
-      message.kind === "error"
-        ? "oc-banner-error"
-        : message.kind === "warning"
-          ? "oc-banner-warning"
-          : "oc-banner-success"
+      message.kind === "error" ? "oc-banner-error" : "oc-banner-warning"
     }"
     role=${message.kind === "error" || message.installPolicyWarning ? "alert" : "status"}
   >

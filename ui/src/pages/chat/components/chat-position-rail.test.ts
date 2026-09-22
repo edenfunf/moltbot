@@ -169,11 +169,13 @@ describe("conversation position rail", () => {
     "focus-resize",
     "pointer",
     "reader",
+    "composer-resize-reversal-navigation",
   ] as const;
 
   it.each(railUpdateScenarios)(
     "keeps the reader's rail position through %s updates",
     (scenario) => {
+      const navigatesBeforeResize = scenario === "composer-resize-reversal-navigation";
       const flushFrame = stubAnimationFrames();
       const publishVisibility = stubRailVisibility();
       const transcript = createTestTranscript();
@@ -315,8 +317,12 @@ describe("conversation position rail", () => {
               },
             },
           });
+          if (navigatesBeforeResize) {
+            root.scrollTop = 0;
+            activeMessage.mockReturnValue("message-0");
+          }
           adjustTextareaHeight(textarea);
-          expect(root.scrollTop).toBe(8315);
+          expect(root.scrollTop).toBe(navigatesBeforeResize ? 0 : 8315);
           // The goal header regrows the composer before any observer or frame runs.
           height = 576;
           marksHeight = 262;
@@ -325,6 +331,10 @@ describe("conversation position rail", () => {
           }
           publishVisibility(root.querySelector(".chat-bubble")!);
           flush();
+          if (navigatesBeforeResize) {
+            expect(marks.scrollTop).toBe(0);
+            return;
+          }
           expect(marks.scrollTop).toBe(677);
           root.scrollTop = scrollHeight - height;
           flush();

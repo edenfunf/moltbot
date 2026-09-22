@@ -81,12 +81,12 @@ describeControlUiE2e("Control UI plugin runtime actions", () => {
         restartRequired: false,
         runtime: { operationId: "enable-calendar", generation: 2, pluginIds: ["calendar-plus"] },
       });
-      await row.getByRole("status").getByText("Enabled Calendar Plus.", { exact: true }).waitFor();
       await expect
         .poll(() =>
           row.getByRole("button", { name: "Disable Calendar Plus", exact: true }).isEnabled(),
         )
         .toBe(true);
+      expect(await row.locator('.plugins-row-message[role="status"]').count()).toBe(0);
       await captureScreenshot(page, "runtime-03-after-desktop.png");
       await page.setViewportSize(mobileViewport);
       await expect

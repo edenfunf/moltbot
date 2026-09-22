@@ -90,11 +90,11 @@ an invalid source folder.
 Select **+** beside the chat composer to open attachments and session capabilities in one menu:
 
 - **Skills** enables or disables individual skills for this session.
-- **Connectors** enables or disables configured MCP servers for this session. A **session** tag marks values that differ from the inherited configuration. **Browse connectors** opens the Plugins page on **Discover**.
+- **Connectors** enables or disables configured MCP servers for this session. A **session** tag marks values that differ from the inherited configuration.
 - **Web search** enables or disables managed web search plus native OpenAI and Codex search for this session.
 - **Manage plugins** opens the Plugins page.
 
-These controls are sparse session overrides, like the model and thinking settings in the chat header. A capability with no override inherits the current agent or global configuration, and OpenClaw applies the resolved values when the next run materializes its tools and skills. The **N session overrides** pill in the composer footer reopens the menu; select its clear action to remove all capability overrides in one click.
+These controls are sparse session overrides, like the model and thinking settings in the chat header. A capability with no override inherits the current agent or global configuration, and OpenClaw applies the resolved values when the next run materializes its tools and skills. When overrides are set, open **+** and select **1 override** or **N overrides** at the bottom of the menu to clear all capability overrides for this session and return to inherited settings.
 
 When `tools.web.search.enabled` is `false`, **Web search** stays off in Chat and New Session. The disabled control explains the global setting. If a session has an older enable override, selecting the control clears that override while search stays off. An explicit session disable remains saved.
 
@@ -324,8 +324,9 @@ deny rules still apply. See [Tool access configuration](/gateway/config-tools).
 
 Select a card to open its listing inside the Control UI: plugins open in
 **Plugins**, and skills open in **Skills**. A card's **Install** button opens
-the capability details. Select **Install** on a plugin overview to start installation;
-the Gateway requests any required capability or install-policy review.
+the capability details. Select **Install** on a plugin overview to start installation
+immediately. Configured install-policy warnings still require an explicit
+acknowledgment; see [Manage plugins](/web/control-ui/settings#manage-plugins).
 **Dismiss** dismisses the card from the current view.
 
 An installed capability shows a green checkmark and **Installed**. This means the
@@ -531,8 +532,10 @@ Task progress cards are enabled by default. Toggle **Show task progress cards** 
 **Settings → Appearance → Chat** to hide or show the composer card in this browser.
 Hiding it does not stop agent work or clear saved progress.
 
-The task progress card above the composer collapses after deliberate upward
-scrolling settles. Returning to the end and progress updates leave it collapsed;
+On mobile, the task progress card above the composer starts collapsed and stays
+collapsed when you send a new message or the run completes. You can still open it
+manually. The card also collapses after deliberate upward scrolling settles.
+Returning to the end and progress updates leave it collapsed; on desktop,
 completion can reopen it only while you are already at the end. Manual choices
 are remembered per session. Continued scrolling after a manual reopen uses a
 higher threshold, and a second reopen keeps it open for that visit and task.
@@ -547,6 +550,16 @@ browser, including one signed in as you, does not count as a local send. Scroll
 back to the end or select **Latest** to resume following explicitly. Assistant
 text stays visible as it streams and becomes saved history, without a reply
 entry fade or slide.
+
+Hover an external web link, or focus it with the keyboard, to see its page title,
+description, and social image when available. GitHub repository and public
+landing-page links use the same card; issue and pull-request links keep their
+dedicated previews. The card uses
+OpenClaw's theme and includes **Open in your browser**. Press Escape to dismiss it.
+Pages without metadata keep the link label and destination. Touch taps open links
+normally. GitHub sign-in, account, and profile links do not trigger page previews.
+These anonymous previews respect **Automatically Fetch Link Favicons**; see
+[the request and privacy details](/web/control-ui/security-model#content-security-policy).
 
 Completed replies can show a compact **Sources** strip when their web links match
 recorded `web_search` or `web_fetch` results from the same run. Select a title and
@@ -644,6 +657,20 @@ The full Tasks page displays the supplied transcript. Core session transcripts
 are currently capped at 8,000 characters per text block. The Chat panel's full-text recovery may be unavailable
 after a temporary session is removed; loading earlier messages does not recover
 a capped reply's missing text.
+
+## Conversations stopped for review
+
+When a provider stops a conversation as a misalignment precaution, chat holds
+ordinary sends, queued input, and Talk. **Review findings** opens the available
+explanation. If the provider and runtime support continuation, the dialog shows
+the exact continuation message and asks you to **Acknowledge findings and
+continue**. Sending that request keeps the chat paused until the provider accepts
+it; a refresh, another session, or newer findings cannot confirm an older review.
+
+Queued messages remain held after continuation. Review and retry each one
+separately if it is still needed. Without a supported continuation, the
+conversation remains stopped. See [misalignment precautions](/concepts/model-failover#misalignment-precautions)
+for runtime support and recovery limits.
 
 ## Chat message width
 

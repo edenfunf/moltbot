@@ -1,4 +1,5 @@
 import { html, nothing, svg, type TemplateResult } from "lit";
+import "./install-action.ts";
 import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import { strokeIcon } from "../../components/icons-tools.ts";
@@ -14,12 +15,14 @@ import type {
   PluginInstallRequest,
 } from "../../lib/plugins/index.ts";
 import { renderArtTile } from "./consent-dialog.ts";
+import type { PluginInstallProgress } from "./install-progress.ts";
 import {
   renderPluginCardIdentity,
   renderPluginCardSummary,
   renderPluginStateStatus,
 } from "./plugin-card.ts";
 import { renderPluginRowMessage, type PluginRowMessage } from "./plugin-row-message.ts";
+import type { PluginMutationAction } from "./plugins-page-model.ts";
 import { resolvePluginCatalogIconUrl } from "./presentation.ts";
 
 export type PluginDiscoveryIntent = "all" | "bundled" | "trending" | "official" | "featured";
@@ -43,7 +46,8 @@ export type PluginCatalogResultsProps = {
   iconUrls: Readonly<Record<string, string>>;
   pluginIconUrls: Readonly<Record<string, string>>;
   canInstall: boolean;
-  busy?: Readonly<Record<string, boolean>>;
+  busy?: Readonly<Record<string, PluginMutationAction>>;
+  installProgress?: ReadonlyMap<string, PluginInstallProgress>;
   messages?: Readonly<Record<string, PluginRowMessage>>;
   onContinueInstall?: (id: string, request: PluginInstallRequest) => void;
   entryHref: (id: string) => string;
@@ -71,6 +75,7 @@ const CATEGORY_ICONS: Readonly<Record<string, TemplateResult>> = {
   globe: icons.globe,
   "message-circle": icons.messageSquare,
   "message-square": icons.messageSquare,
+  mic: icons.mic,
   package: icons.box,
   palette: icons.palette,
   shield: icons.shield,
@@ -158,7 +163,9 @@ function renderCatalogCard(
   props: PluginCatalogResultsProps,
 ): TemplateResult {
   const installedState = plugin.local.state === "not-installed" ? null : plugin.local.state;
-  const installed = plugin.local.installed && installedState !== null;
+  const progress = props.installProgress?.get(`install:${plugin.id}`);
+  const installing = Boolean(progress && progress.finishedAt === undefined);
+  const installed = plugin.local.installed && installedState !== null && !installing;
   const busy = Boolean(props.busy?.[`install:${plugin.id}`]);
   const canInstall =
     props.canInstall &&
@@ -203,27 +210,14 @@ function renderCatalogCard(
         ${
           installed
             ? renderPluginStateStatus(installedState, "plugin-catalog-card__status")
-            : html`<button
-                type="button"
-                class="btn btn--sm plugin-catalog-card__install oc-action oc-action-secondary"
-                aria-label=${t("pluginsPage.installNamed", { name: plugin.catalog.name })}
-                aria-busy=${busy ? "true" : nothing}
-                ?disabled=${!canInstall}
-                @click=${(event: MouseEvent) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  if (canInstall) {
-                    props.onInstall(plugin.id);
-                  }
-                }}
-              >
-                ${
-                  busy
-                    ? html`<span class="btn__spinner" aria-hidden="true"></span>
-                        <span class="sr-only" role="status">${t("pluginsPage.installing")}</span>`
-                    : t("pluginsPage.install")
-                }
-              </button>`
+            : html`<openclaw-plugin-install-action
+                .buttonClass=${"btn btn--sm plugin-catalog-card__install oc-action oc-action-secondary"}
+                .label=${t("pluginsPage.installNamed", { name: plugin.catalog.name })}
+                .busy=${busy}
+                .disabled=${!canInstall}
+                .progress=${progress}
+                .onInstall=${() => props.onInstall(plugin.id)}
+              ></openclaw-plugin-install-action>`
         }
       </div>
     </div>

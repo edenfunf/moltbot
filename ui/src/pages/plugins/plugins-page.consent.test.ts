@@ -131,11 +131,15 @@ describe("PluginsPage consent", () => {
       installIdentity,
     );
     await waitForFast(() =>
-      expect(request).toHaveBeenCalledWith("plugins.install", {
-        source: "official",
-        pluginId: "calendar-runtime",
-        acknowledgeInstallPolicyWarning: true,
-      }),
+      expect(request).toHaveBeenCalledWith(
+        "plugins.install",
+        {
+          source: "official",
+          pluginId: "calendar-runtime",
+          acknowledgeInstallPolicyWarning: true,
+        },
+        expect.objectContaining({ onSent: expect.any(Function) }),
+      ),
     );
     expect(request.mock.calls.filter(([method]) => method === "plugins.inspect")).toHaveLength(0);
     expect(page.querySelector('[data-plugin-consent="install"]')).toBeNull();

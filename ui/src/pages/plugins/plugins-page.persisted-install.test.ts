@@ -135,7 +135,11 @@ it.each([
       await page.consentController.install(request, rowKey);
       await page.updateComplete;
       const actionCalls = gatewayRequest.mock.calls.slice(actionStart);
-      expect(actionCalls[0]).toEqual(["plugins.install", request]);
+      expect(actionCalls[0]).toEqual([
+        "plugins.install",
+        request,
+        { onSent: expect.any(Function) },
+      ]);
       const message = page.messages[rowKey]!;
       expect(message.text).toContain("Service could not bind its port");
       expect(message.text?.includes("Installation of calendar-runtime was saved")).toBe(saved);
@@ -164,8 +168,13 @@ it.each([
 it("blocks repeat install when saved-state reads fail, then reconciles aliases and later removal", async () => {
   let inventoryFails = true;
   let present = true;
-  const { client, request: gatewayRequest } = createClient(async (method) => {
+  const otherInstall = deferred<never>();
+  const otherRequest: PluginInstallRequest = { source: "npm", spec: "another-plugin" };
+  const { client, request: gatewayRequest } = createClient(async (method, params) => {
     if (method === "plugins.install") {
+      if (params === otherRequest) {
+        return otherInstall.promise;
+      }
       throw new GatewayRequestError({
         code: "UNAVAILABLE",
         message: "Plugin startup failed",
@@ -212,8 +221,18 @@ it("blocks repeat install when saved-state reads fail, then reconciles aliases a
   expect(gatewayRequest.mock.calls.filter(([method]) => method === "plugins.install")).toHaveLength(
     1,
   );
+  const otherIdentity = "npm:another-plugin";
+  const installingOther = page.consentController.install(otherRequest, otherIdentity);
+  await waitForFast(() => {
+    expect(page.consentController.installProgress.has(otherIdentity)).toBe(true);
+  });
+  expect(page.consentController.installProgress.get(alias)?.finishedAt).toBeTypeOf("number");
+  expect(page.consentController.installProgress.get(alias)?.canRetry).toBe(false);
   inventoryFails = false;
   await page.refreshCatalog();
+  expect(page.consentController.installProgress.has(alias)).toBe(false);
+  expect(page.consentController.installProgress.has(otherIdentity)).toBe(true);
+  expect(page.consentController.installProgress.get(otherIdentity)?.finishedAt).toBeUndefined();
   expect(page.messages[alias]).toBeUndefined();
   expect(page.messages[rowKey]?.text).toContain("Plugin startup failed");
   present = false;
@@ -222,7 +241,14 @@ it("blocks repeat install when saved-state reads fail, then reconciles aliases a
   expect(page.messages[rowKey]).toBeUndefined();
   await page.consentController.install(request, alias);
   expect(gatewayRequest.mock.calls.filter(([method]) => method === "plugins.install")).toHaveLength(
-    2,
+    3,
+  );
+  otherInstall.reject(new Error("Another registry is unavailable"));
+  await installingOther;
+  expect(page.messages[otherIdentity]?.text).toContain("Another registry is unavailable");
+  expect(page.consentController.installProgress.get(otherIdentity)?.canRetry).toBe(false);
+  expect(page.consentController.installProgress.get(otherIdentity)?.finishedAt).toBeTypeOf(
+    "number",
   );
 });
 

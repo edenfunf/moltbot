@@ -405,7 +405,7 @@ describe("renderPluginCatalogResults", () => {
     expect(uncategorized?.querySelector('[data-plugin-id="unmatched"]')).not.toBeNull();
   });
 
-  it("shows exactly one top-right status or install action and omits download counts", () => {
+  it("shows exactly one top-right status or install action and omits download counts", async () => {
     const onInstall = vi.fn();
     const installed = plugin("installed", {
       local: {
@@ -428,9 +428,30 @@ describe("renderPluginCatalogResults", () => {
     expect(installedCard?.querySelector("button")).toBeNull();
     const availableCard = container.querySelector('[data-plugin-id="available"]');
     const availableAction = availableCard?.querySelector(".plugin-catalog-card__action");
+    await availableAction?.querySelector("openclaw-plugin-install-action")?.updateComplete;
     expect(availableAction?.querySelectorAll("button")).toHaveLength(1);
     expect(container.querySelector(".plugin-download-count")).toBeNull();
     availableAction?.querySelector<HTMLButtonElement>("button")?.click();
     expect(onInstall).toHaveBeenCalledWith("available");
+  });
+
+  it("retains install progress when the catalog publishes installed status before the final response", async () => {
+    const entry = plugin("published", {
+      local: { present: true, installed: true, enabled: true, state: "enabled", action: "manage" },
+    });
+    const props = baseProps({ query: "published", result: { items: [entry] } });
+    const container = mount({
+      ...props,
+      installProgress: new Map([["install:published", { startedAt: Date.now(), activities: [] }]]),
+    });
+    const action = container.querySelector("openclaw-plugin-install-action");
+    await action?.updateComplete;
+    expect(action?.textContent).toContain("Installing");
+    expect(container.querySelector('[aria-label="Enabled"]')).toBeNull();
+    action?.querySelector("button")?.click();
+    expect(props.onInstall).not.toHaveBeenCalled();
+    render(renderPluginCatalogResults(props), container);
+    expect(container.querySelector("openclaw-plugin-install-action")).toBeNull();
+    expect(container.querySelector('[aria-label="Enabled"]')).not.toBeNull();
   });
 });

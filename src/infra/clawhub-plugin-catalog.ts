@@ -126,6 +126,7 @@ const PLUGIN_CATEGORY_ICON_KEYS = new Set([
   "globe",
   "message-circle",
   "message-square",
+  "mic",
   "package",
   "palette",
   "shield",

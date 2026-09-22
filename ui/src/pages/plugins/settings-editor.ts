@@ -71,7 +71,7 @@ export class PluginSettingsEditor extends OpenClawLightDomElement {
   @property({ attribute: false }) model?: PluginSettingsEditorModel;
   @property({ attribute: false }) permissions?: {
     fields: PluginSettingsField[];
-    details: TemplateResult | typeof nothing;
+    loading?: boolean;
   };
   @property({ attribute: false }) onAskSetting?: (field: PluginSettingsField) => void;
   @property({ attribute: false }) renderCredential?: (
@@ -182,14 +182,15 @@ export class PluginSettingsEditor extends OpenClawLightDomElement {
           .includes(query) ||
         matchesNodeSearch({ ...field, criteria: { text: query, tags: [] } }),
     );
-    const details = query ? nothing : this.permissions.details;
-    return fields.length || details !== nothing
-      ? html`${repeat(
-          fields,
-          (field) => JSON.stringify(field.path),
-          (field) => this.renderField(field),
-        )}${details}`
-      : nothing;
+    return this.permissions.loading && !query
+      ? renderSettingsLoadingSkeleton({ rows: 3, carapace: true })
+      : fields.length
+        ? html`${repeat(
+            fields,
+            (field) => JSON.stringify(field.path),
+            (field) => this.renderField(field),
+          )}`
+        : nothing;
   }
 
   private renderGroups(

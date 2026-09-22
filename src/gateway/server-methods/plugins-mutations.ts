@@ -9,6 +9,7 @@ import type {
   PluginsInstallResult,
   PluginsUninstallResult,
 } from "../../../packages/gateway-protocol/src/schema/plugins.js";
+import { withInstallActivity } from "../../infra/install-progress.js";
 import { pluginInstallRequiresLocalHost } from "../../plugins/install-source-plan.js";
 import type { PluginRuntimeApplication } from "../../plugins/lifecycle.js";
 import { ManagedPluginLifecycleError } from "../../plugins/management-lifecycle-error.js";
@@ -35,7 +36,7 @@ type PluginLifecycleResult = Partial<
 
 type PluginLifecycleOptions = Required<
   Pick<Parameters<typeof installManagedPlugin>[0], "applyRuntime" | "beforePersistentApply">
-> & { signal?: AbortSignal };
+> & { signal?: AbortSignal; logger?: import("../../plugins/install-types.js").PluginInstallLogger };
 
 function lifecycleHandler<T>(
   method: string,
@@ -47,6 +48,7 @@ function lifecycleHandler<T>(
   ) => Promise<PluginLifecycleResult>,
 ): GatewayRequestHandler {
   return async ({
+    req,
     params,
     respond,
     context,
@@ -79,8 +81,27 @@ function lifecycleHandler<T>(
         signal?.throwIfAborted();
         sessionMutationCommitGuard?.();
       };
-      captured = captureGatewayPluginRuntimeApplications(applyRuntime, beforePersistentApply);
+      const connId = client?.connId;
+      const logger: PluginLifecycleOptions["logger"] =
+        method === "plugins.install" && connId
+          ? {
+              activity: (event) =>
+                context.broadcastToConnIds(
+                  "plugins.install.progress",
+                  { ...event, requestId: req.id },
+                  new Set([connId]),
+                ),
+            }
+          : undefined;
+      // Runtime application owns preparation through cleanup; its receipt is not final install success.
+      captured = captureGatewayPluginRuntimeApplications(
+        logger
+          ? (change) => withInstallActivity(logger, "runtime", () => applyRuntime(change))
+          : applyRuntime,
+        beforePersistentApply,
+      );
       const lifecycle: PluginLifecycleOptions = {
+        ...(logger ? { logger } : {}),
         applyRuntime: captured.applyRuntime,
         beforePersistentApply,
         ...(signal ? { signal } : {}),

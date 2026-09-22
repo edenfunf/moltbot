@@ -10,6 +10,8 @@ import type {
 
 registerPluginManagementEnglish();
 
+export type PluginMutationAction = "install" | "enable" | "disable" | "uninstall";
+
 export type PluginsPageDetail = {
   catalog?: PluginDiscoveryDetailResult;
   catalogLoading?: boolean;

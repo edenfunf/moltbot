@@ -91,7 +91,7 @@ it.each([
       mutationBlockedReason: "Plugin changes require operator.admin access.",
     },
   },
-  { name: "busy plugin", props: { busy: { "plugin:workboard": true } } },
+  { name: "busy plugin", props: { busy: { "plugin:workboard": "enable" as const } } },
   {
     name: "missing setup",
     props: { result: createResult(createPlugin({ state: "needs-setup" })) },
@@ -176,10 +176,8 @@ it("gives host permissions the setting menu and preserves configured, inherited,
   timeout.dispatchEvent(new CustomEvent("wa-select", { detail: { item: { value: "reset" } } }));
   expect(onRemove).toHaveBeenCalledWith(["plugins", "entries", "workboard", "hooks", "timeoutMs"]);
   expect(container.querySelector('[data-setting="llm.allowedModels"] wa-dropdown')).not.toBeNull();
-  const summaries = container.querySelector(".plugin-editor__permission-details")!;
-  expect(summaries.querySelectorAll(".settings-section")).toHaveLength(2);
-  expect(summaries.querySelectorAll(".settings-row").length).toBeGreaterThan(0);
-  expect(summaries.querySelector("wa-dropdown")).toBeNull();
+  expect(container.textContent).not.toContain("Declared capabilities");
+  expect(container.textContent).not.toContain("Your grants");
   onPatch.mockClear();
   const readOnly = mount({ ...props, canEditConfig: false });
   await (readOnly.querySelector("openclaw-plugin-settings-editor") as typeof editor).updateComplete;

@@ -658,13 +658,16 @@ describeControlUiE2e("Control UI Plugins mocked Gateway E2E", () => {
       await availableCard.waitFor({ state: "visible" });
       const installFromCatalog = availableCard.getByRole("button", { name: /Install/iu });
       expect(await installFromCatalog.isDisabled()).toBe(true);
+      await installFromCatalog.evaluate((button: HTMLButtonElement) => button.click());
       expect(new URL(page.url()).pathname).toBe("/plugins");
       expect(await gateway.getRequests("plugins.setEnabled")).toEqual([]);
       expect(await gateway.getRequests("plugins.install")).toEqual([]);
       await page.goto(`${server.baseUrl}plugins/${matrixDiscoveryPlugin.id}`);
       const install = page.getByRole("button", { name: "Install", exact: true });
       await install.waitFor();
-      expect(await install.getAttribute("aria-disabled")).toBe("true");
+      expect(await install.isDisabled()).toBe(true);
+      await install.evaluate((button: HTMLButtonElement) => button.click());
+      await captureScreenshot(page, "read-only-install.png");
       expect(await gateway.getRequests("plugins.install")).toEqual([]);
       await page.goto(`${server.baseUrl}plugins`);
       await availableCard.getByRole("link", { name: "Local Calendar", exact: true }).click();

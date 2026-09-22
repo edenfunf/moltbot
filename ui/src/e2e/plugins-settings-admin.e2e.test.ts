@@ -444,12 +444,15 @@ suite.define(() => {
           .waitFor();
         expect(await gateway.getRequests("plugins.inspect")).toHaveLength(1);
 
-        await page.getByText("Add context to prompts", { exact: true }).waitFor();
-        await page.getByText("Read conversation context", { exact: true }).waitFor();
-        await page.getByText("workboard_list", { exact: true }).waitFor();
+        await page.getByRole("checkbox", { name: "Add context to prompts", exact: true }).waitFor();
+        await page
+          .getByRole("checkbox", { name: "Read conversation context", exact: true })
+          .waitFor();
+        expect(await page.getByText("workboard_list", { exact: true }).count()).toBe(0);
 
         await page.getByRole("link", { name: "Workboard", exact: true }).click();
         await page.getByRole("heading", { level: 1, name: "Workboard", exact: true }).waitFor();
+        await page.getByText("workboard_list", { exact: true }).waitFor();
         await page.getByText("1.2.3", { exact: true }).first().waitFor();
         if (captureUiProof) {
           await page.screenshot({
@@ -547,18 +550,30 @@ suite.define(() => {
 
         const toggle = page.getByRole("button", { name: "Disable Workboard", exact: true });
         const connections = (await gateway.getRequests("connect")).length;
+        const disabledConfig = structuredClone(config);
+        disabledConfig.plugins.entries.workboard.enabled = false;
+        await gateway.setMethodResponse("plugins.list", {
+          ...inventory,
+          plugins: inventory.plugins.map((plugin) =>
+            plugin.id === workboard.id ? { ...plugin, enabled: false, state: "disabled" } : plugin,
+          ),
+        });
+        await gateway.setMethodResponse("plugins.inspect", {
+          ...inspection,
+          plugin: { ...inspection.plugin, enabled: false },
+        });
+        await gateway.setMethodResponse("config.get", {
+          ...configMocks["config.get"],
+          config: disabledConfig,
+          raw: JSON.stringify(disabledConfig),
+          hash: "workboard-disabled",
+          appliedConfigHash: "workboard-disabled",
+        });
         await toggle.click();
         await gateway.waitForRequest("plugins.setEnabled");
 
-        await expect
-          .poll(() =>
-            page
-              .getByRole("status")
-              .filter({ hasText: "Disabled Workboard." })
-              .and(page.locator(".plugins-row-message:visible"))
-              .count(),
-          )
-          .toBe(1);
+        await page.getByRole("button", { name: "Enable Workboard", exact: true }).waitFor();
+        expect(await page.locator(".plugins-row-message.oc-banner-success").count()).toBe(0);
         expect(await gateway.getRequests("connect")).toHaveLength(connections);
 
         await page
@@ -618,7 +633,7 @@ suite.define(() => {
         expect(await gateway.getRequests("config.set")).toHaveLength(0);
         await workspace.press("Tab");
         const save = await gateway.waitForRequest("config.set");
-        expect(save.params).toMatchObject({ baseHash: "plugins-settings-e2e" });
+        expect(save.params).toMatchObject({ baseHash: "workboard-disabled" });
         const savedConfig = JSON.parse(
           String((save.params as { raw?: unknown }).raw),
         ) as typeof config;
@@ -689,13 +704,14 @@ suite.define(() => {
         await gateway.resolveDeferred("plugins.inspect");
         await expect.poll(() => permission.isVisible()).toBe(true);
         expect(await permission.isChecked()).toBe(true);
+        expect(await search.inputValue()).toBe("Allow prompt changes");
         expect(JSON.parse(String(asRecord(permissionSave.params).raw))).toEqual({
-          ...config,
+          ...disabledConfig,
           plugins: {
-            ...config.plugins,
+            ...disabledConfig.plugins,
             entries: {
               workboard: {
-                enabled: true,
+                enabled: false,
                 hooks: { allowPromptInjection: true },
                 config: { refreshMinutes: 15, notifications: false },
               },
@@ -721,6 +737,10 @@ suite.define(() => {
           plugins: inventory.plugins.filter((plugin) => plugin.id !== workboard.id),
         });
         await gateway.resolveDeferred("plugins.uninstall");
+        await waitForControlUiRoute(page, {
+          pathname: "/settings/plugins",
+          routeId: "plugin-settings",
+        });
         await page.locator('[data-plugin-id="calendar"]').waitFor();
         expect(await page.locator('[data-plugin-id="workboard"]').count()).toBe(0);
         expect(await page.locator(".plugins-row-message").count()).toBe(0);

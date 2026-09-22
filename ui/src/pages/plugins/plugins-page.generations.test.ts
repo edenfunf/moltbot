@@ -2,8 +2,10 @@
 
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
+import { GatewayRequestError } from "../../api/gateway.ts";
+import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { i18n } from "../../i18n/index.ts";
-import type { PluginDiscoveryDetailResult } from "../../lib/plugins/index.ts";
+import type { PluginDiscoveryDetailResult, PluginMutationResult } from "../../lib/plugins/index.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
   createClient,
@@ -19,7 +21,11 @@ import {
   resetPluginsPageTestState,
 } from "./plugins-page.test-support.ts";
 
-beforeEach(() => i18n.setLocale("en"));
+vi.mock("../../components/confirm-dialog.ts", () => ({ showConfirmDialog: vi.fn() }));
+beforeEach(async () => {
+  await i18n.setLocale("en");
+  vi.mocked(showConfirmDialog).mockReset().mockResolvedValue(true);
+});
 afterEach(resetPluginsPageTestState);
 
 it.each([false, true])(
@@ -284,6 +290,141 @@ it("keeps known catalog content when installation switches to local inspection",
   await vi.waitFor(() => expect(page.textContent).toContain("Updated catalog guide"));
   expect(page.textContent).not.toContain("Known catalog guide");
 });
+
+it.each(["catalog", "settings", "disable", "uninstall", "failure"] as const)(
+  "keeps the pending install owner after inventory publication: %s",
+  async (surface) => {
+    const plugin = createPlugin({
+      id: "calendar-runtime",
+      catalogId: "catalog-calendar",
+      name: "Calendar Plus",
+      packageName: "community-calendar",
+      enabled: true,
+      state: "enabled",
+      removable: true,
+    });
+    const catalog = createDiscoveryDetail({ ...plugin, installed: false });
+    catalog.plugin.id = "catalog-calendar";
+    const install = deferred<PluginMutationResult>();
+    const refresh = deferred();
+    let inventoryPlugin = plugin;
+    const { client, request } = createClient(async (method) => {
+      if (method === "plugins.install") {
+        return install.promise;
+      }
+      if (method === "plugins.list") {
+        return createResult(inventoryPlugin);
+      }
+      if (method === "plugins.catalog.get") {
+        return catalog;
+      }
+      if (method === "plugins.inspect") {
+        return createInspectResult({ plugin });
+      }
+      if (method === "plugins.setEnabled" && surface === "failure") {
+        inventoryPlugin = { ...plugin, enabled: false, state: "disabled" };
+        return {
+          ok: true,
+          plugin: inventoryPlugin,
+          restartRequired: false,
+        };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    const harness = createGateway(client);
+    const { page } = await mountPage(
+      createContext(harness.gateway, () => refresh.promise),
+      createPluginsRouteData(
+        harness.gateway,
+        createResult([]),
+        createPluginsRouteLocation("/plugins/catalog-calendar"),
+      ),
+    );
+    await waitForFast(() =>
+      expect(page.querySelector("openclaw-plugin-install-action")).not.toBeNull(),
+    );
+    const installing = page.consentController.install(
+      { source: "clawhub", packageName: "community-calendar" },
+      "install:catalog-calendar",
+    );
+    try {
+      await waitForFast(() =>
+        expect(request.mock.calls.some(([method]) => method === "plugins.install")).toBe(true),
+      );
+      const original = page.querySelector("openclaw-plugin-install-action");
+      await original?.updateComplete;
+      original?.querySelector("button")?.click();
+      await original?.updateComplete;
+      expect(original?.getAttribute("open")).toBe("");
+      await page.refreshCatalog();
+      await waitForFast(() => expect(page.detail?.pluginId).toBe(plugin.id));
+      if (surface === "disable" || surface === "uninstall") {
+        if (surface === "disable") {
+          await page.consentController.mutateInstalledPlugin(plugin.id, "disable");
+        } else {
+          await page.uninstall(plugin.id, `plugin:${plugin.id}`);
+        }
+        expect(
+          request.mock.calls.filter(
+            ([method]) => method === "plugins.setEnabled" || method === "plugins.uninstall",
+          ),
+        ).toEqual([]);
+      } else {
+        if (surface === "settings") {
+          page.surface = "settings";
+          page.routeData = createPluginsRouteData(
+            harness.gateway,
+            createResult(plugin),
+            createPluginsRouteLocation(`/settings/plugins/${plugin.id}`),
+          );
+          await page.updateComplete;
+        }
+        const action = page.querySelector("openclaw-plugin-install-action");
+        await action?.updateComplete;
+        expect(action?.textContent).toContain("Installing");
+        expect(page.querySelector('[aria-label="Disable Calendar Plus"]')).toBeNull();
+        expect(page.querySelector('[aria-label="Uninstall Calendar Plus"]')).toBeNull();
+        if (surface === "catalog") {
+          expect(action).toBe(original);
+          expect(action?.getAttribute("open")).toBe("");
+        }
+      }
+      if (surface === "failure") {
+        install.reject(
+          new GatewayRequestError({
+            code: "UNAVAILABLE",
+            message: "Final installation check failed",
+            details: { persistence: { operation: "install", pluginId: plugin.id } },
+          }),
+        );
+        refresh.resolve();
+        await installing;
+        expect(page.messages[`plugin:${plugin.id}`]?.text).toContain(
+          "Final installation check failed",
+        );
+        await page.consentController.mutateInstalledPlugin(plugin.id, "disable");
+        expect(request).toHaveBeenCalledWith("plugins.setEnabled", {
+          pluginId: plugin.id,
+          enabled: false,
+        });
+      } else {
+        install.resolve({ ok: true, plugin, restartRequired: false });
+      }
+      await waitForFast(() =>
+        expect(
+          page.querySelector(
+            `[aria-label="${surface === "failure" ? "Enable" : "Disable"} Calendar Plus"]`,
+          ),
+        ).not.toBeNull(),
+      );
+      expect(page.querySelector("openclaw-plugin-install-action")).toBeNull();
+    } finally {
+      install.resolve({ ok: true, plugin, restartRequired: false });
+      refresh.resolve();
+      await installing;
+    }
+  },
+);
 
 it.each([false, true])(
   "retains same-plugin inspection while refresh settles (failed: %s)",

@@ -17,13 +17,10 @@ import { formatUiExternalText } from "../../lib/format-error.ts";
 import { shouldHandleNavigationClick } from "../../lib/navigation-click.ts";
 import type { PluginDiscoveryDetailResult, PluginsInspectResult } from "../../lib/plugins/index.ts";
 import { renderPluginReadme } from "./catalog-detail.ts";
-import {
-  renderArtTile,
-  renderPluginDeclaredCapabilities,
-  renderPluginGrants,
-} from "./consent-dialog.ts";
+import { renderArtTile } from "./consent-dialog.ts";
 import { renderPluginDetailShell } from "./detail-shell.ts";
 import type { InstalledPluginDetailTab } from "./detail-tabs.ts";
+import type { PluginInstallProgress } from "./install-progress.ts";
 import {
   renderPluginCapabilitySection,
   renderPluginMetadata,
@@ -37,6 +34,7 @@ import {
   type PluginRowMessage,
 } from "./plugin-row-message.ts";
 import { matchesPluginQuery } from "./plugin-state-presentation.ts";
+import type { PluginMutationAction } from "./plugins-page-model.ts";
 import {
   flattenPluginSettingsFields,
   type PluginSettingsEditor,
@@ -54,7 +52,7 @@ type SharedProps = Omit<
 > & {
   loading: boolean;
   error: string | null;
-  busy: Readonly<Record<string, boolean>>;
+  busy: Readonly<Record<string, PluginMutationAction>>;
   messages: Readonly<Record<string, PluginRowMessage>>;
   iconUrls: Readonly<Record<string, string>>;
   canMutate: boolean;
@@ -80,6 +78,7 @@ export type DetailProps = SharedProps &
   PluginSettingsEditorModel & {
     renderCredential?: PluginSettingsEditor["renderCredential"];
     onAskPlugin?: () => void;
+    installProgress?: PluginInstallProgress;
     onAskSetting?: (field: PluginSettingsField) => void;
     skillsSection?: TemplateResult;
     tools?: PluginToolPreview[];
@@ -294,7 +293,7 @@ export function renderPluginSettingsInventory(props: InventoryProps): TemplateRe
 
 function permissionSettings(props: DetailProps): PluginSettingsEditor["permissions"] {
   if (!props.inspection) {
-    return { fields: [], details: renderSettingsLoadingSkeleton({ rows: 3, carapace: true }) };
+    return { fields: [], loading: true };
   }
   const fields =
     props.hostControlsSchema && props.configValue
@@ -328,13 +327,7 @@ function permissionSettings(props: DetailProps): PluginSettingsEditor["permissio
     field.help = t(`pluginsPage.${labelKey}Description`);
     field.effectiveValue = props.inspection.grants.hooks[key].effective;
   }
-  return {
-    fields,
-    details: html`<div class="plugin-editor__permission-details">
-      ${renderPluginDeclaredCapabilities(props.inspection.declared)}
-      ${renderPluginGrants(props.inspection.grants, props.inspection.plugin.origin)}
-    </div>`,
-  };
+  return { fields };
 }
 
 export function renderPluginSettingsDetail(props: DetailProps): TemplateResult {
@@ -422,14 +415,21 @@ export function renderPluginSettingsDetail(props: DetailProps): TemplateResult {
           : undefined,
       ),
       identity: renderPluginPublisher(catalog, props.inspection?.overview?.publisherName),
-      titleAction: html`${renderPluginAskAction(props.onAskPlugin)}${renderPluginLifecycle(
-        {
-          ...props,
-          settingsHref: props.settingsHref ?? "#configuration",
-          onSettings: () => props.onTabChange("configuration"),
-        },
-        plugin,
-      )}`,
+      titleAction: props.installProgress
+        ? html`<openclaw-plugin-install-action
+              .buttonClass=${"btn oc-action plugin-catalog-detail__install"}
+              .primary=${true}
+              .progress=${props.installProgress}
+            ></openclaw-plugin-install-action
+            >${renderPluginAskAction(props.onAskPlugin, false)}`
+        : renderPluginLifecycle(
+            {
+              ...props,
+              settingsHref: props.settingsHref ?? "#configuration",
+              onSettings: () => props.onTabChange("configuration"),
+            },
+            plugin,
+          ),
       sidebar:
         catalog || plugin.version || props.inspection?.overview || props.catalogLoading
           ? renderPluginMetadata(

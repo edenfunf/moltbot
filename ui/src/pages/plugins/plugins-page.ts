@@ -44,6 +44,7 @@ import {
   installRequestForDiscoveryDetail,
   mergePluginCatalogItem,
   pluginMutationBlockedReason,
+  type PluginMutationAction,
   type PluginsPageCatalogDetail,
   type PluginsPageDetail,
 } from "./plugins-page-model.ts";
@@ -63,7 +64,7 @@ class PluginsPage extends OpenClawLightDomElement {
   @state() private error: string | null = null;
   @state() private query = "";
   @state() private settingsTab: PluginSettingsTab = "installed";
-  @state() private busy: Record<string, boolean> = {};
+  @state() private busy: Record<string, PluginMutationAction> = {};
   @state() private messages: Record<string, PluginRowMessage> = {};
   @state() private detail: PluginsPageDetail | null = null;
   @state() private iconUrls: Record<string, string> = {};
@@ -214,6 +215,14 @@ class PluginsPage extends OpenClawLightDomElement {
       document.querySelector(".shell-nav[aria-modal='true']") ||
       (event.target instanceof Element && event.target.closest("wa-dropdown[open]"))
     ) {
+      return;
+    }
+    const progress = this.querySelector<HTMLElementTagNameMap["openclaw-plugin-install-action"]>(
+      "openclaw-plugin-install-action[open]",
+    );
+    if (progress) {
+      progress.dismiss();
+      event.stopPropagation();
       return;
     }
     if (this.consentController.consent) {
@@ -431,10 +440,10 @@ class PluginsPage extends OpenClawLightDomElement {
     return this.accessBlockedReason(runtimeConfig.canSet, runtimeConfig.state.connected) === null;
   }
 
-  private setBusy(key: string, value: boolean) {
+  private setBusy(key: string, value: PluginMutationAction | null) {
     const next = { ...this.busy };
     if (value) {
-      next[key] = true;
+      next[key] = value;
     } else {
       delete next[key];
     }
@@ -555,7 +564,7 @@ class PluginsPage extends OpenClawLightDomElement {
       return;
     }
     const generation = ++this.installRequestGeneration;
-    this.setBusy(key, true);
+    this.setBusy(key, "install");
     try {
       const result =
         this.catalogDetail?.result?.plugin.id === id
@@ -565,7 +574,7 @@ class PluginsPage extends OpenClawLightDomElement {
         return;
       }
       const request = installRequestForDiscoveryDetail(result);
-      this.setBusy(key, false);
+      this.setBusy(key, null);
       if (request) {
         await this.consentController.install(request, key);
       } else {
@@ -580,7 +589,7 @@ class PluginsPage extends OpenClawLightDomElement {
       }
     } finally {
       if (this.gateway.isCurrent(scope)) {
-        this.setBusy(key, false);
+        this.setBusy(key, null);
       }
     }
   }
@@ -599,7 +608,7 @@ class PluginsPage extends OpenClawLightDomElement {
       rowKey,
       (client) => uninstallPlugin(client, pluginId),
       async (result, refreshError, client, _isCurrent, isLatest) => {
-        // Removal hides its row, so keep the operation outcome on the page.
+        // Removal hides its row; any remaining warning belongs to the page.
         if (isLatest()) {
           this.pageNotice = pluginMutationWarnings(result, refreshError);
           const routePluginId = this.activeRoutePluginId;
@@ -612,7 +621,7 @@ class PluginsPage extends OpenClawLightDomElement {
         }
         await this.refreshCatalog(client);
       },
-      { confirm: () => confirmPluginUninstall(name) },
+      { action: "uninstall", confirm: () => confirmPluginUninstall(name) },
     );
   }
 

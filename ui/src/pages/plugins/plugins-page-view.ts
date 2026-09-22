@@ -18,12 +18,17 @@ import { renderPluginConsentDialog } from "./consent-dialog.ts";
 import type { InstalledPluginDetailTab } from "./detail-tabs.ts";
 import type { PluginDiscoveryController } from "./plugin-discovery-controller.ts";
 import type { PluginHelpController } from "./plugin-help-controller.ts";
-import { renderPluginRowMessage, type PluginRowMessage } from "./plugin-row-message.ts";
+import {
+  pluginRowKey,
+  renderPluginRowMessage,
+  type PluginRowMessage,
+} from "./plugin-row-message.ts";
 import type { PluginsConsentController } from "./plugins-consent-controller.ts";
 import { renderPluginsHubHeader } from "./plugins-hub-header.ts";
 import { PLUGINS_HUB_PANEL_ID, type PluginsHubTab } from "./plugins-hub.ts";
 import {
   installRequestForDiscoveryDetail,
+  type PluginMutationAction,
   type PluginsPageCatalogDetail,
   type PluginsPageDetail,
 } from "./plugins-page-model.ts";
@@ -81,7 +86,7 @@ export type PluginsPageViewModel = {
   error: string | null;
   query: string;
   settingsTab: PluginSettingsTab;
-  busy: Record<string, boolean>;
+  busy: Record<string, PluginMutationAction>;
   messages: Record<string, PluginRowMessage>;
   detail: PluginsPageDetail | null;
   iconUrls: Record<string, string>;
@@ -119,6 +124,9 @@ export function renderPluginsPage(model: PluginsPageViewModel) {
         )
       : undefined;
   const detailPluginId = detail?.pluginId ?? null;
+  const activeCatalogInstall = catalogDetail
+    ? consentController.getActiveInstall(`install:${catalogDetail.id}`)
+    : undefined;
   const settingsParentRoute =
     new URLSearchParams(model.routeData?.location.search ?? "").get("from") === "plugins"
       ? "plugins"
@@ -166,6 +174,7 @@ export function renderPluginsPage(model: PluginsPageViewModel) {
     return renderPluginSettingsDetail({
       ...settingsShared,
       pluginId,
+      installProgress: consentController.getActiveInstall(pluginRowKey(pluginId)),
       inspection: detail?.inspection ?? null,
       catalog: detail?.catalog,
       inspectionError: detail?.error ?? null,
@@ -231,7 +240,7 @@ export function renderPluginsPage(model: PluginsPageViewModel) {
               aria-labelledby="plugins-tab-plugins"
               >${
                 catalogDetail
-                  ? detailPluginId
+                  ? detailPluginId && !activeCatalogInstall
                     ? renderInstalled(detailPluginId)
                     : renderPluginCatalogDetail({
                         onAskPlugin,
@@ -252,6 +261,9 @@ export function renderPluginsPage(model: PluginsPageViewModel) {
                         installBlockedReason: model.mutationBlockedReason,
                         onInstall: () => actions.installCatalogEntry(catalogDetail.id),
                         busy: Boolean(model.busy[`install:${catalogDetail.id}`]),
+                        installProgress: consentController.installProgress.get(
+                          `install:${catalogDetail.id}`,
+                        ),
                         message: model.messages[`install:${catalogDetail.id}`],
                         onContinueInstall: (request) =>
                           void consentController.install(request, `install:${catalogDetail.id}`),
@@ -277,6 +289,7 @@ export function renderPluginsPage(model: PluginsPageViewModel) {
                         iconUrls: model.catalogIconUrls,
                         pluginIconUrls: model.iconUrls,
                         canInstall: model.canMutate,
+                        installProgress: consentController.installProgress,
                         entryHref: (id) => pathForPluginCatalogEntry(id, context.basePath),
                         onIntentChange: (intent) => discovery.selectIntent(intent),
                         onCategoryChange: (category) => discovery.selectCategory(category),

@@ -44,10 +44,13 @@ function pluginRepository(
 export function renderPluginPublisher(
   result: PluginDiscoveryDetailResult | undefined,
   localName?: string,
-): TemplateResult {
+): TemplateResult | typeof nothing {
   const author = result?.detail.author;
   const handle = author?.handle ?? result?.plugin.catalog.author;
   const name = author?.displayName ?? localName;
+  if (!name && !handle) {
+    return nothing;
+  }
   return html`<div class="plugin-catalog-detail__publisher">
     <span class="plugin-catalog-detail__publisher-name">
       ${name ? html`<strong>${name}</strong>` : renderPluginAuthor(handle, { linked: true })}

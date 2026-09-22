@@ -714,10 +714,14 @@ describe("PluginsPage routing", () => {
       );
       betaRead.resolve(beta!);
       await vi.waitFor(() =>
-        expect(request).toHaveBeenCalledWith("plugins.install", {
-          source: "clawhub",
-          packageName: "beta",
-        }),
+        expect(request).toHaveBeenCalledWith(
+          "plugins.install",
+          {
+            source: "clawhub",
+            packageName: "beta",
+          },
+          expect.objectContaining({ onSent: expect.any(Function) }),
+        ),
       );
       alphaRead.resolve(alpha!);
       await alphaRead.promise;

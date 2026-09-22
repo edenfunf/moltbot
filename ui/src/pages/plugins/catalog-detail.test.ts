@@ -1,8 +1,10 @@
 import { render } from "lit";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginDiscoveryDetailResult } from "../../lib/plugins/index.ts";
 import { renderPluginCatalogDetail } from "./catalog-detail.ts";
 import { createDiscoveryDetail } from "./plugins-page.test-support.ts";
+
+afterEach(() => document.body.replaceChildren());
 
 describe("catalog README", () => {
   it("keeps long README tails and wires fenced-code controls", () => {
@@ -115,11 +117,11 @@ describe("renderPluginCatalogDetail", () => {
 it.each([
   { installed: false, canInstall: true, busy: false, primary: "Install" },
   { installed: false, canInstall: false, busy: false, primary: "Install" },
-  { installed: false, canInstall: true, busy: true, primary: "Installing…" },
+  { installed: false, canInstall: true, busy: true, primary: "Installing" },
   { installed: true, canInstall: false, busy: false, primary: "Ask OpenClaw" },
 ])(
   "prioritizes $primary with installed=$installed, canInstall=$canInstall, busy=$busy",
-  ({ installed, canInstall, busy, primary }) => {
+  async ({ installed, canInstall, busy, primary }) => {
     const result = createDiscoveryDetail();
     result.plugin.local.installed = installed;
     result.plugin.local.action = installed ? "manage" : "install";
@@ -143,6 +145,8 @@ it.each([
       }),
       container,
     );
+    document.body.append(container);
+    await container.querySelector("openclaw-plugin-install-action")?.updateComplete;
     const actions = container.querySelector(".plugin-catalog-detail__actions")!;
     const primaryButton = actions.querySelector<HTMLButtonElement>("button.primary")!;
     expect(primaryButton.textContent?.trim()).toBe(primary);

@@ -5,6 +5,7 @@ import type { PluginDiscoveryEntry } from "../../lib/plugins/index.ts";
 import { renderPluginCatalogResults, type PluginCatalogResultsProps } from "./catalog-results.ts";
 import { renderArtTile } from "./consent-dialog.ts";
 import { renderPluginDetailShell } from "./detail-shell.ts";
+import type { PluginInstallProgress } from "./install-progress.ts";
 import baseStyles from "../../styles/base.css?inline";
 import componentStyles from "../../styles/components.css?inline";
 import pluginStyles from "../../styles/plugins.css?inline";
@@ -74,9 +75,17 @@ it.each([263, 362])(
       onLoadMore: vi.fn(),
       onRetry: vi.fn(),
     };
+    const progress = {
+      startedAt: Date.now(),
+      activities: [{ activityId: "dependencies", stage: "dependencies", status: "started" }],
+    } satisfies PluginInstallProgress;
     for (const busy of [false, true]) {
       render(
-        renderPluginCatalogResults({ ...props, busy: { "install:long-title": busy } }),
+        renderPluginCatalogResults({
+          ...props,
+          busy: busy ? { "install:long-title": "install" } : {},
+          installProgress: busy ? new Map([["install:long-title", progress]]) : undefined,
+        }),
         container,
       );
       const grid = container.querySelector<HTMLElement>(".plugin-catalog-grid")!;
@@ -95,7 +104,7 @@ it.each([263, 362])(
         );
       }
       expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth);
-      expect(action.disabled).toBe(busy);
+      expect(action.disabled).toBe(false);
       if (busy) {
         const spinner = action.querySelector<HTMLElement>(".btn__spinner");
         expect(spinner).not.toBeNull();
@@ -103,6 +112,12 @@ it.each([263, 362])(
         expect(action.getAttribute("aria-busy")).toBe("true");
       }
       action.click();
+      if (busy) {
+        await expect.poll(() => action.getAttribute("aria-expanded")).toBe("true");
+        expect(card.querySelector('[role="status"]')?.textContent).toContain(
+          "Installing plugin dependencies",
+        );
+      }
     }
     expect(onInstall).toHaveBeenCalledOnce();
   },

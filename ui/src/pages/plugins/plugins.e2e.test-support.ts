@@ -1,6 +1,12 @@
 // Control UI tests cover plugin catalog browsing and lifecycle mutations.
 import path from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type BrowserContextOptions,
+  type Page,
+} from "playwright";
 import { describe } from "vitest";
 import type { PluginsSearchResult } from "../../../../packages/gateway-protocol/src/schema/plugins.ts";
 import { PROTOCOL_VERSION } from "../../../../packages/gateway-protocol/src/version.js";
@@ -537,11 +543,15 @@ async function captureScreenshot(
   });
 }
 
-async function newContext(viewport = desktopViewport): Promise<BrowserContext> {
+async function newContext(
+  viewport = desktopViewport,
+  options: Pick<BrowserContextOptions, "hasTouch" | "recordVideo"> = {},
+): Promise<BrowserContext> {
   return browser.newContext({
     locale: "en-US",
     serviceWorkers: "block",
     viewport,
+    ...options,
   });
 }
 

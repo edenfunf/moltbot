@@ -1,10 +1,11 @@
 // Line tests cover which admitted messages a later quote can resolve.
-import type { webhook } from "@line/bot-sdk";
+import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { setLineRuntime } from "./runtime.js";
 import type { LineAccountConfig } from "./types.js";
+import { createTestMessageEvent } from "./webhook-spool.test-support.js";
 
-type MessageEvent = webhook.MessageEvent;
 type LineWebhookContext = Parameters<typeof import("./bot-handlers.js").handleLineWebhookEvents>[1];
 
 const { buildLineMessageContextMock, downloadLineMediaMock } = vi.hoisted(() => ({
@@ -31,23 +32,6 @@ vi.mock("./bot-message-context.js", async (importOriginal) => ({
 
 let handleLineWebhookEvents: typeof import("./bot-handlers.js").handleLineWebhookEvents;
 let resolveLineQuotedMessage: typeof import("./quoted-messages.js").resolveLineQuotedMessage;
-
-function messageEvent(params: {
-  message: MessageEvent["message"];
-  source: MessageEvent["source"];
-  webhookEventId: string;
-}): MessageEvent {
-  return {
-    type: "message",
-    message: params.message,
-    replyToken: "reply-token",
-    timestamp: Date.now(),
-    source: params.source,
-    mode: "active",
-    webhookEventId: params.webhookEventId,
-    deliveryContext: { isRedelivery: false },
-  };
-}
 
 function createContext(params: {
   processMessage: LineWebhookContext["processMessage"];
@@ -85,6 +69,7 @@ describe("LINE quotable admitted messages", () => {
   });
 
   beforeEach(() => {
+    setLineRuntime(createPluginRuntimeMock());
     buildLineMessageContextMock.mockReset();
     buildLineMessageContextMock.mockImplementation(async () => ({
       ctxPayload: { From: "line:group:group-1" },
@@ -125,7 +110,7 @@ describe("LINE quotable admitted messages", () => {
     },
   ])("hands $name to the context as the gate that was applied", async ({ line, account }) => {
     const processMessage = vi.fn();
-    const event = messageEvent({
+    const event = createTestMessageEvent({
       message: { id: `m-gate-${line.groupPolicy}`, type: "text", text: "hi", quoteToken: "q-gate" },
       source: { type: "group", groupId: "group-1", userId: "user-3" },
       webhookEventId: `evt-gate-${line.groupPolicy}`,
@@ -163,7 +148,7 @@ describe("LINE quotable admitted messages", () => {
     const groupHistories = new Map<string, HistoryEntry[]>();
     const messageId = mentioned ? "m-dispatched-quotable" : "m-ambient-quotable";
     const text = mentioned ? "@Bot staging is on 10.0.0.5" : "staging is on 10.0.0.5";
-    const event = messageEvent({
+    const event = createTestMessageEvent({
       message: {
         id: messageId,
         type: "text",
@@ -209,7 +194,7 @@ describe("LINE quotable admitted messages", () => {
       const processMessage = vi.fn();
       const groupHistories = new Map<string, HistoryEntry[]>();
       const messageId = `m-window-${historyLimit}`;
-      const event = messageEvent({
+      const event = createTestMessageEvent({
         message: {
           id: messageId,
           type: "text",
@@ -239,7 +224,7 @@ describe("LINE quotable admitted messages", () => {
 
   it("makes a sticker quotable as the description the agent was given", async () => {
     const processMessage = vi.fn();
-    const event = messageEvent({
+    const event = createTestMessageEvent({
       message: {
         id: "m-sticker-quotable",
         type: "sticker",
@@ -276,7 +261,7 @@ describe("LINE quotable admitted messages", () => {
     }));
     const processMessage = vi.fn();
     const imagePart = (messageId: string, index: number) =>
-      messageEvent({
+      createTestMessageEvent({
         message: {
           id: messageId,
           type: "image",

@@ -40,7 +40,7 @@ export function renderPluginDetailShell(props: {
   backLabel: string;
   onBack: () => void;
   titleAction?: TemplateResult;
-  identity: TemplateResult;
+  identity: TemplateResult | typeof nothing;
   icon?: TemplateResult;
   readme?: TemplateResult;
   sidebar?: TemplateResult;

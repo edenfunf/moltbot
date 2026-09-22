@@ -18,6 +18,42 @@ const enPluginManagement = {
     pluginHelpValue: "Current value: {value}",
   },
   pluginsPage: {
+    installProgress: {
+      title: "Installation progress",
+      stopped: "Installation stopped",
+      failed: "Install failed",
+      failure: "Installation failed",
+      resolve: {
+        started: "Resolving package",
+        completed: "Package resolved",
+        failed: "Package resolution failed",
+      },
+      download: {
+        started: "Downloading plugin",
+        completed: "Plugin downloaded",
+        failed: "Plugin download failed",
+      },
+      extract: {
+        started: "Extracting archive",
+        completed: "Archive extracted",
+        failed: "Archive extraction failed",
+      },
+      files: {
+        started: "Preparing plugin files",
+        completed: "Plugin files prepared",
+        failed: "Plugin file preparation failed",
+      },
+      dependencies: {
+        started: "Installing plugin dependencies",
+        completed: "Plugin dependencies installed",
+        failed: "Dependency installation failed",
+      },
+      runtime: {
+        started: "Applying plugin to Gateway",
+        completed: "Plugin applied to Gateway",
+        failed: "Plugin could not be applied to Gateway",
+      },
+    },
     editor: {
       title: "{name} settings",
       search: "Search settings",
@@ -224,7 +260,6 @@ const enPluginManagement = {
     removeConfirmMessage:
       "This removes the plugin package and all of its entries. Active work using this plugin finishes before removal.",
     cancel: "Cancel",
-    removedSuccess: "Removed {name}.",
     reload: "Reload",
     installSaved: "Installation of {name} was saved. {error}",
     installSavedNotApplied:
@@ -252,14 +287,12 @@ const enPluginManagement = {
     bundlePlugin: "Bundle plugin",
     unavailable: "Unavailable",
     install: "Install",
-    installing: "Installing…",
+    installing: "Installing",
     installNamed: "Install {name}",
     connectToChange: "Connect to the gateway to change plugins.",
     adminRequired: "Plugin changes require operator.admin access.",
     changesDisabled: "This gateway does not allow plugin changes.",
     configRefreshFailed: "Could not refresh Control UI configuration: {error}",
-    enabledSuccess: "Enabled {name}.",
-    disabledSuccess: "Disabled {name}.",
     continueInstall: "Continue installation",
     installAvailabilityChanged:
       "Plugin availability changed. Refresh the catalog to see its current state.",

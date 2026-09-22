@@ -110,16 +110,22 @@ describe("PluginsPage lifecycle confirmation", () => {
       );
       page.querySelector<HTMLButtonElement>(".plugin-catalog-detail__install")!.click();
       await waitForFast(() =>
-        expect(request).toHaveBeenCalledWith("plugins.install", {
-          source: "clawhub",
-          packageName: "calendar",
-        }),
+        expect(request).toHaveBeenCalledWith(
+          "plugins.install",
+          {
+            source: "clawhub",
+            packageName: "calendar",
+          },
+          expect.objectContaining({ onSent: expect.any(Function) }),
+        ),
       );
       expect(showConfirmDialog).not.toHaveBeenCalled();
       expect(page.querySelector("openclaw-modal-dialog")).toBeNull();
       expect(
         page.querySelector<HTMLButtonElement>(".plugin-catalog-detail__install")?.disabled,
-      ).toBe(true);
+      ).toBe(false);
+      page.querySelector<HTMLButtonElement>(".plugin-catalog-detail__install")!.click();
+      expect(request.mock.calls.filter(([method]) => method === "plugins.install")).toHaveLength(1);
       installing.resolve({ ok: true, plugin: committed, restartRequired: false, warnings });
       await waitForFast(() =>
         expect(page.querySelector('[aria-label="Enable Calendar"]')).not.toBeNull(),

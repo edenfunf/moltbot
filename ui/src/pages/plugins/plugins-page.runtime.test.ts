@@ -108,6 +108,11 @@ it.each(["before", "after", "during refresh"] as const)(
         }),
       );
       await page.updateComplete;
+      expect(button!.getAttribute("aria-busy")).toBe("true");
+      expect(button!.querySelector(".btn__spinner")).not.toBeNull();
+      expect(page.querySelectorAll(".plugin-catalog-detail__actions .btn__spinner")).toHaveLength(
+        1,
+      );
       button!.click();
       catalog = { ...catalog, generation: 7, plugins: [receipt.plugin] };
       if (ordering === "before") {
@@ -121,18 +126,15 @@ it.each(["before", "after", "during refresh"] as const)(
         await waitForFast(() => expect(page.result?.generation).toBe(7));
         mutationConfig.resolve(configSnapshot);
       }
-      await waitForFast(() =>
-        expect(page.messages["plugin:workboard"]?.text).toBe("Enabled Workboard."),
-      );
+      await waitForFast(() => expect(page.busy["plugin:workboard"]).toBeUndefined());
       if (ordering === "after") {
         publish();
       }
       await waitForFast(() => expect(page.result?.generation).toBe(7));
       expect(page.result?.plugins[0]?.enabled).toBe(true);
-      expect(page.messages["plugin:workboard"]).toEqual({
-        kind: "success",
-        text: "Enabled Workboard.",
-      });
+      expect(page.messages["plugin:workboard"]).toBeUndefined();
+      expect(page.querySelector(".plugin-catalog-detail__actions .btn__spinner")).toBeNull();
+      expect(page.querySelector(".plugins-row-message--success")).toBeNull();
       expect(request.mock.calls.filter(([method]) => method === "plugins.setEnabled")).toHaveLength(
         1,
       );

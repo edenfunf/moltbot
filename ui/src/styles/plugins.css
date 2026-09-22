@@ -718,8 +718,6 @@ h3.settings-row__title {
   gap: var(--space-3);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
-  background: var(--ok-subtle);
-  color: var(--ok);
   font-size: var(--control-ui-text-xs);
   line-height: 1.45;
   white-space: pre-wrap;
@@ -1063,6 +1061,14 @@ h3.settings-row__title {
   padding: 4px 10px;
   font-size: var(--control-ui-text-sm);
 }
+.settings-page.oc-app-surface .plugin-catalog-detail__actions .btn.oc-action {
+  height: var(--settings-control-height);
+}
+.settings-page.oc-app-surface .plugin-catalog-detail__actions .btn.oc-action-icon {
+  width: var(--settings-control-height);
+  min-width: var(--settings-control-height);
+  padding: 0;
+}
 .plugin-catalog-detail__actions svg {
   width: 16px;
   height: 16px;
@@ -1255,7 +1261,17 @@ h3.settings-row__title {
   border-bottom: 1px solid var(--border);
   font-size: var(--control-ui-text-lg);
 }
+.plugin-capabilities h2 {
+  margin-bottom: 0;
+}
 .plugin-capabilities h2 > span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  padding-inline: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
   color: var(--muted);
   font-size: var(--control-ui-text-sm);
   font-weight: 400;

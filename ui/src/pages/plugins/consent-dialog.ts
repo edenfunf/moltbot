@@ -139,7 +139,7 @@ function renderCapabilityRows(surface: Partial<PluginDeclaredSurface>, widened =
   });
 }
 
-export function renderPluginDeclaredCapabilities(declared: PluginDeclaredSurface): TemplateResult {
+function renderPluginDeclaredCapabilities(declared: PluginDeclaredSurface): TemplateResult {
   const rows = renderCapabilityRows(declared);
   return renderSettingsSection(
     {
@@ -212,7 +212,7 @@ function modelOverrideSummary(
   return values.filter(Boolean).join(" · ") || t("pluginConsent.noOverrides");
 }
 
-export function renderPluginGrants(grants: PluginOperatorGrants, origin?: string): TemplateResult {
+function renderPluginGrants(grants: PluginOperatorGrants, origin?: string): TemplateResult {
   const conversation = grants.hooks.allowConversationAccess;
   return renderSettingsSection(
     {

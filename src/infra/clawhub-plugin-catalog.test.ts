@@ -285,6 +285,7 @@ describe("ClawHub plugin catalog client", () => {
 
   it.each([
     ["agent-runtimes", "bot"],
+    ["voice", "mic"],
     ["integrations", "plug"],
     ["developer-tools", "code-xml"],
     ["infrastructure", "server"],

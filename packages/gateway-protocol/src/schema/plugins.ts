@@ -19,6 +19,13 @@ import {
 import { NonEmptyString } from "./primitives.js";
 
 export {
+  PluginInstallActivitySchema,
+  PluginsInstallProgressEventSchema,
+  type PluginInstallActivity,
+  type PluginsInstallProgressEvent,
+} from "./plugin-install-progress.js";
+
+export {
   PluginDecisionProviderStatusSchema,
   PluginDeclaredSurfaceSchema,
   PluginHookGrantSchema,

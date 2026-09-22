@@ -133,10 +133,6 @@ openclaw-plugin-settings-editor {
 .plugin-editor__control .cfg-block {
   margin: 0;
 }
-.plugin-editor__permission-details {
-  border-top: 1px solid var(--border);
-  padding: 20px;
-}
 .plugin-editor__control .settings-subrows {
   margin: 0;
   padding: 0;
@@ -237,9 +233,6 @@ openclaw-plugin-settings-editor {
 .plugin-editor__nav a:focus-visible {
   color: var(--text);
   background: var(--bg-hover);
-}
-.plugin-editor__control input[type="number"] {
-  text-align: right;
 }
 .plugin-editor__control .settings-segmented {
   margin-left: auto;

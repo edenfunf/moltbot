@@ -6,11 +6,13 @@ import {
   readCapabilityConsentErrorDetails,
   type CapabilityConsentErrorDetails,
 } from "../../../packages/gateway-protocol/src/capability-consent-error-details.js";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import { buildPluginCapabilityConsentReview } from "../../plugins/capability-summary.js";
 import {
   PluginInstallPersistedError,
   PluginRuntimeApplicationError,
   type PluginLifecycleRuntimeApply,
+  type PluginRuntimeApplication,
 } from "../../plugins/lifecycle.js";
 import { ManagedPluginLifecycleError } from "../../plugins/management-lifecycle-error.js";
 import type { installManagedPlugin } from "../../plugins/management-mutations.js";
@@ -107,6 +109,96 @@ describe("plugin management Gateway mutation handlers", () => {
       mock.mockReset();
     }
   });
+
+  it.each(["completed", "failed"] as const)(
+    "targets installer and runtime activity to the initiating request (%s)",
+    async (status) => {
+      const broadcastToConnIds = vi.fn();
+      const respond = vi.fn();
+      const applying = createDeferred<PluginRuntimeApplication>();
+      const enteredRuntime = createDeferred();
+      const activity = {
+        activityId: "dependency-install",
+        stage: "dependencies",
+        status: "completed",
+      } as const;
+      managementMocks.install.mockImplementation(
+        async (params: Parameters<typeof installManagedPlugin>[0]) => {
+          params.logger?.activity?.(activity);
+          return {
+            plugin: workboard,
+            application: await params.applyRuntime!({
+              config: {},
+              pluginIds: [workboard.id],
+              reason: "install",
+            }),
+          };
+        },
+      );
+      const pending = pluginMutationHandlers["plugins.install"]!({
+        req: { type: "req", id: "install-one", method: "plugins.install" },
+        params: { source: "npm", spec: "workboard" },
+        client: {
+          connId: "owner-connection",
+          connect: { role: "operator", scopes: ["operator.admin"] },
+        } as never,
+        context: {
+          applyPluginLifecycleChange: () => {
+            enteredRuntime.resolve();
+            return applying.promise;
+          },
+          broadcastToConnIds,
+        } as never,
+        isWebchatConnect: () => false,
+        respond,
+      });
+      try {
+        await enteredRuntime.promise;
+        expect(broadcastToConnIds).toHaveBeenNthCalledWith(
+          1,
+          "plugins.install.progress",
+          { ...activity, requestId: "install-one" },
+          new Set(["owner-connection"]),
+        );
+        expect(broadcastToConnIds).toHaveBeenNthCalledWith(
+          2,
+          "plugins.install.progress",
+          {
+            activityId: expect.any(String),
+            stage: "runtime",
+            status: "started",
+            requestId: "install-one",
+          },
+          new Set(["owner-connection"]),
+        );
+        expect(respond).not.toHaveBeenCalled();
+        expect(broadcastToConnIds).toHaveBeenCalledTimes(2);
+        if (status === "completed") {
+          applying.resolve(application);
+        } else {
+          applying.reject(
+            new PluginRuntimeApplicationError("Service startup failed", {
+              ...application,
+              phase: "activate",
+              committed: false,
+            }),
+          );
+        }
+        await pending;
+        expect(broadcastToConnIds).toHaveBeenNthCalledWith(
+          3,
+          "plugins.install.progress",
+          { ...broadcastToConnIds.mock.calls[1]![1], status },
+          new Set(["owner-connection"]),
+        );
+        expect(broadcastToConnIds).toHaveBeenCalledTimes(3);
+        expect(respond.mock.calls[0]?.[0]).toBe(status === "completed");
+      } finally {
+        applying.resolve(application);
+        await pending;
+      }
+    },
+  );
 
   it.each([
     { source: "local", path: "/tmp/demo.tgz" },
@@ -429,7 +521,7 @@ describe("plugin management Gateway mutation handlers", () => {
       application,
       plugin: { ...workboard, enabled: true, state: "enabled" },
       changedPaths: ["plugins.entries.workboard.enabled"],
-      warnings: ['Exclusive slot "memory" switched to "workboard".'],
+      warnings: ['Disabled other "memory" slot plugins: memory-core.'],
     });
 
     const result = await callHandler("plugins.setEnabled", {
@@ -446,7 +538,7 @@ describe("plugin management Gateway mutation handlers", () => {
     expect(result.response).toMatchObject({
       ok: true,
       restartRequired: false,
-      warnings: ['Exclusive slot "memory" switched to "workboard".'],
+      warnings: ['Disabled other "memory" slot plugins: memory-core.'],
     });
   });
 
