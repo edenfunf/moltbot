@@ -18,19 +18,11 @@ function gatewayCodeOf(err: Error): string | null {
   return readErrorCode(Reflect.get(err, "gatewayCode"));
 }
 
-function readApprovalErrorDetailsCode(value: unknown): string | null {
+function readApprovalErrorDetail(value: unknown, key: "code" | "reason"): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  return readErrorCode(Reflect.get(value, "code"));
-}
-
-function readApprovalErrorDetailsReason(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const reason = (value as { reason?: unknown }).reason;
-  return typeof reason === "string" ? (normalizeOptionalString(reason) ?? null) : null;
+  return readErrorCode(Reflect.get(value, key));
 }
 
 /**
@@ -51,7 +43,9 @@ export function isApprovalAuthorityError(err: unknown): boolean {
   if (!(err instanceof Error) || gatewayCodeOf(err) !== FORBIDDEN) {
     return false;
   }
-  return readApprovalErrorDetailsCode(Reflect.get(err, "details")) === APPROVAL_AUTHORITY_REQUIRED;
+  return (
+    readApprovalErrorDetail(Reflect.get(err, "details"), "code") === APPROVAL_AUTHORITY_REQUIRED
+  );
 }
 
 /** What an operator can do about a decision their channel would not let them make. */
@@ -72,7 +66,7 @@ export function isApprovalNotFoundError(err: unknown): boolean {
   if (gatewayCode === APPROVAL_NOT_FOUND) {
     return true;
   }
-  const detailsReason = readApprovalErrorDetailsReason((err as { details?: unknown }).details);
+  const detailsReason = readApprovalErrorDetail(Reflect.get(err, "details"), "reason");
   if (gatewayCode === INVALID_REQUEST && detailsReason === APPROVAL_NOT_FOUND) {
     return true;
   }
@@ -87,8 +81,8 @@ export function isApprovalStaleError(err: unknown): boolean {
   if (!(err instanceof Error)) {
     return false;
   }
-  const gatewayCode = readErrorCode((err as { gatewayCode?: unknown }).gatewayCode);
-  const detailsReason = readApprovalErrorDetailsReason((err as { details?: unknown }).details);
+  const gatewayCode = gatewayCodeOf(err);
+  const detailsReason = readApprovalErrorDetail(Reflect.get(err, "details"), "reason");
   return (
     (gatewayCode === INVALID_REQUEST && detailsReason === APPROVAL_ALREADY_RESOLVED) ||
     /approval already resolved/i.test(err.message)

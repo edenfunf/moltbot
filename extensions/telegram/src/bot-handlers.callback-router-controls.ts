@@ -318,7 +318,8 @@ export function createTelegramCallbackApprovalRuntime(params: {
     }
 
     if (refused) {
-      // Still waiting for someone the account lists; keep the buttons.
+      // The account does not let this reviewer decide. That says nothing about whether the
+      // approval is still open, so leave the buttons for a reviewer the account lists.
       logVerbose(`telegram: approval callback refused ${approvalCallback.approvalId}`);
       return;
     }
