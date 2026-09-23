@@ -2,11 +2,12 @@ import type { DatabaseSync } from "node:sqlite";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { sql } from "kysely";
 import {
+  getNodeSqliteKysely,
   prepareSqliteQuerySync,
   prepareSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
-import { FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS } from "../../state/openclaw-agent-db-additive-columns.js";
-import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import { SESSION_OWNER_COLUMN_DEFINITIONS } from "../../state/openclaw-agent-db-additive-columns.js";
+import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import type { SessionActor } from "./session-entry-provenance.js";
 import type { SessionEntry } from "./types.js";
 
@@ -19,7 +20,7 @@ export type SqliteSessionOwnerRow = {
 };
 
 function prepareOwnerColumnReads(database: DatabaseSync) {
-  const db = getSessionKysely(database);
+  const db = getNodeSqliteKysely<OpenClawAgentKyselyDatabase>(database);
   return {
     schemaVersion: prepareSqliteQueryTakeFirstSync(database, () =>
       db
@@ -47,13 +48,10 @@ function actorFromColumns(type: unknown, id: unknown): SessionActor | undefined 
   return normalizedType && normalizedId ? { type: normalizedType, id: normalizedId } : undefined;
 }
 
-export function projectSqliteSessionOwner(
-  entry: SessionEntry,
-  row: SqliteSessionOwnerRow,
-): SessionEntry {
+export function readSqliteSessionOwner(row: SqliteSessionOwnerRow): SessionEntry["owner"] {
   const actor = actorFromColumns(row.owner_actor_type, row.owner_actor_id);
   if (!actor) {
-    return entry;
+    return undefined;
   }
   const assignedBy = actorFromColumns(row.owner_assigned_by_type, row.owner_assigned_by_id);
   const assignedAt =
@@ -61,13 +59,18 @@ export function projectSqliteSessionOwner(
       ? row.owner_assigned_at
       : undefined;
   return {
-    ...entry,
-    owner: {
-      actor,
-      ...(assignedBy ? { assignedBy } : {}),
-      ...(assignedAt !== undefined ? { assignedAt } : {}),
-    },
+    actor,
+    ...(assignedBy ? { assignedBy } : {}),
+    ...(assignedAt !== undefined ? { assignedAt } : {}),
   };
+}
+
+export function projectSqliteSessionOwner(
+  entry: SessionEntry,
+  row: SqliteSessionOwnerRow,
+): SessionEntry {
+  const owner = readSqliteSessionOwner(row);
+  return owner ? { ...entry, owner } : entry;
 }
 
 export function hasSqliteSessionOwnerColumns(database: DatabaseSync): boolean {
@@ -86,7 +89,7 @@ export function hasSqliteSessionOwnerColumns(database: DatabaseSync): boolean {
   const columns = new Set(
     tableInfoRows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
   );
-  const available = FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS.every(({ columnName }) =>
+  const available = SESSION_OWNER_COLUMN_DEFINITIONS.every(({ columnName }) =>
     columns.has(columnName),
   );
   reads.availability = { available, schemaVersion };

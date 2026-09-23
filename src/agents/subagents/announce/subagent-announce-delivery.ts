@@ -31,8 +31,6 @@ import { admitCorrelatedSubagentSessionDelivery } from "../completion/subagent-c
 import { getSubagentDepthFromSessionStore } from "../spawn/subagent-depth.js";
 import { maybeSteerSubagentAnnounce } from "./subagent-announce-active-wake.js";
 import {
-  hasAnnounceSendEvidence,
-  isWriterClaimReboundAnnounceError,
   resolveSubagentAnnounceTimeoutMs,
   runAnnounceDeliveryWithRetry,
   sourceOwnerChangedResult,
@@ -42,8 +40,6 @@ import {
   getSubagentAnnounceRuntimeConfig,
   loadRequesterSessionEntry,
   loadSessionEntryByKey,
-  setSubagentAnnounceDeliveryDepsForTest,
-  type SubagentAnnounceDeliveryDeps,
 } from "./subagent-announce-delivery.runtime.js";
 import { sendSubagentAnnounceDirectly } from "./subagent-announce-direct-delivery.js";
 import {
@@ -138,19 +134,20 @@ function createCompletionUserTurnTranscriptRecorderFactory(params: {
 export async function deliverSubagentAnnouncement(params: {
   requesterSessionKey: string;
   requesterAgentId?: string;
-  announceId?: string;
+  requesterRunTimeoutSeconds?: number;
   triggerMessage: string;
   steerMessage: string;
   internalEvents?: AgentInternalEvent[];
-  summaryLine?: string;
   requesterSessionOrigin?: DeliveryContext;
-  requesterOrigin?: DeliveryContext;
   completionDirectOrigin?: DeliveryContext;
   directOrigin?: DeliveryContext;
   sourceSessionKey?: string;
   sourceRunId?: string;
   sourceTool?: string;
+  settleWakeSourceSessionKeys?: readonly string[];
   isSourceSessionEffectsAllowed?: () => boolean;
+  /** Additional source guard released by the accepting Gateway or injection owner. */
+  isSourceSessionAdmissionAllowed?: () => boolean;
   isCompletionOwnedByRequesterYield?: () => boolean;
   targetRequesterSessionKey: string;
   requesterIsSubagent: boolean;
@@ -161,11 +158,13 @@ export async function deliverSubagentAnnouncement(params: {
   requireVisibleReply?: boolean;
   bestEffortDeliver?: boolean;
   directIdempotencyKey: string;
-  onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
+  onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void | Promise<void>;
   signal?: AbortSignal;
   resolveGatewayContext?: import("../../../gateway/server-methods/types.js").GatewayContextResolver;
 }): Promise<SubagentAnnounceDeliveryResult> {
-  const sourceOwnerChanged = () => params.isSourceSessionEffectsAllowed?.() === false;
+  const sourceOwnerChanged = () =>
+    params.isSourceSessionEffectsAllowed?.() === false ||
+    params.isSourceSessionAdmissionAllowed?.() === false;
   if (sourceOwnerChanged()) {
     return sourceOwnerChangedResult();
   }
@@ -293,7 +292,7 @@ export async function deliverSubagentAnnouncement(params: {
     ? createCompletionUserTurnTranscriptRecorderFactory(params)
     : undefined;
 
-  return await runSubagentAnnounceDispatch({
+  const delivery = await runSubagentAnnounceDispatch({
     expectsCompletionMessage: params.expectsCompletionMessage,
     requireDirectDelivery: params.requireDirectDelivery || params.completionTarget === "parent",
     signal: params.signal,
@@ -309,6 +308,7 @@ export async function deliverSubagentAnnouncement(params: {
         createUserTurnTranscriptRecorder: createCompletionUserTurnTranscriptRecorder,
         signal: params.signal,
         isSourceSessionEffectsAllowed: params.isSourceSessionEffectsAllowed,
+        isSourceSessionAdmissionAllowed: params.isSourceSessionAdmissionAllowed,
       });
     },
     direct: async () => {
@@ -318,6 +318,7 @@ export async function deliverSubagentAnnouncement(params: {
       return await sendSubagentAnnounceDirectly({
         requesterSessionKey: params.requesterSessionKey,
         requesterAgentId: params.requesterAgentId,
+        requesterRunTimeoutSeconds: params.requesterRunTimeoutSeconds,
         targetRequesterSessionKey: params.targetRequesterSessionKey,
         triggerMessage: params.triggerMessage,
         internalEvents: params.internalEvents,
@@ -327,7 +328,9 @@ export async function deliverSubagentAnnouncement(params: {
         requesterSessionOrigin: params.requesterSessionOrigin,
         sourceSessionKey: params.sourceSessionKey,
         sourceTool: params.sourceTool,
+        settleWakeSourceSessionKeys: params.settleWakeSourceSessionKeys,
         isSourceSessionEffectsAllowed: params.isSourceSessionEffectsAllowed,
+        isSourceSessionAdmissionAllowed: params.isSourceSessionAdmissionAllowed,
         isCompletionOwnedByRequesterYield: params.isCompletionOwnedByRequesterYield,
         requesterIsSubagent: params.requesterIsSubagent,
         completionTarget: params.completionTarget,
@@ -342,17 +345,20 @@ export async function deliverSubagentAnnouncement(params: {
       });
     },
   });
-}
-
-const testing = {
-  setDepsForTest(overrides?: Partial<SubagentAnnounceDeliveryDeps>) {
-    setSubagentAnnounceDeliveryDepsForTest(overrides);
-  },
-  hasAnnounceSendEvidence,
-  isWriterClaimReboundAnnounceError,
-};
-if (process.env.VITEST || process.env.NODE_ENV === "test") {
-  (globalThis as Record<PropertyKey, unknown>)[
-    Symbol.for("openclaw.subagentAnnounceDeliveryTestApi")
-  ] = testing;
+  const failedDirect =
+    params.expectsCompletionMessage || params.sourceTool === "subagent_announce"
+      ? delivery.phases?.find(
+          (phase) =>
+            phase.phase === "direct-primary" && !phase.delivered && phase.path === "direct",
+        )
+      : undefined;
+  if (failedDirect?.error) {
+    const source = params.sourceRunId
+      ? `run ${params.sourceRunId}`
+      : `session ${params.sourceSessionKey ?? params.requesterSessionKey}`;
+    defaultRuntime.log(
+      `[warn] Subagent completion direct announce failed for ${source}: ${failedDirect.error}${delivery.delivered ? "; recovered via steered" : ""}`,
+    );
+  }
+  return delivery;
 }

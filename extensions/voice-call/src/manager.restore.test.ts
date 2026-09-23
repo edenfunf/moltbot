@@ -1,4 +1,4 @@
-import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { OpenAsyncKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
   resetPluginStateStoreForTests,
@@ -22,7 +22,7 @@ import { setVoiceCallStateRuntime, type VoiceCallStateRuntime } from "./runtime-
 function installStateRuntime(): VoiceCallStateRuntime["state"] {
   const state: VoiceCallStateRuntime["state"] = {
     resolveStateDir: () => "",
-    openKeyedStore: (options: OpenKeyedStoreOptions) =>
+    openKeyedStore: (options: OpenAsyncKeyedStoreOptions) =>
       createPluginStateKeyedStoreForTests("voice-call", options),
     openChannelIngressQueue: (() => {
       throw new Error("openChannelIngressQueue is not used by voice-call restore tests");
@@ -374,11 +374,14 @@ describe("CallManager verification on restore", () => {
     });
 
     expect(manager.getActiveCalls()).toHaveLength(1);
+    const endCall = vi.spyOn(manager, "endCall");
     await vi.advanceTimersByTimeAsync(9_000);
     expect(manager.getActiveCalls()).toHaveLength(1);
     expect(provider.hangupCalls).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(1_100);
+    expect(endCall).toHaveBeenCalledOnce();
+    await requireRecord(endCall.mock.results[0], "timeout completion").value;
     expect(manager.getActiveCalls()).toHaveLength(0);
     const hangupCall = requireSingleHangupCall(provider);
     expect(hangupCall.reason).toBe("timeout");
@@ -413,7 +416,10 @@ describe("CallManager verification on restore", () => {
       expect(manager.getActiveCalls()).toHaveLength(1);
       expect(provider.hangupCalls).toHaveLength(0);
 
+      const endCall = vi.spyOn(manager, "endCall");
       await vi.advanceTimersByTimeAsync(1_100);
+      expect(endCall).toHaveBeenCalledOnce();
+      await requireRecord(endCall.mock.results[0], "timeout completion").value;
       expect(manager.getActiveCalls()).toHaveLength(0);
       const hangupCall = requireSingleHangupCall(provider);
       expect(hangupCall.reason).toBe("timeout");
