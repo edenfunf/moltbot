@@ -101,7 +101,7 @@ describe("resolveFirstApprovalKind", () => {
   const walk = (answers: Record<string, Error | "ok">) =>
     resolveFirstApprovalKind(Object.keys(answers), async (kind) => {
       const answer = answers[kind];
-      if (answer !== "ok") {
+      if (answer instanceof Error) {
         throw answer;
       }
       return kind;
