@@ -13,9 +13,14 @@ import {
 } from "../../lib/chat/outbox-store.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { visibleSessionMatches } from "../../lib/sessions/index.ts";
+import { resolveUiConversationIdentity } from "../../lib/sessions/session-key.ts";
 import { generateUUID } from "../../lib/uuid.ts";
 import { loadChatBranches } from "./chat-history-branches.ts";
-import { getChatHistoryLoadState, isInitialChatHistoryUnavailable } from "./chat-history-state.ts";
+import {
+  getChatHistoryLoadState,
+  isExpiredIncognitoSession,
+  isInitialChatHistoryUnavailable,
+} from "./chat-history-state.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import type {
   QueuedChatSendOptions,
@@ -24,6 +29,7 @@ import type {
 } from "./chat-outbox-drain.ts";
 import { chatOutboxOwner } from "./chat-outbox-owner.ts";
 import { retryableGatewayDelayMs } from "./chat-outbox-retry.ts";
+import { chatProviderReviewRow, holdProviderReviewQueuedInputs } from "./chat-provider-review.ts";
 import {
   readQueuedMessageById,
   updateQueuedMessage,
@@ -226,11 +232,9 @@ export function deliveryStateWriter(
   id: string,
 ) {
   return (sendState: ChatQueueItem["sendState"], sendError?: string) =>
-    updateQueuedSendItem(host, storageMode, id, (item) => ({
-      ...item,
-      sendError,
-      sendState,
-    }));
+    updateQueuedSendItem(host, storageMode, id, (item) =>
+      item.sendState === "held" ? item : { ...item, sendError, sendState },
+    );
 }
 
 export function finishChatDeliveryAdmission(
@@ -247,11 +251,21 @@ export function finishChatDeliveryAdmission(
   if (!current) {
     return "failed";
   }
+  if (current.sendState === "held" || (current.sendState === "unconfirmed" && !current.sendRunId)) {
+    return "pending";
+  }
+  if (isExpiredIncognitoSession(host, route)) {
+    return "pending";
+  }
   if (current.workContextUnavailable) {
     const error = t("chat.messages.attachedContext.restoreFailed");
     setState("failed", error);
     surfaceChatDeliveryFailure(host, route, current.agentId, error);
     return "failed";
+  }
+  if (chatProviderReviewRow(host, route, current.agentId)?.providerReview) {
+    holdProviderReviewQueuedInputs(host, route, current.agentId);
+    return "pending";
   }
   const sendsDuringActiveRun = Boolean(current.queueMode || options?.allowActiveRunSend);
   if (
@@ -281,6 +295,7 @@ export function canSendVolatileQueueItem(
     Boolean(host.client) &&
     !host.chatLoading &&
     !isInitialChatHistoryUnavailable(host) &&
+    !isExpiredIncognitoSession(host, routingSessionKey) &&
     !isChatBusy(host) &&
     !getPendingChatPickerPatch(host, routingSessionKey, item.agentId) &&
     visibleSessionMatches(host, routingSessionKey, item.agentId) &&
@@ -314,6 +329,12 @@ export function settleQueuedChatSendFailure(
   const error = activeLeafChanged
     ? t("chat.sendErrors.activeLeafChanged")
     : formatConnectError(err);
+  // A review can hold an already-dispatched request. Its later failure cannot
+  // restore passive retry authority, even after the provider pause has cleared.
+  if (readQueuedMessageById(host, id)?.sendState === "held") {
+    recordChatSendTiming(host, prepared, "failed", prepared.sendSubmittedAtMs, { error });
+    return "pending";
+  }
   if (err instanceof GatewayPayloadLimitError) {
     if (!restoreRejectedChatDelivery(host, prepared, options)) {
       setState("failed", error);
@@ -440,10 +461,13 @@ export async function prepareQueuedChatPayload(
 ): Promise<ChatQueueItem | QueuedChatSendResult> {
   const id = queued.id;
   const connectionIsCurrent = captureChatConnectionOwner(host);
-  const ownerIsCurrent = captureOutboxPayloadOwner(host);
   const original = queued;
   const sessionKey = original.sessionKey ?? queuedSessionKey;
-  const payload = await prepareOutboxPayload(host, original);
+  const ownerIsCurrent = captureOutboxPayloadOwner(
+    host,
+    resolveUiConversationIdentity(host, sessionKey, original.agentId),
+  );
+  const payload = await prepareOutboxPayload(host, { ...original, sessionKey });
   const current = readQueuedMessageById(host, id);
   if (
     !connectionIsCurrent() ||
