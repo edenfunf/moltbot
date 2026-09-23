@@ -90,7 +90,7 @@ describe("channel custody responses", () => {
     record.requestedByClientId = "requester-client";
     record.requestedByDeviceTokenAuth = true;
     record.approvalReviewerDeviceIds = [];
-    const decision = manager.register(record, 600_000);
+    const { decision } = await manager.register(record, 600_000);
     void decision.catch(() => {});
     prepareApprovalChannelCustodyMock.mockReturnValue(custody);
 
