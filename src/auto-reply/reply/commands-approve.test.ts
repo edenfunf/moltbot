@@ -589,7 +589,9 @@ describe("handleApproveCommand", () => {
     );
 
     expect(resolveApprovalOverGatewayMock).toHaveBeenCalledTimes(2);
-    expect(result?.reply?.text).toContain("approval decision requires a listed approver");
+    expect(result?.reply?.text).toBe(
+      "❌ Failed to submit approval: That decision needs an approver listed for this channel. Ask a listed approver to decide it.",
+    );
   });
 
   it("returns the underlying not-found error for plugin-only approval routing", async () => {

@@ -411,8 +411,8 @@ describe("resolveApprovalOverGateway", () => {
     ]);
   });
 
-  // A channel that authorizes only one kind refuses the other; the walk goes on, and when the
-  // other kind is missing the reviewer is told about the refusal, not a missing approval.
+  // The Gateway refuses only a named reviewer, and a channel that authorizes one kind refuses
+  // the other; the walk goes on, and when the other kind is missing it ends with the refusal.
   it("continues the plugin fallback past a refusal and reports it over not-found", async () => {
     const cfg: OpenClawConfig = {};
     const refusal = Object.assign(new Error("approval decision requires a listed approver"), {
@@ -430,11 +430,15 @@ describe("resolveApprovalOverGateway", () => {
         approvalId: "approval-1",
         decision: "deny",
         allowPluginFallback: true,
+        channel: "telegram",
+        accountId: "ops",
+        senderId: "owner",
       }),
     ).rejects.toBe(refusal);
-    expect(hoisted.clientRequest.mock.calls.map(([method]) => method)).toEqual([
-      "exec.approval.resolve",
-      "plugin.approval.resolve",
+    const reviewer = { channel: "telegram", accountId: "ops", senderId: "owner" };
+    expect(hoisted.clientRequest.mock.calls).toEqual([
+      ["exec.approval.resolve", { id: "approval-1", decision: "deny", reviewer }],
+      ["plugin.approval.resolve", { id: "approval-1", decision: "deny", reviewer }],
     ]);
   });
 

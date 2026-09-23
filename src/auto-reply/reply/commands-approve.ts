@@ -7,6 +7,8 @@ import {
 } from "../../channels/plugins/index.js";
 import { logVerbose } from "../../globals.js";
 import {
+  APPROVAL_AUTHORITY_REQUIRED_TEXT,
+  isApprovalAuthorityError,
   isApprovalKindMismatchError,
   resolveFirstApprovalKind,
 } from "../../infra/approval-errors.js";
@@ -96,7 +98,10 @@ function buildResolvedByLabel(params: ApproveCommandParams): string {
 }
 
 function formatApprovalSubmitError(error: unknown): string {
-  return formatErrorMessage(error);
+  // Buttons already say who may decide; a typed /approve gets the same sentence.
+  return isApprovalAuthorityError(error)
+    ? APPROVAL_AUTHORITY_REQUIRED_TEXT
+    : formatErrorMessage(error);
 }
 
 type ApproveCommandBehavior =

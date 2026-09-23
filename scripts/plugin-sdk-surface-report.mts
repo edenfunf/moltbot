@@ -396,7 +396,7 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved host workspace Skill resource reader.
       // +1: approved terminal-reply classifier for A2A task completion.
       // +1: approved native workspace worker argv resolver for node adapters.
-      // +3: approval refusal classifiers (authority, kind mismatch) and the operator text.
+      // +3: approval refusal classifier, the kind walker that ranks it, and the operator text.
       4533,
       env,
     ),
@@ -553,7 +553,7 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved host workspace Skill resource reader.
       // +1: approved terminal-reply classifier for A2A task completion.
       // +1: approved native workspace worker argv resolver for node adapters.
-      // +2: approval refusal classifiers for authority and kind mismatch.
+      // +2: approval refusal classifier and the kind walker that ranks it.
       2675,
       env,
     ),
