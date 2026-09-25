@@ -29,7 +29,6 @@ import { normalizeLineMessage } from "./actions.js";
 import {
   clearLineDurableSendPlans,
   LineDurableSendPlanError,
-  LineDurableSendPlanStoreError,
   loadLineDurableSendPlans,
   recordLineDurableSendPlan,
 } from "./durable-send-plan.js";
@@ -364,30 +363,16 @@ async function sendPlannedLinePushes(
       }),
       messages: messages.map(normalizeLineMessage),
     }));
-    pushes = keyedPushes;
-    try {
-      pushes = (
-        await recordLineDurableSendPlan({
-          queueId: deliveryQueueId,
-          partIndex: deliveryPartIndex,
-          partCount: deliveryPartCount,
-          to,
-          ...(accountId ? { accountId } : {}),
-          pushes: keyedPushes,
-        })
-      ).pushes;
-    } catch (error) {
-      if (!(error instanceof LineDurableSendPlanStoreError)) {
-        throw error;
-      }
-      // The plan is crash evidence, not the delivery: a store that will not take it
-      // costs this part its recovery, never its reply, as a best-effort queue row does in
-      // core (`deliver-queue.ts`). The derived keys still let LINE deduplicate a retry;
-      // only a crash before the send settles is left unresolved instead of replayed.
-      getLineRuntime()
-        .logging.getChildLogger({ plugin: "line", feature: "durable-send" })
-        .warn(`${error.message} (delivery ${deliveryQueueId}); sending it without crash recovery`);
-    }
+    pushes = (
+      await recordLineDurableSendPlan({
+        queueId: deliveryQueueId,
+        partIndex: deliveryPartIndex,
+        partCount: deliveryPartCount,
+        to,
+        ...(accountId ? { accountId } : {}),
+        pushes: keyedPushes,
+      })
+    ).pushes;
   }
   return await dispatchLinePushes({
     to,

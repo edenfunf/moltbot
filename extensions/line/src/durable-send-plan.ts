@@ -1,7 +1,6 @@
 // Line plugin module implements durable send plan persistence behavior.
 import { createHash } from "node:crypto";
 import type { messagingApi } from "@line/bot-sdk";
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { z } from "zod";
 import { getLineRuntime } from "./runtime.js";
 import { LINE_RETRY_KEY_TTL_MS } from "./send-retry.js";
@@ -58,21 +57,6 @@ export class LineDurableSendPlanError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "LineDurableSendPlanError";
-  }
-}
-
-/**
- * The plan store refused a part's record and a read confirmed the part has none, so the
- * part can go out without one without contradicting an earlier plan. A record that exists
- * but does not describe this send, or a store that cannot be read, is a different error.
- */
-export class LineDurableSendPlanStoreError extends Error {
-  constructor(partIndex: number | undefined, cause: unknown) {
-    super(
-      `LINE durable send plan part ${partIndex} could not be stored: ${formatErrorMessage(cause)}`,
-      { cause },
-    );
-    this.name = "LineDurableSendPlanStoreError";
   }
 }
 
@@ -218,24 +202,11 @@ export async function recordLineDurableSendPlan(params: {
   // Claim atomically rather than checking then writing: two attempts at the same part
   // can race, and a lost race that still wrote would put re-rendered content behind
   // keys the winner already used.
-  let refusal: { error: unknown } | undefined;
-  try {
-    if (
-      await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})
-    ) {
-      return recordable;
-    }
-  } catch (error) {
-    refusal = { error };
+  if (await store.registerIfAbsent(key, new TextEncoder().encode(JSON.stringify(recordable)), {})) {
+    return recordable;
   }
-  // A refused write does not say this part has no record: the store checks the entry size
-  // before it looks for the key. Only this read can say so, and only then may the part go
-  // out without one. A read that fails stays the store's own, retryable, error.
   const existing = await store.lookup(key);
   if (!existing) {
-    if (refusal) {
-      throw new LineDurableSendPlanStoreError(params.partIndex, refusal.error);
-    }
     // The record was there a moment ago and is not now. Nothing has been sent yet, so
     // refuse rather than send under keys whose record no longer exists.
     throw new LineDurableSendPlanError(
