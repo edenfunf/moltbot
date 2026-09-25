@@ -63,34 +63,44 @@ describe("native approval controls", () => {
       result: "second",
     });
   });
-  // A refusal is not a missing approval: it answers who may decide, so the control survives
-  // it, while a missing approval retires the control.
-  it.each([
-    ["FORBIDDEN", "APPROVAL_AUTHORITY_REQUIRED", "not-authorized", true],
-    ["INVALID_REQUEST", "APPROVAL_NOT_FOUND", "not-found", false],
-  ] as const)(
-    "a %s/%s resolve settles as %s and keeps the control: %s",
-    async (gatewayCode, reason, kind, retained) => {
-      type Binding = { token: string; expiresAtMs: number; approvalId: string };
-      const registry = createNativeApprovalControlRegistry<Binding>({
-        releaseClaimOnLookupExpiry: false,
-      });
-      const binding = { token: "tok", expiresAtMs: Date.now() + 60_000, approvalId: "a1" };
-      registry.register(binding);
-      const failure = Object.assign(new Error("refused"), {
-        gatewayCode,
-        details: gatewayCode === "FORBIDDEN" ? { code: reason } : { reason },
-      });
-      await expect(
-        registry.settle(binding.token, async () => {
-          throw failure;
-        }),
-      ).resolves.toMatchObject({ kind });
-      expect(Boolean(registry.get(binding.token))).toBe(retained);
-      // The listed approver's next tap on the same control must be able to decide it.
-      await expect(registry.settle(binding.token, async () => "decided")).resolves.toMatchObject({
-        kind: retained ? "settled" : "missing",
-      });
-    },
-  );
+  // A refusal is not a missing approval: it answers who may decide, so the control survives it
+  // and the error reaches the channel, while a missing approval retires the control.
+  type SettleBinding = { token: string; expiresAtMs: number; approvalId: string };
+  const failingSettle = (details: Record<string, string>, gatewayCode: string) => {
+    const registry = createNativeApprovalControlRegistry<SettleBinding>({
+      releaseClaimOnLookupExpiry: false,
+    });
+    const binding = { token: "tok", expiresAtMs: Date.now() + 60_000, approvalId: "a1" };
+    registry.register(binding);
+    const failure = Object.assign(new Error("resolve failed"), { gatewayCode, details });
+    const settled = registry.settle(binding.token, async () => {
+      throw failure;
+    });
+    return { registry, binding, failure, settled };
+  };
+
+  it("keeps a refused control and leaves it for the listed approver's next tap", async () => {
+    const { registry, binding, failure, settled } = failingSettle(
+      { code: "APPROVAL_AUTHORITY_REQUIRED" },
+      "FORBIDDEN",
+    );
+    await expect(settled).rejects.toBe(failure);
+    expect(registry.get(binding.token)).toBeTruthy();
+    await expect(registry.settle(binding.token, async () => "decided")).resolves.toMatchObject({
+      kind: "settled",
+      result: "decided",
+    });
+  });
+
+  it("retires a control whose approval is gone", async () => {
+    const { registry, binding, settled } = failingSettle(
+      { reason: "APPROVAL_NOT_FOUND" },
+      "INVALID_REQUEST",
+    );
+    await expect(settled).resolves.toMatchObject({ kind: "not-found" });
+    expect(registry.get(binding.token)).toBeNull();
+    await expect(registry.settle(binding.token, async () => "decided")).resolves.toMatchObject({
+      kind: "missing",
+    });
+  });
 });

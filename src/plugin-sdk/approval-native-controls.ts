@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { isApprovalAuthorityError, isApprovalNotFoundError } from "../infra/approval-errors.js";
+import { isApprovalNotFoundError } from "../infra/approval-errors.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 
 type NativeApprovalBinding = { token: string; expiresAtMs: number };
@@ -68,7 +68,6 @@ export function createNativeApprovalControlRegistry<
       | { kind: "missing" }
       | { kind: "in-flight" }
       | { kind: "not-found"; binding: TBinding }
-      | { kind: "not-authorized"; binding: TBinding }
       | { kind: "settled"; binding: TBinding; result: TResult }
     > {
       const binding = get(token);
@@ -88,12 +87,8 @@ export function createNativeApprovalControlRegistry<
           complete(token);
           return { kind: "not-found", binding };
         }
-        if (isApprovalAuthorityError(error)) {
-          // A refusal answers who may decide, not whether the approval is still open, so it
-          // gives no reason to retire the control; the claim is released for the next tap.
-          resolving.delete(token);
-          return { kind: "not-authorized", binding };
-        }
+        // Anything else, a refusal included, says nothing about whether the approval is still
+        // open: keep the control and release the claim for the next tap.
         resolving.delete(token);
         throw error;
       }

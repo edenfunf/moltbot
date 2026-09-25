@@ -383,6 +383,46 @@ describe("maybeHandleGoogleChatApprovalCardClick", () => {
     expect(resolveApprovalOverGateway).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a refused card usable and answers the refusal as a refusal", async () => {
+    registerGoogleChatApprovalCardBinding({
+      token: "token-refused",
+      accountId: "default",
+      approvalId: "approval-refused",
+      approvalKind: "exec",
+      decision: "allow-once",
+      allowedDecisions: ["allow-once", "deny"],
+      spaceName: "spaces/AAA",
+      messageName: "spaces/AAA/messages/msg-1",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    resolveApprovalOverGateway.mockRejectedValueOnce(
+      Object.assign(new Error("approval decision requires a listed approver"), {
+        gatewayCode: "FORBIDDEN",
+        details: { code: "APPROVAL_AUTHORITY_REQUIRED" },
+      }),
+    );
+    const target = createTarget();
+    const event = createCardClickEvent("token-refused");
+
+    await expect(maybeHandleGoogleChatApprovalCardClick({ event, target })).resolves.toBe(true);
+    expect(googleChatApprovalControls.get("token-refused")).not.toBeNull();
+    expect(target.runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("approval refused: the account does not list this approver"),
+    );
+
+    resolveApprovalOverGateway.mockResolvedValueOnce(
+      createApprovalResolveResult({
+        applied: true,
+        approvalId: "approval-refused",
+        approvalKind: "exec",
+        decision: "allow-once",
+      }),
+    );
+    await expect(maybeHandleGoogleChatApprovalCardClick({ event, target })).resolves.toBe(true);
+    expect(resolveApprovalOverGateway).toHaveBeenCalledTimes(2);
+    expect(updateGoogleChatMessage).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       label: "direct approval-not-found gateway code",
