@@ -2,11 +2,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { resolvePluginProviders } from "openclaw/plugin-sdk/provider-catalog-runtime";
+import {
+  augmentModelCatalogWithProviderPlugins,
+  resolvePluginProviders,
+} from "openclaw/plugin-sdk/provider-catalog-runtime";
 import { afterAll, afterEach, expect, it, vi } from "vitest";
 import {
+  createScheduledGatewayRunner,
   fenceScheduledGatewayContextResolver,
-  runWithScheduledGatewayContext,
 } from "../gateway/scheduled-run-gateway-context.js";
 import {
   LegacyPluginSdkResourceHost,
@@ -48,6 +51,69 @@ it("resolves an empty provider scope through the shipped SDK export", () => {
 });
 
 let sequence = 0;
+
+it.each([
+  ["omitted", undefined, ["family", "other"], ["sdk-family", "sdk-other"]],
+  ["empty", [], [], []],
+  ["normalized id", [" SDK-FAMILY "], ["family"], ["sdk-family"]],
+  ["alias", [" SDK-ALIAS "], ["family"], ["sdk-family"]],
+  ["family hook alias", [" SDK-FAMILY-EAST "], ["family"], ["sdk-family"]],
+] as const)(
+  "shipped provider-catalog-runtime augmentModelCatalogWithProviderPlugins selects %s hooks without filtering their rows",
+  async (_selection, providerIds, expected, expectedCalls) => {
+    const id = `sdk-catalog-selection-${sequence++}`;
+    const stateKey = `__${id}`;
+    const plugin = writePlugin({
+      id,
+      body: `module.exports = { id: ${JSON.stringify(id)}, register(api) {
+        api.registerProvider({ id: "sdk-family", label: "Family", auth: [],
+          aliases: ["sdk-alias"], hookAliases: ["sdk-family-east"],
+          augmentModelCatalog: () => {
+            globalThis[${JSON.stringify(stateKey)}].push("sdk-family");
+            return [{ provider: "foreign", id: "family", name: "Family row" }];
+          },
+        });
+        api.registerProvider({ id: "sdk-other", label: "Other", auth: [],
+          augmentModelCatalog: () => {
+            globalThis[${JSON.stringify(stateKey)}].push("sdk-other");
+            return [{ provider: "foreign", id: "other", name: "Other row" }];
+          },
+        });
+      } };`,
+    });
+    fs.writeFileSync(
+      path.join(plugin.dir, "openclaw.plugin.json"),
+      JSON.stringify({
+        id,
+        providers: ["sdk-family", "sdk-other"],
+        configSchema: { type: "object", additionalProperties: false, properties: {} },
+      }),
+    );
+    const config = {
+      plugins: { allow: [id], load: { paths: [plugin.file] }, slots: { memory: "none" } },
+    };
+    const env = {
+      HOME: plugin.dir,
+      OPENCLAW_STATE_DIR: `${plugin.dir}/state`,
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+    };
+    const calls: string[] = [];
+    Object.defineProperty(globalThis, stateKey, { configurable: true, value: calls });
+    try {
+      const rows = await augmentModelCatalogWithProviderPlugins({
+        ...(providerIds === undefined ? {} : { providerIds }),
+        config,
+        env,
+        context: { config, env, entries: [{ provider: "input", id: "seed", name: "Input seed" }] },
+      });
+      expect(calls).toEqual(expectedCalls);
+      expect(rows.map((row) => row.id)).toEqual(expected);
+      expect(rows.map((row) => row.provider)).toEqual(expected.map(() => "foreign"));
+    } finally {
+      Reflect.deleteProperty(globalThis, stateKey);
+    }
+  },
+);
 
 function nativeProviderFixture(
   disposalFailure = false,
@@ -390,18 +456,16 @@ it.each(["scheduled", "shared-scheduled"] as const)(
     bindGatewayContextResolver(second, fenceScheduledGatewayContextResolver(scheduled));
     const resolver =
       kind === "scheduled" ? scheduled : getSharedGatewayContextResolver([first, second]);
+    const runScheduled = createScheduledGatewayRunner(resolver);
     const inspection = await fixture.load();
     const resolve = () =>
       foreign.run(() =>
-        runWithScheduledGatewayContext({
-          resolveGatewayContext: resolver,
-          run: async () => {
-            const existing = getPluginRuntimeGatewayRequestScope();
-            return withLocalGatewayRequestScope({ deps: {}, getRuntimeConfig: () => ({}) }, () => {
-              expect(getPluginRuntimeGatewayRequestScope()).toBe(existing);
-              return fixture.resolve(inspection.registry, foreign);
-            });
-          },
+        runScheduled(async () => {
+          const existing = getPluginRuntimeGatewayRequestScope();
+          return withLocalGatewayRequestScope({ deps: {}, getRuntimeConfig: () => ({}) }, () => {
+            expect(getPluginRuntimeGatewayRequestScope()).toBe(existing);
+            return fixture.resolve(inspection.registry, foreign);
+          });
         }),
       );
     try {
@@ -440,15 +504,11 @@ it.each(["unknown", "mixed-composite"] as const)(
     const unknown = vi.fn(() => undefined);
     const resolver =
       kind === "unknown" ? unknown : getSharedGatewayContextResolver([first, second]);
+    const runScheduled = createScheduledGatewayRunner(resolver);
     const inspection = await fixture.load();
     try {
       await expect(
-        foreign.run(() =>
-          runWithScheduledGatewayContext({
-            resolveGatewayContext: resolver,
-            run: async () => fixture.resolve(inspection.registry, foreign),
-          }),
-        ),
+        foreign.run(() => runScheduled(async () => fixture.resolve(inspection.registry, foreign))),
       ).rejects.toThrow("Gateway SDK resource host is not bound");
       await inspection.release();
       expect(fixture.state.database?.isOpen).toBe(false);

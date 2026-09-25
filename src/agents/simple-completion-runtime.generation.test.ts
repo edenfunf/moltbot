@@ -61,7 +61,7 @@ vi.mock("./sessions/model-registry-runtime.js", () => ({
 
 import {
   prepareSimpleCompletionModel,
-  acquireSimpleCompletionModel,
+  acquireSimpleCompletionModelWithSelection,
   acquireSimpleCompletionModelForAgent,
 } from "./simple-completion-runtime.js";
 
@@ -110,6 +110,7 @@ beforeEach(() => {
     allowGatewaySubagentBinding: false,
     modelCatalog: { entries: [], routeVariants: [] },
     configuredRuntimeModels: [],
+    findConfiguredRuntimeModel: () => undefined,
     inlineProviderModels: [],
     activeProjectKeys: [],
     createStores: () => ({ authStorage, modelRegistry }),
@@ -130,6 +131,8 @@ it("keeps route rematerialization and runtime auth on the supplied generation", 
       }
       const generation = mocks.readGeneration();
       observedModelGenerations.push(generation);
+      mocks.publishedGeneration = "B";
+      await Promise.resolve();
       const configured = cfg?.models?.providers?.openai;
       return {
         model: {
@@ -155,8 +158,7 @@ it("keeps route rematerialization and runtime auth on the supplied generation", 
     mocks.publishedGeneration = "B";
     return {
       apiKey: "sk-platform",
-      profileId: "openai:platform",
-      source: "profile:openai:platform",
+      source: "models.providers.openai",
       mode: "api-key",
     };
   });
@@ -167,7 +169,11 @@ it("keeps route rematerialization and runtime auth on the supplied generation", 
 
   const result = await prepareSimpleCompletionModel({
     preparedModelRuntime,
-    cfg: {},
+    cfg: {
+      models: {
+        providers: { openai: { baseUrl: "", models: [], apiKey: "fixture-api-key" } },
+      },
+    },
     agentId: "main",
     provider: "openai",
     modelId: "gpt-5.5",
@@ -210,11 +216,10 @@ it.each([false, true])(
     });
     const resolve = createOllamaModelResolver();
     const preparing = parent.run(() =>
-      acquireSimpleCompletionModel({
+      acquireSimpleCompletionModelForAgent({
         cfg: {},
         agentId: "main",
-        provider: "ollama",
-        modelId: "fixture-model",
+        modelRef: "ollama/fixture-model",
         signal: controller.signal,
         modelResolver: async (...args) => {
           entered.resolve();
@@ -252,7 +257,7 @@ it.each([false, true])(
   },
 );
 
-it("acquires direct completion runtime for the exact selected model", async () => {
+it("acquires completion runtime for the exact caller-selected model", async () => {
   const modelResolver = createOllamaModelResolver();
   mocks.getApiKeyForModel.mockResolvedValue({
     apiKey: "ollama-local",
@@ -260,15 +265,15 @@ it("acquires direct completion runtime for the exact selected model", async () =
     mode: "api-key",
   });
 
-  const acquired = await acquireSimpleCompletionModel({
-    cfg: {},
-    agentId: "main",
-    provider: "ollama",
-    modelId: "qwen3:0.6b",
-    agentDir: "/tmp/openclaw-agent",
-    agentRuntimeId: "openclaw",
-    modelResolver,
-  });
+  const acquired = await acquireSimpleCompletionModelWithSelection(
+    {
+      cfg: {},
+      agentId: "main",
+      agentDir: "/tmp/openclaw-agent",
+      modelResolver,
+    },
+    () => ({ selection: { provider: "ollama", modelId: "qwen3:0.6b" } }),
+  );
 
   if ("error" in acquired) {
     throw new Error(acquired.error);
@@ -280,7 +285,6 @@ it("acquires direct completion runtime for the exact selected model", async () =
           {
             provider: "ollama",
             modelId: "qwen3:0.6b",
-            runtime: "openclaw",
             agentId: "main",
           },
         ],

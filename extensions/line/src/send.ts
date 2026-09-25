@@ -1,4 +1,3 @@
-// Line plugin module implements send behavior.
 import { HTTPFetchError, messagingApi } from "@line/bot-sdk";
 import lineBotSdkPackage from "@line/bot-sdk/package.json" with { type: "json" };
 import { recordChannelActivity } from "openclaw/plugin-sdk/channel-activity-runtime";
@@ -285,8 +284,13 @@ async function postLineProviderMessages(
   retryKey?: string,
   authorize?: LineSendOpts["authorize"],
 ): Promise<LineProviderResponse> {
-  if (authorize && !(await authorize())) {
-    throw new Error("LINE send authorization denied");
+  const requestBody = JSON.stringify(request);
+  if (authorize) {
+    const authorized = authorize();
+    // A synchronous handoff check and the request must share one execution turn.
+    if (!(typeof authorized === "boolean" ? authorized : await authorized)) {
+      throw new Error("LINE send authorization denied");
+    }
   }
   const response = await fetchWithRuntimeDispatcherOrMockedGlobal(
     `https://api.line.me/v2/bot/message/${operation}`,
@@ -298,7 +302,7 @@ async function postLineProviderMessages(
         "User-Agent": `@line/bot-sdk/${lineBotSdkPackage.version}`,
         ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
       },
-      body: JSON.stringify(request),
+      body: requestBody,
     },
   );
 
@@ -455,11 +459,11 @@ async function pushLineMessages(
   // Rides the per-request revalidation so the unquoted retry inside one attempt is
   // held to the window as well as each attempt after a backoff.
   const { retryKeyExpiresAtMs } = opts;
-  const revalidate = async () => {
+  const revalidate = () => {
     if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
       throw new LineRetryKeyExpiredError();
     }
-    return opts.authorize ? await opts.authorize() : true;
+    return opts.authorize ? opts.authorize() : true;
   };
   const response = await runLinePushWithRetries(async () => {
     try {

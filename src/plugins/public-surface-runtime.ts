@@ -1,9 +1,9 @@
 // Loads plugin public runtime surfaces through documented entrypoints.
 import path from "node:path";
-import { isPathInside } from "../infra/path-guards.js";
 import { resolveUserPath } from "../utils.js";
 import { areBundledPluginsDisabled, resolveBundledPluginsDir } from "./bundled-dir.js";
 import { isTypeScriptPackageEntry } from "./package-entrypoints.js";
+import { isPathInside } from "./path-safety.js";
 import { pluginCacheExistsSync, pluginCacheRealpathSync } from "./plugin-cache-files.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { resolvePluginRuntimeRecord } from "./runtime-context.js";
@@ -115,16 +115,28 @@ export function resolvePluginRootPublicSurfacePath(params: {
     artifactBasename,
     ...sourceArtifacts.filter((artifact) => !isTypeScriptPackageEntry(artifact)),
   ];
-  return (
-    [
-      ...(entryDir ? entryArtifacts.map((artifact) => path.join(entryDir, artifact)) : []),
-      ...preferredArtifacts.map((artifact) => path.join(pluginRoot, artifact)),
-      path.join(pluginRoot, artifactBasename),
-      path.join(pluginRoot, "dist", artifactBasename),
-      ...(entryDir ? sourceArtifacts.map((artifact) => path.join(entryDir, artifact)) : []),
-      ...sourceArtifacts.map((artifact) => path.join(pluginRoot, artifact)),
-    ].find(exists) ?? null
-  );
+  const checkedPaths = new Set<string>();
+  for (const [directory, artifacts] of [
+    [entryDir, entryArtifacts],
+    [pluginRoot, [...preferredArtifacts, artifactBasename, path.join("dist", artifactBasename)]],
+    [entryDir, sourceArtifacts],
+    [pluginRoot, sourceArtifacts],
+  ] as const) {
+    if (!directory) {
+      continue;
+    }
+    for (const artifact of artifacts) {
+      const candidate = path.join(directory, artifact);
+      if (checkedPaths.has(candidate)) {
+        continue;
+      }
+      checkedPaths.add(candidate);
+      if (exists(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
 }
 
 function resolvePublicSurfaceFromBundledDir(params: {

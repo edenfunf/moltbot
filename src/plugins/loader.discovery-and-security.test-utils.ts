@@ -114,11 +114,9 @@ describe("loadOpenClawPlugins", () => {
     const plugin = writePlugin({
       id: "hook-unknown",
       filename: "hook-unknown.cjs",
-      body: `module.exports = { id: "hook-unknown", register(api) {
-    api.on("totally_unknown_hook_name", () => ({ foo: "bar" }));
-    api.on(123, () => ({ foo: "baz" }));
-    api.on("before_model_resolve", () => ({ providerOverride: "demo-provider" }));
-  } };`,
+      registration: `api.on("totally_unknown_hook_name", () => ({ foo: "bar" }));
+      api.on(123, () => ({ foo: "baz" }));
+      api.on("before_model_resolve", () => ({ providerOverride: "demo-provider" }));`,
     });
 
     const registry = loadRegistryFromSinglePlugin({
@@ -637,7 +635,7 @@ describe("loadOpenClawPlugins", () => {
       {
         label: "config load overrides bundled",
         pluginId: "shadow",
-        bundledFilename: "shadow.cjs",
+        expectedDuplicateLevel: "info",
         loadRegistry: () => {
           const bundled = writeBundledPlugin({
             id: "shadow",
@@ -757,7 +755,7 @@ describe("loadOpenClawPlugins", () => {
         expectedLoadedOrigin: "global",
         expectedDisabledOrigin: "bundled",
         expectedDisabledError: "overridden by global plugin",
-        expectDuplicateWarning: false,
+        expectedDuplicateLevel: null,
         assert: expectPluginSourcePrecedence,
       },
       {
@@ -886,7 +884,7 @@ describe("loadOpenClawPlugins", () => {
         expectedLoadedOrigin: "global",
         expectedDisabledOrigin: "bundled",
         expectedDisabledError: "overridden by global plugin",
-        expectDuplicateWarning: false,
+        expectedDuplicateLevel: null,
         assert: (
           registry: PluginRegistry,
           scenario: Parameters<typeof expectPluginSourcePrecedence>[1],
@@ -1708,21 +1706,19 @@ describe("loadOpenClawPlugins", () => {
     const plugin = writePlugin({
       id: "runtime-introspection",
       filename: "runtime-introspection.cjs",
-      body: `module.exports = { id: "runtime-introspection", register(api) {
-    const runtime = api.runtime ?? {};
-    const keys = Object.keys(runtime);
-    for (const key of ["channel", "mediaUnderstanding", "llm"]) {
-      if (!keys.includes(key)) {
-        throw new Error("runtime " + key + " key missing");
-      }
-      if (!(key in runtime)) {
-        throw new Error("runtime " + key + " missing from has check");
-      }
-      if (!Object.getOwnPropertyDescriptor(runtime, key)) {
-        throw new Error("runtime " + key + " descriptor missing");
-      }
-    }
-  } };`,
+      registration: `const runtime = api.runtime ?? {};
+      const keys = Object.keys(runtime);
+      for (const key of ["channel", "mediaUnderstanding", "llm"]) {
+        if (!keys.includes(key)) {
+          throw new Error("runtime " + key + " key missing");
+        }
+        if (!(key in runtime)) {
+          throw new Error("runtime " + key + " missing from has check");
+        }
+        if (!Object.getOwnPropertyDescriptor(runtime, key)) {
+          throw new Error("runtime " + key + " descriptor missing");
+        }
+      }`,
     });
 
     const registry = withEnv({ OPENCLAW_STATE_DIR: stateDir }, () =>

@@ -54,12 +54,16 @@ export function resolveTypedHookTimeoutMs(params: {
   );
 }
 
-function createRegistration<T extends object>(record: PluginRecord, contribution: T) {
+function createRegistration<T extends object>(
+  record: PluginRecord,
+  contribution: T,
+  ownership: "wrap" | "adopt" = "wrap",
+) {
   return {
     pluginId: record.id,
     pluginName: record.name,
     // Normalizers and host gates create new callables after API argument wrapping.
-    ...(getPluginInstance(record)?.wrap(contribution) ?? contribution),
+    ...(getPluginInstance(record)?.[ownership](contribution) ?? contribution),
     source: record.source,
     rootDir: record.rootDir,
   };
@@ -116,6 +120,8 @@ export function createPluginRegistryState(registryParams: PluginRegistryParams) 
     getHostCronService: () => registryParams.hostServices?.cron,
     pluginsWithChannelRegistrationConflict: new Set<string>(),
     createRegistration,
+    createIdentityRegistration: <T extends object>(record: PluginRecord, contribution: T) =>
+      createRegistration(record, contribution, "adopt"),
     pushDiagnostic,
     reportRegistrationError,
     reportRegistrationWarning,

@@ -353,7 +353,8 @@ function setDreamingTestTime(offsetMinutes = 0) {
 }
 
 async function withDreamingTestClock(run: () => Promise<void>) {
-  vi.useFakeTimers();
+  // Worker lifecycle deadlines share real monotonic time; only dreaming's wall clock is synthetic.
+  vi.useFakeTimers({ toFake: ["Date"] });
   try {
     await run();
   } finally {
@@ -529,7 +530,7 @@ describe("memory-core dreaming phases", () => {
       workspaceDir,
     );
 
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);
     try {
       await beforeAgentReply(
@@ -623,6 +624,46 @@ describe("memory-core dreaming phases", () => {
       expect(dailyContent).not.toContain("Light Sleep: Candidate:");
     });
   });
+
+  it.each(["<!-- openclaw:dreaming:rem:end -->", "## Ops", "# Ops"])(
+    "does not ingest nested REM output before boundary %s",
+    async (boundary) => {
+      const workspaceDir = await createDreamingWorkspace();
+      await withDreamingTestClock(async () => {
+        await writeDailyNote(workspaceDir, [
+          `# ${DREAMING_TEST_DAY}`,
+          "- Move backups to S3 Glacier.",
+          "",
+          "## REM Sleep",
+          "<!-- openclaw:dreaming:rem:start -->",
+          "### Reflections",
+          "- Theme: `across` kept surfacing across 26 memories.",
+          "#### Unexpected nested heading",
+          "- Old generated dream text must not become a daily memory.",
+          "### Possible Lasting Truths",
+          "- Old generated lasting truth must not become a daily memory.",
+          boundary,
+          "### User follow-up",
+          "- Rotate access keys.",
+        ]);
+        const subagent = createMockNarrativeSubagent();
+        const { beforeAgentReply } = createHarness(
+          LIGHT_DREAMING_TEST_CONFIG,
+          workspaceDir,
+          subagent,
+        );
+        await triggerLightDreaming(beforeAgentReply, workspaceDir, 1);
+        const store = await shortTermTesting.readRecallStore(
+          workspaceDir,
+          "2026-04-05T10:01:00.000Z",
+        );
+        expect(Object.values(store.entries).map((entry) => entry.snippet)).toEqual([
+          "Move backups to S3 Glacier.",
+          "User follow-up: Rotate access keys.",
+        ]);
+      });
+    },
+  );
 
   it("does not restage unchanged light candidates in later cycles", async () => {
     const workspaceDir = await createDreamingWorkspace();
@@ -1797,7 +1838,7 @@ describe("memory-core dreaming phases", () => {
       includeMainAgent: true,
     });
 
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-04-16T19:00:00.000Z"));
     try {
       await beforeAgentReply(
@@ -1901,7 +1942,7 @@ describe("memory-core dreaming phases", () => {
       includeMainAgent: true,
     });
 
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-04-16T19:00:00.000Z"));
     try {
       await beforeAgentReply(

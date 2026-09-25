@@ -1,3 +1,4 @@
+import { join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { runInNewContext } from "node:vm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,10 +7,10 @@ import {
   clearOpenClawDatabaseQuarantine,
   recordOpenClawDatabaseQuarantine,
 } from "../state/openclaw-quarantine-store.js";
+import { closeOpenClawStateDatabaseByPath } from "../state/openclaw-state-db-cache.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
 import {
   clearOpenClawStateDatabaseOpenFailure,
-  closeOpenClawStateDatabaseByPath,
   openOpenClawStateDatabase,
   recordOpenClawStateDatabaseOpenFailure,
 } from "../state/openclaw-state-db.js";
@@ -20,13 +21,14 @@ import {
   type OpenClawTestState,
   withOpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
+import { withPluginStateDatabaseReadOnly } from "./plugin-state-store.database.js";
 import {
-  closePluginStateDatabase,
   createPluginStateKeyedStore,
   createPluginStateSyncKeyedStore,
   resetPluginStateStoreForTests,
   pluginStateEntriesInKeyRange,
 } from "./plugin-state-store.js";
+import { closePluginStateDatabase } from "./plugin-state-store.sqlite.js";
 
 let testState: OpenClawTestState | undefined;
 beforeAll(async () => {
@@ -102,6 +104,30 @@ describe("plugin state open errors", () => {
     },
   );
 
+  it("reports the explicit readonly path when acquisition fails before the operation", async () => {
+    await withOpenClawTestState({ label: "plugin-state-explicit-read-path" }, async (state) => {
+      const explicitPath = join(state.stateDir, "explicit.sqlite");
+      const database = new DatabaseSync(explicitPath);
+      database.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
+      database.close();
+      const read = vi.fn(() => undefined);
+      expect(explicitPath).not.toBe(resolveOpenClawStateSqlitePath(state.env));
+      expect(() =>
+        withPluginStateDatabaseReadOnly("lookup", read, {
+          path: relative(process.cwd(), explicitPath),
+          env: state.env,
+        }),
+      ).toThrow(
+        expect.objectContaining({
+          code: "PLUGIN_STATE_OPEN_FAILED",
+          operation: "lookup",
+          path: explicitPath,
+        }),
+      );
+      expect(read).not.toHaveBeenCalled();
+    });
+  });
+
   it("reports the opened database path for corrupt values with an explicit env", async () => {
     await withOpenClawTestState(
       { label: "plugin-state-corrupt-explicit-env", applyEnv: false },
@@ -147,6 +173,8 @@ describe("plugin state open errors", () => {
           await expect(store.lookupMany(["key"])).resolves.toEqual([
             { ok: false, error: expect.objectContaining({ ...expected, operation: "lookup" }) },
           ]);
+          expect(sync.count()).toBe(1);
+          await expect(store.count()).resolves.toBe(1);
         }
         let callbackCalled = false;
         for (const stateStore of [sync, store]) {
@@ -251,6 +279,12 @@ describe("plugin state open errors", () => {
     recordOpenClawStateDatabaseOpenFailure(databasePath, new Error("latched failure"));
     await expect(store.lookup("k")).rejects.toMatchObject({
       code: "PLUGIN_STATE_OPEN_FAILED",
+      path: databasePath,
+      message: "Failed to open the plugin state database.",
+    });
+    await expect(store.count()).rejects.toMatchObject({
+      code: "PLUGIN_STATE_OPEN_FAILED",
+      operation: "count",
       path: databasePath,
       message: "Failed to open the plugin state database.",
     });

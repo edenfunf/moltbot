@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { readRegularFileSync } from "@openclaw/fs-safe/advanced";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { isChannelConfigMetadataKey } from "../channels/config-metadata.js";
 import { INCLUDE_KEY } from "../config/includes.js";
@@ -11,7 +12,6 @@ import { redactConfigObject } from "../config/redact-snapshot.js";
 import { buildConfigSchemaCore } from "../config/schema.js";
 import { isMissingPathError } from "../infra/errors.js";
 import { resolveHomeRelativePath } from "../infra/home-dir.js";
-import { readRegularFileSync } from "../infra/regular-file.js";
 import { assertNotUpdateCapturePath } from "../infra/update-capture-paths.js";
 import { parseBooleanValue } from "../utils/boolean.js";
 import { VERSION } from "../version.js";
@@ -591,7 +591,7 @@ function renderSummary(params: {
       : `no stability bundle included (${params.stability.status})`;
   const configLine = params.config.exists
     ? `config shape included (${params.config.parseOk ? "parsed" : "parse failed"})`
-    : "config file not found";
+    : (params.config.error ?? "config file not found");
   const logTailLine =
     params.logTail.status === "failed"
       ? `sanitized log tail unavailable (${params.logTail.error})`

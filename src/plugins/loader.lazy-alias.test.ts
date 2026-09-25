@@ -1,11 +1,13 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
-import Module, { createRequire } from "node:module";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { Command } from "commander";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { registerSubCliByNameCore } from "../cli/program/register.subclis-core.js";
+import { registerSubCliByName } from "../cli/program/register.subclis.js";
 import { clearRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import {
   createPluginCliLoadSession,
@@ -87,24 +89,38 @@ describe("native plugin alias preparation", () => {
         "external/index.ts",
         'export { value } from "openclaw/plugin-sdk/used";',
       );
-      const rootDir = path.dirname(source);
-      const record = createPluginRecord({ id: "external", rootDir, source, origin: "global" });
-      const registry = createEmptyPluginRegistry();
-      registry.plugins.push(record);
-      const hooks = Object.getOwnPropertyDescriptor(Module, "registerHooks");
-      Object.defineProperty(Module, "registerHooks", { value: undefined, configurable: true });
-      vi.stubEnv("NODE_ENV", environment);
-      try {
-        const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution });
-        expect(load(source, { record, rootDir, registry })).toMatchObject({ value: expected });
-      } finally {
-        if (hooks) {
-          Object.defineProperty(Module, "registerHooks", hooks);
-        } else {
-          Reflect.deleteProperty(Module, "registerHooks");
-        }
-        await getPluginInstance(record)?.dispose();
-      }
+      // Native resolver hooks live for the process. A no-hook runtime must not
+      // mark this worker's resolver installed before the native-alias cases run.
+      const probe = writeFile(
+        f.root,
+        "no-native-hooks.mts",
+        [
+          'import Module from "node:module";',
+          'import path from "node:path";',
+          'Object.defineProperty(Module, "registerHooks", { value: undefined, configurable: true });',
+          `const { createPluginModuleLoader } = await import(${JSON.stringify(pathToFileURL(path.resolve("src/plugins/loader-module-runtime.ts")).href)});`,
+          `const { getPluginInstance } = await import(${JSON.stringify(pathToFileURL(path.resolve("src/plugins/plugin-instance-scope.ts")).href)});`,
+          `const { createPluginRecord } = await import(${JSON.stringify(pathToFileURL(path.resolve("src/plugins/status.test-helpers.ts")).href)});`,
+          `const { createEmptyPluginRegistry } = await import(${JSON.stringify(pathToFileURL(path.resolve("src/plugins/registry-empty.ts")).href)});`,
+          `const source = ${JSON.stringify(source)};`,
+          "const rootDir = path.dirname(source);",
+          'const record = createPluginRecord({ id: "external", rootDir, source, origin: "global" });',
+          "const registry = createEmptyPluginRegistry();",
+          "registry.plugins.push(record);",
+          "try {",
+          `  const load = createPluginModuleLoader({ devSourceRoot: ${JSON.stringify(f.root)}, pluginSdkResolution: ${JSON.stringify(pluginSdkResolution)} });`,
+          "  console.log(JSON.stringify(load(source, { record, rootDir, registry })));",
+          "} finally {",
+          "  await getPluginInstance(record)?.dispose();",
+          "}",
+        ].join("\n"),
+      );
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        ["--import", pathToFileURL(path.resolve("scripts/tsx.mjs")).href, probe],
+        { env: { ...process.env, NODE_ENV: environment } },
+      );
+      expect(JSON.parse(stdout)).toMatchObject({ value: expected });
     },
   );
 
@@ -112,7 +128,7 @@ describe("native plugin alias preparation", () => {
     return withPluginCache(createPluginCache(), () => {
       const f = fixture();
       const read = vi.spyOn(fs, "readFileSync");
-      const load = createPluginModuleLoader({ devSourceRoot: f.root });
+      const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
       const metadata = load(f.entry);
       expect(metadata).toMatchObject({ marker: "metadata" });
       expect(load(f.entry)).toBe(metadata);
@@ -125,7 +141,7 @@ describe("native plugin alias preparation", () => {
   it("resolves late CJS and ESM aliases without reading artifacts until demanded", async () => {
     const f = fixture();
     const read = vi.spyOn(fs, "readFileSync");
-    const load = createPluginModuleLoader({ devSourceRoot: f.root });
+    const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
     const metadata = load(f.entry) as {
       load: (name: string) => unknown;
       loadEsm: (name: string) => Promise<unknown>;
@@ -154,7 +170,7 @@ describe("native plugin alias preparation", () => {
           : 'export { value } from "@openclaw/plugin-sdk/used";',
       );
       const read = vi.spyOn(fs, "readFileSync");
-      const load = createPluginModuleLoader({ devSourceRoot: f.root });
+      const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
       const loaded = load(entry);
       expect(loaded).toMatchObject({ value: "dist" });
       expect(load(entry)).toBe(loaded);
@@ -192,7 +208,7 @@ describe("native plugin alias preparation", () => {
       });
       const registry = createEmptyPluginRegistry();
       registry.plugins.push(record);
-      const load = createPluginModuleLoader({ devSourceRoot: f.root });
+      const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
       const bundled = load(bundledEntry) as { start: () => Promise<{ value: string }> };
       const external = load(entry, { record, rootDir: pluginDir, registry }) as {
         start: () => Promise<{ default: { value: string } }>;
@@ -238,7 +254,7 @@ describe("native plugin alias preparation", () => {
       `module.exports = require(${JSON.stringify(specifier)});`,
     );
     const read = vi.spyOn(fs, "readFileSync");
-    const load = createPluginModuleLoader({ devSourceRoot: f.root });
+    const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
     expect(load(f.entry)).toMatchObject({ marker: "metadata" });
     expect(read.mock.calls.filter(([target]) => target === f.unused)).toEqual([]);
     expect(load(entry)).toMatchObject({ value: "family" });
@@ -249,7 +265,7 @@ describe("native plugin alias preparation", () => {
     const f = fixture();
     const outside = fixture();
     const read = vi.spyOn(fs, "readFileSync");
-    const load = createPluginModuleLoader({ devSourceRoot: f.root });
+    const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
     const metadata = load(f.entry) as {
       load: (name: string) => unknown;
       loadEsm: (name: string) => Promise<unknown>;
@@ -303,7 +319,10 @@ describe("native plugin alias preparation", () => {
       );
       const pluginEntry = writeFile(path.dirname(entry), "index.cjs", "module.exports = {};");
       vi.stubEnv("OPENCLAW_DEV_SOURCE_ROOT", a.root);
-      installOpenClawPluginSdkNativeResolver({ pluginModulePath: pluginEntry });
+      installOpenClawPluginSdkNativeResolver({
+        pluginModulePath: pluginEntry,
+        pluginSdkResolution: "dist",
+      });
       const requirePlugin = createRequire(pluginEntry);
       if (resolveFirst) {
         expect(requirePlugin.resolve("@openclaw/plugin-sdk/used")).toBe(a.used);
@@ -316,7 +335,10 @@ describe("native plugin alias preparation", () => {
       expect(requirePlugin.resolve("@openclaw/plugin-sdk/used")).toBe(a.used);
       // Removal is from a new host snapshot, not an in-place artifact freshness poll.
       fs.rmSync(b.unused);
-      installOpenClawPluginSdkNativeResolver({ pluginModulePath: pluginEntry });
+      installOpenClawPluginSdkNativeResolver({
+        pluginModulePath: pluginEntry,
+        pluginSdkResolution: "dist",
+      });
       expect(requirePlugin.resolve("@openclaw/plugin-sdk/used")).toBe(b.used);
       expect(() => requirePlugin.resolve("@openclaw/plugin-sdk/unused")).toThrow();
       argv.mockRestore();
@@ -370,7 +392,7 @@ describe("native plugin alias preparation", () => {
     );
     writeFile(f.root, "dist/plugin-sdk/qa-runtime.js", "export const privateValue = true;");
     vi.stubEnv("OPENCLAW_ENABLE_PRIVATE_QA_CLI", "0");
-    const load = createPluginModuleLoader({ devSourceRoot: f.root });
+    const load = createPluginModuleLoader({ devSourceRoot: f.root, pluginSdkResolution: "dist" });
     const metadata = load(f.entry) as { load: (name: string) => unknown };
     vi.stubEnv("OPENCLAW_ENABLE_PRIVATE_QA_CLI", "1");
     expect(() => metadata.load("@openclaw/plugin-sdk/qa-runtime")).toThrow();
@@ -382,8 +404,16 @@ describe("native plugin alias preparation", () => {
     const a = fixture();
     const b = fixture();
     const read = vi.spyOn(fs, "readFileSync");
-    installOpenClawPluginSdkNativeResolver({ pluginModulePath: a.entry, devSourceRoot: a.root });
-    installOpenClawPluginSdkNativeResolver({ pluginModulePath: a.entry, devSourceRoot: b.root });
+    installOpenClawPluginSdkNativeResolver({
+      pluginModulePath: a.entry,
+      devSourceRoot: a.root,
+      pluginSdkResolution: "dist",
+    });
+    installOpenClawPluginSdkNativeResolver({
+      pluginModulePath: a.entry,
+      devSourceRoot: b.root,
+      pluginSdkResolution: "dist",
+    });
     const fromPlugin = createRequire(a.entry);
     expect(fromPlugin.resolve("@openclaw/plugin-sdk/used")).toBe(b.used);
     expect(fromPlugin("@openclaw/plugin-sdk/used")).toMatchObject({ value: "dist" });
@@ -575,14 +605,14 @@ describe("native plugin alias preparation", () => {
         registration === "nodes"
           ? ["node", "openclaw", "nodes", "late"]
           : ["node", "openclaw", "memory", "status"];
-      await registerSubCliByNameCore(program, name, argv);
+      await registerSubCliByName(program, name, argv);
       if (registration !== "nodes") {
         const names = program.commands.map((command) => command.name());
         expect(names.indexOf("late") < names.indexOf(name)).toBe(registration === "pairing-before");
       }
       await parse();
     }
-    expect(JSON.parse(fs.readFileSync(observed, "utf8"))).toEqual(["dist", "unused"]);
+    expect(JSON.parse(fs.readFileSync(observed, "utf8"))).toEqual(["source", "unused"]);
   });
 
   it("keeps deferred aliases in their owner and acquires changed facts only in a new operation", () => {

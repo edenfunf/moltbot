@@ -1,5 +1,6 @@
 import { getRuntimeConfig } from "../../config/config.js";
 import { resolveNodeCommandAllowlist } from "../node-command-policy.js";
+import type { WorkerNodePlacementAuthority } from "./device-placement-eligibility.js";
 import {
   createPlacementFailureActions,
   type WorkerActivationBarrier,
@@ -12,7 +13,6 @@ import { createPlacementRecoveryActions } from "./placement-dispatch-recovery.js
 import {
   createWorkerPlacementDispatchStartup,
   type WorkerDevicePlacementRequirementResolver,
-  type WorkerNodePlacementAuthority,
   type WorkerPlacementRecoveryBarrier,
 } from "./placement-dispatch-startup.js";
 import { createWorkerPlacementMoveAbandonment } from "./placement-move-abandon.js";
@@ -60,10 +60,7 @@ type WorkerPlacementDispatchOptions = WorkerPlacementReclaimBarriers &
   WorkerPlacementReclaimOptions &
   Pick<
     PlacementRecoveryDeps,
-    | "resolveWorkspace"
-    | "reportWorkspaceResultRecoveryFailure"
-    | "prepareAcceptedWorkspacePublication"
-    | "publishAcceptedWorkspace"
+    "resolveWorkspace" | "prepareAcceptedWorkspacePublication" | "publishAcceptedWorkspace"
   > & {
     environments: WorkerDispatchEnvironmentService &
       Pick<WorkerEnvironmentService, "recordError" | "requestDestroy"> &
@@ -224,33 +221,18 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
       reportPlacementTransition(onTransition, placement);
       const environment = prepared
         ? prepared.environment
-        : request.inheritedProfile
-          ? await environments.createFromProfileSnapshot(
-              {
-                profileId: request.profileId,
-                providerId: request.inheritedProfile.providerId,
-                profileSnapshot: request.inheritedProfile.profileSnapshot,
-              },
-              idempotencyKey,
-              request.machineClass,
-              request.executionMode,
-              projectPath,
-              signal,
-              request.os,
-              request.runSetupScript,
-              preparedIntent,
-            )
-          : await environments.create(
-              request.profileId,
-              idempotencyKey,
-              request.machineClass,
-              request.executionMode,
-              projectPath,
-              signal,
-              request.os,
-              request.runSetupScript,
-              preparedIntent,
-            );
+        : await environments.createWithRequest({
+            profileId: request.profileId,
+            idempotencyKey,
+            machineClass: request.machineClass,
+            executionMode: request.executionMode,
+            projectPath,
+            signal,
+            os: request.os,
+            runSetupScript: request.runSetupScript,
+            admittedIntent: preparedIntent,
+            inheritedProfile: request.inheritedProfile,
+          });
       return await startup.continueProvisionedDispatch({
         request,
         placement,
@@ -264,7 +246,7 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
       });
     } catch (error) {
       try {
-        if (placement && startup.retainInterruptedProvisioning(placement, error)) {
+        if (placement && (await startup.retainInterruptedProvisioning(placement, error))) {
           throw error;
         }
         const current = placement ? placements.get(request.sessionId) : undefined;
@@ -327,6 +309,9 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
           ...request,
           authorize,
           reclaim: async (reauthorize) => {
+            if (request.recoverToGateway) {
+              beforeDrain?.();
+            }
             let failedPlacement = placements.get(request.sessionId);
             if (owned.state === "provisioning") {
               failedPlacement = failure.cancelProvisioning(failedPlacement, initial);
@@ -359,6 +344,20 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
               throw new Error(
                 cleanupError ?? "Failed cloud worker environment cleanup is still pending",
               );
+            }
+            if (request.recoverToGateway) {
+              const assertCurrent = () => {
+                reauthorize?.();
+                beforeDrain?.();
+              };
+              assertCurrent();
+              if (options.prepareGatewayMove) {
+                await options.prepareGatewayMove({ ...request, assertCurrent });
+              } else if ((await options.resolveWorkspace(request)).kind === "repository") {
+                throw new Error("Repository workspace Gateway materialization is unavailable");
+              }
+              // Keep local admission closed until the accepted checkpoint is bound locally.
+              assertCurrent();
             }
             const local = placements.transition({
               sessionId: request.sessionId,
@@ -396,13 +395,41 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
     pendingOperations?: WorkerPlacementPendingOperations,
     onTransition?: (placement: WorkerDispatchPlacement) => void,
   ): Promise<WorkerReclaimPlacement> => {
+    const assertGatewayRecoverySource = () => {
+      if (!request.recoverToGateway) {
+        return;
+      }
+      const source = placements.get(request.sessionId);
+      if (
+        source?.state !== "failed" ||
+        source.generation !== request.recoverToGateway.expectedGeneration ||
+        source.sessionKey !== request.sessionKey ||
+        source.agentId !== request.agentId
+      ) {
+        throw new Error(`Session ${request.sessionKey} changed before Gateway recovery. Retry.`);
+      }
+      if (
+        !isFailedWorkerPlacementEnvironmentGone({
+          environmentService: environments,
+          placement: source,
+        })
+      ) {
+        throw new Error(
+          "Failed cloud worker environment cleanup is still pending; use Stop cloud worker",
+        );
+      }
+    };
     authorize?.();
     beforeDrain?.();
+    assertGatewayRecoverySource();
     const initial = placements.get(request.sessionId);
     if (initial) {
       reportPlacementTransition(onTransition, initial);
     }
-    const checkSource = () => beforeDrain?.(pendingOperations?.currentPlacement());
+    const checkSource = () => {
+      beforeDrain?.(pendingOperations?.currentPlacement());
+      assertGatewayRecoverySource();
+    };
     return await options.runReclaimPreparation({
       ...request,
       authorize,

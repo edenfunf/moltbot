@@ -2,6 +2,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import type { AgentHarness, AgentHarnessRegistrationOptions } from "../agents/harness/types.js";
 import { getCoreEmbeddingProvider } from "./core-embedding-providers.js";
 import type { EmbeddingProviderAdapter } from "./embedding-providers.js";
+import { invalidateProviderRegistryIndex } from "./provider-registry-index.js";
 import { normalizeRegisteredProvider } from "./provider-validation.js";
 import { canClaimReservedCommandOwnership } from "./registry-registrars-operations.js";
 import type { PluginRegistryState } from "./registry-state.js";
@@ -16,6 +17,7 @@ import { validateWorkerProviderContract } from "./worker-provider-registry.js";
 export function createProviderRegistrars(state: PluginRegistryState) {
   const {
     registry,
+    createIdentityRegistration,
     createRegistration,
     pushDiagnostic,
     reportRegistrationError,
@@ -47,6 +49,7 @@ export function createProviderRegistrars(state: PluginRegistryState) {
         provider: { ...normalizedProvider, pluginRoot: record.rootDir },
       }),
     );
+    invalidateProviderRegistryIndex(registry.providers);
     // Reserve catalog ownership without duplicating the discovery-owned model row builders.
     if (normalizedProvider.catalog || normalizedProvider.staticCatalog) {
       registerModelCatalogProvider(record, {
@@ -217,7 +220,7 @@ export function createProviderRegistrars(state: PluginRegistryState) {
         ownedIds.push(id);
       }
       params.registrations.push(
-        createRegistration(record, {
+        createIdentityRegistration(record, {
           provider,
         }),
       );

@@ -3,21 +3,188 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { expectDefined } from "@openclaw/normalization-core";
 import { createJiti } from "jiti";
 import { afterEach, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { capturePluginGenerationArtifact } from "./plugin-generation-artifact.js";
+import { inspectPluginSourceDependencies } from "./plugin-generation-source-inspection.js";
 
 // Artifact tests evaluate captured bytes independently; managed Node execution has binder suites.
 function createArtifactLoader(artifact: ReturnType<typeof capturePluginGenerationArtifact>) {
   return createJiti(artifact.rootDir, { fsCache: false, moduleCache: false, tryNative: false });
 }
 
+const temp = useAutoCleanupTempDirTracker(afterEach);
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).toReversed()) {
     cleanup();
   }
 });
+
+it.each(["empty", "nested/empty", ".git/empty", "node_modules/unused"])(
+  "captures directory layout in source receipts while excluding %s when appropriate",
+  (directory) => {
+    const source = temp.make("plugin-layout-digest-");
+    fs.writeFileSync(path.join(source, "index.cjs"), "exports.value = 1;");
+    const capture = () => {
+      const artifact = capturePluginGenerationArtifact(source);
+      cleanups.push(artifact.dispose);
+      return artifact;
+    };
+    const before = capture();
+    fs.mkdirSync(path.join(source, directory), { recursive: true });
+    const after = capture();
+    const included = !directory.startsWith(".git/") && !directory.startsWith("node_modules/");
+    expect(fs.existsSync(path.join(before.rootDir, directory))).toBe(false);
+    expect(fs.existsSync(path.join(after.rootDir, directory))).toBe(included);
+    expect(after.sourceDigest === before.sourceDigest).toBe(!included);
+    expect(capture().sourceDigest).toBe(after.sourceDigest);
+    fs.rmSync(path.join(source, directory.split("/")[0]!), { recursive: true });
+    expect(capture().sourceDigest).toBe(before.sourceDigest);
+  },
+);
+
+it.each([
+  "dependency",
+  "directory",
+  "root",
+  "entry before demand",
+  "entry after demand",
+  "demanded module",
+])("retains the original source identity check after copy disposal: %s", (change) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-source-check-"));
+  cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "plugin");
+  const dependency = path.join(source, "node_modules", "fixture");
+  fs.mkdirSync(dependency, { recursive: true });
+  fs.writeFileSync(
+    path.join(source, "package.json"),
+    JSON.stringify({ dependencies: { fixture: "1.0.0" } }),
+  );
+  const entry = path.join(source, "index.ts");
+  const demanded = path.join(source, "demanded.js");
+  const capturesOnDemand = change.includes("demand");
+  fs.writeFileSync(entry, "export { value } from 'fixture';");
+  fs.writeFileSync(path.join(dependency, "package.json"), '{"name":"fixture","main":"index.js"}');
+  fs.writeFileSync(path.join(dependency, "index.js"), "exports.value = 1;");
+  if (capturesOnDemand) {
+    fs.writeFileSync(demanded, "exports.value = 1;");
+  }
+  const artifact = capturePluginGenerationArtifact(source, capturesOnDemand ? entry : undefined);
+  cleanups.push(artifact.dispose);
+  if (change === "entry before demand") {
+    fs.appendFileSync(entry, "\nexport const edited = true;");
+  }
+  if (capturesOnDemand) {
+    const initialDigest = artifact.sourceDigest;
+    const captured = artifact.captureModule(artifact.resolve(entry), "./demanded.js", [
+      "node",
+      "require",
+    ]);
+    expect(captured).toMatchObject({ target: expect.any(URL) });
+    expect(fs.readFileSync(artifact.resolve(demanded), "utf8")).toBe("exports.value = 1;");
+    expect(artifact.sourceDigest).toBe(initialDigest);
+  }
+  artifact.dispose();
+  if (change !== "entry before demand") {
+    expect(artifact.assertSourceCurrent).not.toThrow();
+  }
+  if (change === "root") {
+    fs.renameSync(source, path.join(root, "original"));
+    fs.mkdirSync(source);
+  } else if (change === "directory") {
+    fs.writeFileSync(path.join(source, "added.ts"), "export const added = true;");
+  } else if (change === "entry after demand") {
+    fs.appendFileSync(entry, "\nexport const edited = true;");
+  } else if (change === "demanded module") {
+    fs.writeFileSync(demanded, "exports.value = 2;");
+  } else if (change === "dependency") {
+    fs.writeFileSync(path.join(dependency, "index.js"), "exports.value = 2;");
+  }
+  expect(artifact.assertSourceCurrent).toThrow();
+});
+
+it.each([
+  ...["prepare", "capture"].flatMap((acquisition) =>
+    ["manifest", "entry", "body"].map((change) => ({ acquisition, change })),
+  ),
+  { acquisition: "prepare relative", change: "body" },
+  { acquisition: "prepare dot segments", change: "body" },
+])(
+  "retains $change identity after package $acquisition and disposal",
+  ({ acquisition, change }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-package-identity-"));
+    cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+    const dependency = path.join(root, "node_modules", "fixture");
+    fs.mkdirSync(dependency, { recursive: true });
+    const manifest = path.join(dependency, "package.json");
+    const dependencyEntry = path.join(dependency, "index.cjs");
+    const body = path.join(dependency, "body.cjs");
+    const entry = path.join(root, "index.cjs");
+    fs.writeFileSync(path.join(root, "package.json"), '{"imports":{"#selected":"fixture"}}');
+    fs.writeFileSync(entry, "exports.read = name => require(name);");
+    fs.writeFileSync(manifest, '{"main":"index.cjs"}');
+    fs.writeFileSync(dependencyEntry, "exports.value = require('./body.cjs');");
+    fs.writeFileSync(body, "module.exports = 'initial body';");
+    const artifact = capturePluginGenerationArtifact(root, entry);
+    cleanups.push(artifact.dispose);
+    const bunPreselected = Boolean(process.versions.bun);
+    if (bunPreselected) {
+      // Bun does not expose Node's package-import inspection while Jiti transforms the entry.
+      // Select the same package-map edge that the runtime resolution hook observes on demand.
+      expect(
+        artifact.captureModule(artifact.resolve(entry), "#selected", ["node", "require"]),
+      ).toMatchObject({ retryNative: true });
+    }
+    const initialDigest = artifact.sourceDigest;
+    const capturedDependency = expectDefined(
+      artifact.sourceAliases[dependency] ?? artifact.sourceAliases[fs.realpathSync(dependency)],
+      "dependency capture",
+    );
+    if (change === "manifest") {
+      fs.writeFileSync(manifest, '{"main":"replacement.cjs"}');
+    } else if (change === "entry") {
+      fs.writeFileSync(dependencyEntry, "exports.value = 'replaced entry';");
+    }
+    fs.writeFileSync(body, "module.exports = 'first demand';");
+    if (acquisition.startsWith("prepare")) {
+      const capturedEntry = path.join(capturedDependency, "index.cjs");
+      artifact.prepareModule(
+        acquisition === "prepare relative"
+          ? path.relative(process.cwd(), capturedEntry)
+          : acquisition === "prepare dot segments"
+            ? `${capturedDependency}${path.sep}unused${path.sep}..${path.sep}index.cjs`
+            : capturedEntry,
+      );
+    } else {
+      expect(
+        artifact.captureModule(artifact.resolve(entry), "#selected", ["node", "require"]),
+      ).toMatchObject({ retryNative: true });
+    }
+    expect(fs.readFileSync(path.join(capturedDependency, "package.json"), "utf8")).toBe(
+      '{"main":"index.cjs"}',
+    );
+    expect(fs.readFileSync(path.join(capturedDependency, "index.cjs"), "utf8")).toBe(
+      "exports.value = require('./body.cjs');",
+    );
+    expect(fs.readFileSync(path.join(capturedDependency, "body.cjs"), "utf8")).toBe(
+      bunPreselected ? "module.exports = 'initial body';" : "module.exports = 'first demand';",
+    );
+    expect(artifact.sourceDigest).toBe(initialDigest);
+    artifact.dispose();
+    if (change === "body") {
+      if (bunPreselected) {
+        expect(artifact.assertSourceCurrent).toThrow();
+      } else {
+        expect(artifact.assertSourceCurrent).not.toThrow();
+      }
+      fs.writeFileSync(body, "module.exports = 'later body';");
+    }
+    expect(artifact.assertSourceCurrent).toThrow();
+  },
+);
 
 it.each(["require", "import"] as const)(
   "preserves optional standalone %s while freezing missing dependencies",
@@ -60,6 +227,87 @@ it.each(["require", "import"] as const)(
     await expect(capture()().read()).resolves.toBe("installed");
   },
 );
+
+it.each([
+  [
+    "local require",
+    `export const read = async (require) => [require('./label.json'), (await import('./peer.js')).value];`,
+    "./label.json",
+  ],
+  [
+    "local dirname",
+    `import path from 'node:path';
+     const __dirname = 'synthetic';
+     export const read = async () => [path.join(__dirname, 'label.json'), (await import('./peer.js')).value];`,
+    path.join("synthetic", "label.json"),
+  ],
+])("freezes dynamic imports without capturing labels from %s", async (_name, sourceText, label) => {
+  const source = temp.make("plugin-local-binding-");
+  const entry = path.join(source, "entry.mjs");
+  const peer = path.join(source, "peer.js");
+  const unrelated = path.join(source, "label.json");
+  fs.writeFileSync(entry, sourceText);
+  fs.writeFileSync(peer, 'export const value = "before";');
+  fs.writeFileSync(unrelated, '{"private":"unrelated"}');
+  const artifact = capturePluginGenerationArtifact(source, entry);
+  cleanups.push(artifact.dispose);
+  expect(artifact.hasSource(unrelated)).toBe(false);
+  expect(fs.existsSync(path.join(artifact.rootDir, "label.json"))).toBe(false);
+  expect(artifact.hasSource(peer)).toBe(true);
+  fs.writeFileSync(peer, 'export const value = "after";');
+  const plugin = createArtifactLoader(artifact)(artifact.resolve(entry)) as {
+    read(label: (value: string) => string): Promise<string[]>;
+  };
+  await expect(plugin.read((value) => value)).resolves.toEqual([label, "before"]);
+  expect(artifact.assertSourceCurrent).toThrow();
+});
+
+it.each([
+  ...["using", "await using"].map((declaration) => ({
+    name: `${declaration} declarations`,
+    sourceText: `${declaration} resource = null;
+      const first = import('./a.js');
+      export function later() { return import('./b.js'); }`,
+    references: ["./b.js", "./a.js"],
+  })),
+  {
+    name: "exported loop assignments",
+    sourceText: `export let value;
+      for ([value = import('./a.js')] of [[import('./b.js')]]) {}`,
+    references: ["./b.js", "./a.js"],
+  },
+  {
+    name: "imported loop assignments",
+    sourceText: `import { value } from './value.js';
+      for ([value = import('./a.js')] of [[import('./b.js')]]) {}`,
+    references: ["./value.js", "./b.js"],
+  },
+  {
+    name: "reserved export declarations",
+    sourceText: "export const { flag: __esModule } = {}; import('./a.js');",
+    references: [],
+  },
+  {
+    name: "reserved export aliases",
+    sourceText: "export { value as '__esModule' } from './value.js'; import('./a.js');",
+    references: [],
+  },
+])("preserves transformed references when inspecting $name", ({ sourceText, references }) => {
+  const source = temp.make("plugin-reference-inspection-");
+  const entry = path.join(source, "entry.mjs");
+  fs.writeFileSync(entry, sourceText);
+  for (const name of ["a.js", "b.js", "value.js"]) {
+    fs.writeFileSync(path.join(source, name), "export const value = 'fixture';");
+  }
+  const inspection = inspectPluginSourceDependencies([{ rootDir: source, entryFile: entry }]);
+  expect(inspection.references).toEqual(
+    references.map((specifier) => ({
+      source: entry,
+      specifier,
+      target: path.join(source, specifier),
+    })),
+  );
+});
 
 it.each([false, true])(
   "keeps authored absolute references on the native source graph (selective: %s)",
@@ -436,53 +684,6 @@ it("retains selective package scopes and npm aliases without sweeping unused inp
   ).toBe(false);
 });
 
-it("captures hoisted setup helpers without changing plugin or importer dependency identity", async () => {
-  const distribution = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-setup-dist-"));
-  cleanups.push(() => fs.rmSync(distribution, { recursive: true, force: true }));
-  const boundary = path.join(distribution, "dist");
-  const source = path.join(boundary, "extensions", "setup-owner");
-  fs.mkdirSync(source, { recursive: true });
-  const entry = path.join(source, "setup-api.cjs");
-  const helper = path.join(boundary, "setup-helper.cjs");
-  const token = Buffer;
-  const write = (version: string) => {
-    for (const [root, label] of [
-      [distribution, "hoisted"],
-      [source, "plugin"],
-    ] as const) {
-      const dependency = path.join(root, "node_modules", "setup-dependency");
-      fs.mkdirSync(dependency, { recursive: true });
-      fs.writeFileSync(path.join(dependency, "package.json"), '{"main":"index.cjs"}');
-      fs.writeFileSync(
-        path.join(dependency, "index.cjs"),
-        `exports.value = ${JSON.stringify(`${label}-${version}`)};`,
-      );
-    }
-    fs.writeFileSync(helper, "exports.value = require('setup-dependency').value;");
-    fs.writeFileSync(
-      entry,
-      `exports.read = async () => [
-        require('node:buffer').Buffer,
-        require('setup-dependency').value,
-        (await import('../../setup-helper.cjs')).value
-      ];`,
-    );
-  };
-  const capture = () => {
-    const artifact = capturePluginGenerationArtifact(source, entry, boundary);
-    cleanups.push(artifact.dispose);
-    expect(artifact.sourceRoot).toBe(fs.realpathSync(source));
-    const host = createArtifactLoader(artifact);
-    return host(artifact.resolve(entry)) as { read(): Promise<unknown[]> };
-  };
-  write("before");
-  const first = capture();
-  write("after");
-  const second = capture();
-  await expect(first.read()).resolves.toEqual([token, "plugin-before", "hoisted-before"]);
-  await expect(second.read()).resolves.toEqual([token, "plugin-after", "hoisted-after"]);
-});
-
 it.each([
   ["require.resolve", "fs.readFileSync(require.resolve('./schema.json'), 'utf8')"],
   [
@@ -646,6 +847,7 @@ it.each(["plugin", "punycode"])(
     const b = load("B");
     await expect(a.plugin.read()).resolves.toEqual(["A", "A", "A"]);
     await expect(b.plugin.read()).resolves.toEqual(["B", "B", "B"]);
+    expect(a.artifact.sourceDigest).not.toBe(b.artifact.sourceDigest);
     fs.rmSync(source, { recursive: true });
     expect(b.artifact.resolve(path.join(source, "lazy.ts"))).toBe(
       path.join(b.artifact.rootDir, "lazy.ts"),

@@ -99,6 +99,7 @@ async function sendLinePayload({
   deliveryPartCount,
   onPlatformSendDispatch,
   onDeliveryResult,
+  assertDirectAdapterHandoff,
 }: LineSendPayloadContext) {
   const runtime = getLineRuntime();
   const outboundRuntime = await loadLineOutboundRuntime();
@@ -291,6 +292,7 @@ async function sendLinePayload({
       deliveryPartCount,
       onPlatformSendDispatch,
       onDeliveryResult,
+      assertDirectAdapterHandoff,
     },
     plannedPushes,
   );
@@ -311,6 +313,7 @@ async function sendPlannedLinePushes(
     deliveryPartCount,
     onPlatformSendDispatch,
     onDeliveryResult,
+    assertDirectAdapterHandoff,
   }: Pick<
     LineSendPayloadContext,
     | "to"
@@ -322,6 +325,7 @@ async function sendPlannedLinePushes(
     | "deliveryPartCount"
     | "onPlatformSendDispatch"
     | "onDeliveryResult"
+    | "assertDirectAdapterHandoff"
   >,
   plannedPushes: LineOutboundMessage[][],
 ) {
@@ -391,6 +395,7 @@ async function sendPlannedLinePushes(
     accountId,
     onPlatformSendDispatch,
     onDeliveryResult,
+    assertDirectAdapterHandoff,
     pushes,
   });
 }
@@ -410,6 +415,7 @@ async function dispatchLinePushes(params: {
   accountId?: string | null;
   onPlatformSendDispatch?: () => Promise<void>;
   onDeliveryResult?: (result: OutboundDeliveryResult) => void | Promise<void>;
+  assertDirectAdapterHandoff?: () => void;
   pushes: readonly { retryKey?: string; messages: LineOutboundMessage[] }[];
   retryKeyExpiresAtMs?: number;
 }): Promise<OutboundDeliveryResult> {
@@ -420,6 +426,13 @@ async function dispatchLinePushes(params: {
     ? createDispatchOnce(params.onPlatformSendDispatch)
     : undefined;
   const accountId = params.accountId ?? undefined;
+  const { assertDirectAdapterHandoff } = params;
+  const authorize = assertDirectAdapterHandoff
+    ? () => {
+        assertDirectAdapterHandoff();
+        return true;
+      }
+    : undefined;
   let lastResult: LineSendResult | null = null;
   for (const push of params.pushes) {
     let result: LineSendResult;
@@ -428,6 +441,7 @@ async function dispatchLinePushes(params: {
         verbose: false,
         cfg: params.cfg,
         accountId,
+        authorize,
         ...(dispatchOnce ? { onPlatformSendDispatch: dispatchOnce } : {}),
         ...(push.retryKey ? { durableRetryKey: push.retryKey } : {}),
         ...(params.retryKeyExpiresAtMs === undefined

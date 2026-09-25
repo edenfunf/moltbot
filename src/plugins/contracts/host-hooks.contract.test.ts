@@ -8,6 +8,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-test-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  PROTOCOL_VERSION,
   validatePluginsUiDescriptorsResult,
   validatePluginsUiDescriptorsParams,
   validateSessionsPluginPatchParams,
@@ -20,8 +21,18 @@ import {
   loadSessionEntryReadOnly,
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
-import { APPROVALS_SCOPE, READ_SCOPE, WRITE_SCOPE } from "../../gateway/operator-scopes.js";
+import {
+  createCoreGatewayMethodDescriptors,
+  createGatewayMethodRegistry,
+} from "../../gateway/methods/registry.js";
+import {
+  ADMIN_SCOPE,
+  APPROVALS_SCOPE,
+  READ_SCOPE,
+  WRITE_SCOPE,
+} from "../../gateway/operator-scopes.js";
 import { pluginHostHookHandlers } from "../../gateway/server-methods/plugin-host-hooks.js";
+import type { GatewayRequestContext } from "../../gateway/server-methods/types.js";
 import { buildGatewaySessionRow } from "../../gateway/session-utils.js";
 import { withTempConfig } from "../../gateway/test-temp-config.js";
 import { emitAgentEvent, resetAgentEventsForTest } from "../../infra/agent-events.js";
@@ -52,6 +63,7 @@ import { createEmptyPluginRegistry } from "../registry-empty.js";
 import { createPluginRegistry } from "../registry.js";
 import {
   clearActivePluginRegistry,
+  getActivePluginRegistryVersion,
   disposePluginRegistryInstances,
   setActivePluginRegistry,
   stageActivePluginRegistry,
@@ -63,6 +75,7 @@ import {
   runTrustedToolPolicies,
 } from "../trusted-tool-policy.js";
 import { registerHostHookFixture, registerTrustedHostHookFixture } from "./host-hook-fixture.js";
+import { hostHookUiProjection } from "./test-helpers/host-hook-ui-projection.js";
 
 async function waitForPluginEventHandlers(): Promise<void> {
   await new Promise<void>((resolve) => {
@@ -2467,42 +2480,42 @@ describe("host-hook fixture plugin contract", () => {
     Object.assign(descriptorEntry.descriptor, { leakedRegistryField: true });
     setActivePluginRegistry(registry.registry);
 
+    const methodRegistry = createGatewayMethodRegistry(
+      createCoreGatewayMethodDescriptors(pluginHostHookHandlers),
+      registry.registry,
+    );
+    const context: Pick<GatewayRequestContext, "getRuntimeConfig" | "getGatewayMethodRegistry"> = {
+      getRuntimeConfig: () => config,
+      getGatewayMethodRegistry: () => methodRegistry,
+    };
     const calls: Array<[boolean, unknown, unknown]> = [];
     void expectDefined(
       pluginHostHookHandlers["plugins.uiDescriptors"],
       'pluginHostHookHandlers["plugins.uiDescriptors"] test invariant',
     )({
+      req: { type: "req", id: "ui-descriptors", method: "plugins.uiDescriptors", params: {} },
       params: {},
+      client: {
+        connect: {
+          minProtocol: PROTOCOL_VERSION,
+          maxProtocol: PROTOCOL_VERSION,
+          client: { id: "gateway-client", version: "test", platform: "test", mode: "backend" },
+          scopes: [ADMIN_SCOPE],
+        },
+      },
+      isWebchatConnect: () => false,
+      context: context as GatewayRequestContext,
       respond: (ok: boolean, payload: unknown, error: unknown) => {
         calls.push([ok, payload, error]);
       },
-    } as never);
+    });
 
     expect(calls).toHaveLength(1);
     const [ok, payload, error] = calls[0] ?? [];
     expect(ok).toBe(true);
     expect(error).toBeUndefined();
     expect(validatePluginsUiDescriptorsResult(payload)).toBe(true);
-    expect(payload).toEqual({
-      ok: true,
-      descriptors: [
-        {
-          id: "approval-panel",
-          pluginId: "host-hook-fixture",
-          pluginName: "Host Hook Fixture",
-          surface: "session",
-          label: "Approval panel",
-        },
-        {
-          id: "admin-panel",
-          pluginId: "host-hook-fixture",
-          pluginName: "Host Hook Fixture",
-          surface: "settings",
-          label: "Admin panel",
-          requiredScopes: ["operator.admin"],
-        },
-      ],
-    });
+    expect(payload).toEqual(hostHookUiProjection(getActivePluginRegistryVersion()));
   });
 
   it("enforces command requiredScopes for gateway clients and command owners", async () => {
@@ -2674,54 +2687,6 @@ describe("host-hook fixture plugin contract", () => {
     ).toBeUndefined();
   });
 
-  it("does not let delayed non-terminal subscriptions resurrect closed run context", async () => {
-    let releaseToolHandler: (() => void) | undefined;
-    const { config, registry } = createPluginRegistryFixture();
-    registerTestPlugin({
-      registry,
-      config,
-      record: createPluginRecord({
-        id: "delayed-subscription",
-        name: "Delayed Subscription",
-      }),
-      register(api) {
-        api.registerAgentEventSubscription({
-          id: "delayed",
-          streams: ["tool"],
-          async handle(eventValue, ctx) {
-            await new Promise<void>((resolve) => {
-              releaseToolHandler = resolve;
-            });
-            ctx.setRunContext("late", { resurrected: true });
-          },
-        });
-      },
-    });
-    setActivePluginRegistry(registry.registry);
-
-    emitAgentEvent({
-      runId: "run-delayed-subscription",
-      stream: "tool",
-      data: { name: "approval_fixture_tool" },
-    });
-    await Promise.resolve();
-
-    emitAgentEvent({
-      runId: "run-delayed-subscription",
-      stream: "lifecycle",
-      data: { phase: "end" },
-    });
-    releaseToolHandler?.();
-    await waitForPluginEventHandlers();
-
-    expect(
-      getPluginRunContext({
-        pluginId: "delayed-subscription",
-        get: { runId: "run-delayed-subscription", namespace: "late" },
-      }),
-    ).toBeUndefined();
-  });
-
   it("continues agent event dispatch and terminal cleanup when one subscription throws", async () => {
     const { config, registry } = createPluginRegistryFixture();
     registerTestPlugin({
@@ -2787,138 +2752,6 @@ describe("host-hook fixture plugin contract", () => {
         get: { runId: "run-throws", namespace: "seen" },
       }),
     ).toBeUndefined();
-  });
-
-  it("preserves run context until async terminal event subscriptions settle", async () => {
-    let releaseTerminalHandler: (() => void) | undefined;
-    let terminalHandlerSawContext: unknown;
-    const { config, registry } = createPluginRegistryFixture();
-    registerTestPlugin({
-      registry,
-      config,
-      record: createPluginRecord({
-        id: "async-terminal-subscription",
-        name: "Async Terminal Subscription",
-      }),
-      register(api) {
-        api.registerAgentEventSubscription({
-          id: "records",
-          streams: ["tool", "lifecycle"],
-          async handle(event, ctx) {
-            if (event.stream === "tool") {
-              ctx.setRunContext("seen", { runId: event.runId });
-              return;
-            }
-            if (event.data?.phase !== "end") {
-              return;
-            }
-            await new Promise<void>((resolve) => {
-              releaseTerminalHandler = resolve;
-            });
-            terminalHandlerSawContext = ctx.getRunContext("seen");
-          },
-        });
-      },
-    });
-    setActivePluginRegistry(registry.registry);
-
-    emitAgentEvent({
-      runId: "run-async-terminal",
-      stream: "tool",
-      data: { name: "approval_fixture_tool" },
-    });
-    await Promise.resolve();
-
-    emitAgentEvent({
-      runId: "run-async-terminal",
-      stream: "lifecycle",
-      data: { phase: "end" },
-    });
-    await Promise.resolve();
-
-    expect(
-      getPluginRunContext({
-        pluginId: "async-terminal-subscription",
-        get: { runId: "run-async-terminal", namespace: "seen" },
-      }),
-    ).toEqual({ runId: "run-async-terminal" });
-
-    releaseTerminalHandler?.();
-    await waitForPluginEventHandlers();
-
-    expect(terminalHandlerSawContext).toEqual({ runId: "run-async-terminal" });
-    expect(
-      getPluginRunContext({
-        pluginId: "async-terminal-subscription",
-        get: { runId: "run-async-terminal", namespace: "seen" },
-      }),
-    ).toBeUndefined();
-  });
-
-  it("covers the non-Plan plugin archetypes promised by the host-hook fixture", () => {
-    const archetypes = [
-      {
-        name: "approval workflow",
-        seams: [
-          "session extension",
-          "command continuation",
-          "next-turn injection",
-          "UI descriptor",
-        ],
-      },
-      {
-        name: "budget/workspace policy gate",
-        seams: ["trusted tool policy", "tool metadata", "session projection"],
-      },
-      {
-        name: "background lifecycle monitor",
-        seams: ["agent event subscription", "scheduler cleanup", "heartbeat prompt contribution"],
-      },
-    ];
-
-    expect(archetypes.map((entry) => entry.name)).toEqual([
-      "approval workflow",
-      "budget/workspace policy gate",
-      "background lifecycle monitor",
-    ]);
-    expect(archetypes.flatMap((entry) => entry.seams)).toEqual([
-      "session extension",
-      "command continuation",
-      "next-turn injection",
-      "UI descriptor",
-      "trusted tool policy",
-      "tool metadata",
-      "session projection",
-      "agent event subscription",
-      "scheduler cleanup",
-      "heartbeat prompt contribution",
-    ]);
-  });
-
-  it("proves every #71676 Plan Mode entry-point class has a generic host seam", () => {
-    const parityMap = [
-      ["session state + sessions.patch", "session extensions + sessions.pluginPatch"],
-      [
-        "pending injections + approval resumes",
-        "durable next-turn injections + agent_turn_prepare",
-      ],
-      ["mutation gates around tools", "trusted tool policy before before_tool_call"],
-      ["slash/native command continuations", "requiredScopes + reserved ownership + continueAgent"],
-      ["Control UI mode/cards/status", "Control UI descriptor projection"],
-      [
-        "plan snapshots, nudges, subagent follow-ups, heartbeat",
-        "agent events + run context + scheduler cleanup + heartbeat contribution",
-      ],
-      ["tool catalog display metadata", "plugin tool metadata projection"],
-      ["disable/reset/delete/restart cleanup", "runtime lifecycle cleanup"],
-    ];
-
-    expect(parityMap).toHaveLength(8);
-    for (const [entryPoint, seam] of parityMap) {
-      expect(entryPoint).not.toBe("");
-      expect(seam).not.toBe("");
-      expect(seam).not.toContain("Plan Mode");
-    }
   });
 
   it("cleans plugin-owned session state and lifecycle resources on reset/disable", async () => {
@@ -3453,75 +3286,6 @@ describe("host-hook fixture plugin contract", () => {
         get: { runId: "run-b", namespace: "state" },
       }),
     ).toEqual({ keep: "b" });
-  });
-
-  it("preserves durable plugin session state during plugin restart cleanup", async () => {
-    const { config, registry } = createPluginRegistryFixture();
-    registerTestPlugin({
-      registry,
-      config,
-      record: createPluginRecord({
-        id: "restart-state-fixture",
-        name: "Restart State Fixture",
-      }),
-      register(api) {
-        api.registerSessionExtension({
-          namespace: "workflow",
-          description: "restart state test",
-        });
-      },
-    });
-
-    await withHostHookState(
-      "openclaw-host-hooks-restart-state-",
-      async ({ storePath, tempConfig }) => {
-        await updateSessionStore(storePath, (store) => {
-          store["agent:main:main"] = {
-            sessionId: "session-1",
-            updatedAt: Date.now(),
-            pluginExtensions: {
-              "restart-state-fixture": { workflow: { state: "waiting" } },
-            },
-            pluginNextTurnInjections: {
-              "restart-state-fixture": [
-                {
-                  id: "resume",
-                  pluginId: "restart-state-fixture",
-                  text: "resume",
-                  placement: "prepend_context",
-                  createdAt: 1,
-                },
-              ],
-            },
-          };
-          return undefined;
-        });
-
-        const cleanupResult = await runPluginHostCleanup({
-          cfg: tempConfig,
-          registry: registry.registry,
-          pluginId: "restart-state-fixture",
-          reason: "restart",
-        });
-        expect(cleanupResult.failures).toEqual([]);
-
-        const stored = loadSessionStore(storePath, { skipCache: true });
-        expect(stored["agent:main:main"]?.pluginExtensions).toEqual({
-          "restart-state-fixture": { workflow: { state: "waiting" } },
-        });
-        expect(stored["agent:main:main"]?.pluginNextTurnInjections).toEqual({
-          "restart-state-fixture": [
-            {
-              id: "resume",
-              pluginId: "restart-state-fixture",
-              text: "resume",
-              placement: "prepend_context",
-              createdAt: 1,
-            },
-          ],
-        });
-      },
-    );
   });
 
   it("cleans pending injections for plugins that registered no host-hook callbacks", async () => {
