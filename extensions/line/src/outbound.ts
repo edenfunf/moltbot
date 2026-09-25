@@ -345,16 +345,24 @@ async function sendPlannedLinePushes(
       }),
       messages: messages.map(normalizeLineMessage),
     }));
-    pushes = (
-      await recordLineDurableSendPlan({
-        queueId: deliveryQueueId,
-        partIndex: deliveryPartIndex,
-        partCount: deliveryPartCount,
-        to,
-        ...(accountId ? { accountId } : {}),
-        pushes: keyedPushes,
-      })
-    ).pushes;
+    try {
+      pushes = (
+        await recordLineDurableSendPlan({
+          queueId: deliveryQueueId,
+          partIndex: deliveryPartIndex,
+          partCount: deliveryPartCount,
+          to,
+          ...(accountId ? { accountId } : {}),
+          pushes: keyedPushes,
+        })
+      ).pushes;
+    } catch (error) {
+      // Nothing has reached LINE yet, so core may retry or retire the row safely.
+      throw new PlatformMessageNotDispatchedError(formatErrorMessage(error), {
+        cause: error,
+        retryable: !(error instanceof LineDurableSendPlanError),
+      });
+    }
   }
   return await dispatchLinePushes({
     to,

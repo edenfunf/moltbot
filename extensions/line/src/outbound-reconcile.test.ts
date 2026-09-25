@@ -384,9 +384,13 @@ describe("LINE unknown-send reconciliation", () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockClear();
 
-    await expect(sendDurablePart({ partIndex: 0, partCount: 2, text: "hello" })).rejects.toThrow(
-      "was recorded for a different fan-out",
-    );
+    await expect(
+      sendDurablePart({ partIndex: 0, partCount: 2, text: "hello" }),
+    ).rejects.toMatchObject({
+      name: "PlatformMessageNotDispatchedError",
+      message: expect.stringContaining("was recorded for a different fan-out"),
+      retryable: false,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -547,7 +551,11 @@ describe("LINE unknown-send reconciliation", () => {
         deliveryPartIndex: 0,
         deliveryPartCount: 1,
       }),
-    ).rejects.toThrow("Plugin blob namespace reached its stored row limit.");
+    ).rejects.toMatchObject({
+      name: "PlatformMessageNotDispatchedError",
+      message: "Plugin blob namespace reached its stored row limit.",
+      retryable: true,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
