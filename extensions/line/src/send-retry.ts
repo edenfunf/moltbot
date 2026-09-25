@@ -12,11 +12,7 @@ import { readLineAccountMessageQuota } from "./probe.js";
 /** LINE keeps a retry key for 24 hours; past that a replay delivers a second copy. */
 export const LINE_RETRY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 
-/**
- * A replay that reached its retry key's deadline before the request went out. It is
- * never retryable: LINE has stopped deduplicating the key, so the next attempt would
- * deliver a second copy rather than resolve the first.
- */
+/** A replay past its retry key's window; never retryable. */
 export class LineRetryKeyExpiredError extends Error {
   constructor() {
     super("LINE retry key expired before the queued send could be reconciled");
@@ -24,13 +20,7 @@ export class LineRetryKeyExpiredError extends Error {
   }
 }
 
-/**
- * Derives the retry key for one platform send. A durable intent id produces the
- * same key in every process, so recovery can replay the exact request that may
- * already have been accepted; unqueued sends fall back to a fresh key.
- * The key spans both indices because core numbers the parts it plans while the
- * payload sender numbers the pushes one part fans out into.
- */
+/** Same key in every process for one queued push, so recovery can replay it; else random. */
 export function resolveLinePushRetryKey(params: {
   deliveryQueueId?: string | null;
   partIndex?: number;
@@ -52,7 +42,6 @@ export function resolveLinePushRetryKey(params: {
   ].join("-");
 }
 
-/** True when a replay stopped because its retry key's window closed, at any wrap depth. */
 export function isLineRetryKeyExpiredError(error: unknown): boolean {
   return collectErrorGraphCandidates(error, (candidate) => [candidate.cause, candidate.error]).some(
     (candidate) => candidate instanceof LineRetryKeyExpiredError,
@@ -66,11 +55,6 @@ export function findLineHttpError(error: unknown): HTTPFetchError | undefined {
   );
 }
 
-/**
- * LINE rejected the request itself, so the same bytes were refused whenever they were
- * sent. A 401 or 403 refuses the caller's credentials instead, which says nothing about
- * whether an earlier attempt under the same retry key was accepted.
- */
 export function isLineRequestRejection(error: unknown): boolean {
   return findLineHttpError(error)?.status === 400;
 }

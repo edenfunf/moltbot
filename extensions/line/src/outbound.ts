@@ -57,7 +57,6 @@ import {
 } from "./send-retry.js";
 import type { LineChannelData, LineSendResult, ResolvedLineAccount } from "./types.js";
 
-/** Any LINE message this adapter can put on the wire. */
 type LineOutboundMessage = messagingApi.Message;
 
 type LineSendPayloadContext = Parameters<
@@ -78,15 +77,7 @@ function createDispatchOnce(onPlatformSendDispatch?: () => Promise<void>): () =>
   };
 }
 
-/**
- * Renders one delivery part into the exact pushes it will make, records them all
- * before the first of them leaves, then sends them.
- *
- * No LINE message in a part depends on the result of an earlier one, so the whole
- * fan-out is known before any of it is sent. Recording it whole is what lets a
- * replay reissue the very requests LINE was asked to take, instead of re-rendering
- * the reply and hoping it still renders the same way.
- */
+/** Renders one delivery part into every push it will make before sending any of them. */
 async function sendLinePayload({
   to,
   payload,
@@ -127,9 +118,6 @@ async function sendLinePayload({
     ? quickReplyItems.map((item) => item.label)
     : quickReplies;
 
-  // Every entry is one push, in the order it will be made. Nothing is sent while
-  // this is being built, so a failure here — an unusable media URL, for instance —
-  // refuses the whole reply instead of leaving half of it delivered.
   const plannedPushes: LineOutboundMessage[][] = [];
   const addPush = (messages: LineOutboundMessage[]): void => {
     if (messages.length > 0) {
@@ -297,10 +285,6 @@ async function sendLinePayload({
   );
 }
 
-/**
- * Quotes, records and sends one part's planned pushes. Every route that sends a part
- * comes through here, so a replay always finds the request that actually went out.
- */
 async function sendPlannedLinePushes(
   {
     to,
@@ -332,9 +316,7 @@ async function sendPlannedLinePushes(
     throw new Error("Message must be non-empty for LINE sends");
   }
 
-  // LINE renders a quote on one bubble, so a reply spends its token on the first
-  // message able to carry it, whichever push that is. Quoting before the plan is
-  // recorded is what lets a replay reissue the quote along with the request.
+  // LINE renders a quote on one bubble; quote before recording so a replay quotes too.
   const replyQuoteToken = resolveLineQuoteToken({
     cfg,
     accountId,
@@ -385,13 +367,7 @@ async function sendPlannedLinePushes(
   });
 }
 
-/**
- * Sends the pushes of one part, in order, under the keys they were recorded with.
- *
- * A recorded key makes each request idempotent for LINE's 24-hour window, so this
- * is also the replay path: reissuing an accepted push answers 409 with its original
- * receipt, and one that never landed is delivered now.
- */
+/** Sends one part's pushes in order; with recorded keys this is also the replay path. */
 async function dispatchLinePushes(params: {
   to: string;
   cfg: Parameters<
@@ -472,15 +448,10 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
   presentationCapabilities: LINE_PRESENTATION_CAPABILITIES,
   renderPresentation: ({ payload, presentation, sourcePresentation, ctx }) =>
     renderLinePresentation(payload, presentation, ctx.to, sourcePresentation),
-  // Core plans parts for text and media but not for a structured payload, because a
-  // payload is one part of one; it is stated here rather than substituted at the
-  // recorder, which must keep refusing a route that lost its real coordinates.
-  // Matrix's adapter draws the same line in the same place.
+  // Core plans no parts for a structured payload; it is one part of one.
   sendPayload: async (ctx) =>
     await sendLinePayload({
       ...ctx,
-      // Present and undefined on this route (`deliver-channel.ts`), so spreading a
-      // default under it would be overwritten by the absent value.
       deliveryPartIndex: ctx.deliveryPartIndex ?? 0,
       deliveryPartCount: ctx.deliveryPartCount ?? 1,
     }),
@@ -488,14 +459,12 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     channel: "line",
     // The payload owner records each physical send before the next fallible step;
     // bypassing it fabricates Flex-only ids and loses partial-delivery evidence.
-    // These two keep the coordinates core planned for them.
     sendText: async (ctx) =>
       await sendLinePayload({
         ...ctx,
         payload: { text: ctx.text },
       }),
-    // A direct media send keeps the request `sendMessageLine` made: the media and its
-    // caption in one push, recorded as one so a replay reissues it whole.
+    // Keeps main's shape for a direct media send: media and caption in one push.
     sendMedia: async (ctx) => {
       const url = ctx.mediaUrl?.trim();
       const caption = ctx.text?.trim();
@@ -509,12 +478,9 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
 };
 
 /**
- * LINE has no read-only "was this accepted?" endpoint, so reconciliation reissues
- * the requests the interrupted send recorded, under the very keys it used: a push
- * LINE already accepted answers 409 with its original receipt, and one that never
- * landed is delivered now. The reply is not rendered or normalized again: the recorded
- * messages go back out as stored, so a reply that would render differently today still
- * resolves as the one LINE was actually asked to take.
+ * LINE has no "was this accepted?" endpoint, so reconciliation reissues the recorded
+ * requests under their original retry keys: an accepted push answers 409 with its
+ * receipt, and one that never landed is delivered now.
  */
 async function reconcileLineUnknownSend(
   ctx: ChannelMessageUnknownSendContext,
@@ -523,24 +489,19 @@ async function reconcileLineUnknownSend(
   try {
     plans = await loadLineDurableSendPlans(ctx.queueId);
   } catch (error) {
-    // Incomplete evidence is fail-closed on purpose: replaying part of a record
-    // would either duplicate an accepted push or drop one LINE never received.
     return {
       status: "unresolved",
       error: formatErrorMessage(error),
       retryable: !(error instanceof LineDurableSendPlanError),
     };
   }
-  // Every part of one delivery is dispatched together, so the earliest recorded
-  // instant is when this delivery's keys first reached LINE.
   const firstDispatchedAtMs = plans.length
     ? Math.min(...plans.map((plan) => plan.firstDispatchedAtMs))
     : undefined;
   const retryKeyExpiresAtMs =
     firstDispatchedAtMs === undefined ? undefined : firstDispatchedAtMs + LINE_RETRY_KEY_TTL_MS;
   if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
-    // The recorded instant is older than the queue entry knew, so this is the first
-    // point that can tell the window has actually closed.
+    // LINE forgets a retry key after 24 hours, so a replay would deliver a second copy.
     return {
       status: "unresolved",
       error: "LINE retry key expired before the queued send could be reconciled",
@@ -548,25 +509,15 @@ async function reconcileLineUnknownSend(
     };
   }
   if (plans.length === 0) {
-    // A push records itself before the dispatch marker that brings a delivery
-    // here at all (send.ts), so an empty record does not mean nothing was sent:
-    // it means this delivery never carried a recorder. Core withholds the queue
-    // id from a send it cannot key one-to-one — a batch, or one needing a
-    // capability this adapter does not declare — and those pushes went out under
-    // keys LINE will not deduplicate, so replaying them would deliver a second
-    // copy. Refuse instead.
+    // The plan is written before the dispatch marker, so no record means the send went
+    // out under random retry keys (core withheld the queue id) and cannot be replayed.
     return {
       status: "unresolved",
       error: "LINE delivery carried no durable record, so a replay could not be deduplicated",
       retryable: false,
     };
   }
-  // One payload can fan out into several platform sends, and the settled queue
-  // entry must carry the identity of every one of them. Collecting per push is
-  // what the live path does through this same observer; the payload's return
-  // value only carries its final send. Nothing is re-rendered here: the recorded
-  // requests are reissued exactly, so a reply that would render differently now
-  // still resolves as the one LINE was asked to take.
+  // The receipt must name every push, not only the last one each part returns.
   const results: OutboundDeliveryResult[] = [];
   for (const plan of plans) {
     try {
@@ -581,13 +532,7 @@ async function reconcileLineUnknownSend(
         },
       });
     } catch (error) {
-      // Reuses the send owner's classification rather than re-reading the status
-      // here: it is the one place that knows a 429 stays retryable, a 408 stays
-      // ambiguous, and a retry-key 409 is an accepted delivery, not a refusal.
       if (isLineRetryKeyExpiredError(error)) {
-        // Same outcome the entry guard reports, because it is the same condition:
-        // the key stopped being deduplicated, so no further attempt is safe and the
-        // delivery cannot be settled either way.
         return {
           status: "unresolved",
           error: "LINE retry key expired before the queued send could be reconciled",
@@ -596,16 +541,13 @@ async function reconcileLineUnknownSend(
       }
       const nonDispatchRetryable = resolveLineNonDispatchRetryable(error);
       if (results.length === 0 && nonDispatchRetryable === false && isLineRequestRejection(error)) {
-        // LINE rejected this exact request, so the interrupted attempt carrying the same
-        // bytes was rejected too. A credential refusal proves only that today's replay
-        // failed, so it stays unresolved below.
+        // A 400 refuses these exact bytes, so the interrupted attempt was refused too;
+        // a 401/403 only refuses today's credentials and stays unresolved.
         return { status: "not_sent" };
       }
       return {
         status: "unresolved",
         error: formatErrorMessage(error),
-        // An ambiguous failure stays retryable: the derived retry key makes a
-        // replay safe for 24 hours even if the interrupted attempt did land.
         retryable: nonDispatchRetryable ?? true,
       };
     }
@@ -622,13 +564,10 @@ async function reconcileLineUnknownSend(
   };
 }
 
-// The bridge forwards the send context verbatim. Rebuilding it by hand drops the
-// durable send seam core installed there, and an adapter that never reports its
-// platform dispatch cannot be reconciled after a crash.
+// The bridge forwards the whole send context, including the durable-send seam.
 const lineMessageAdapterBase = createChannelMessageAdapterFromOutbound({
   id: "line",
-  // `message send --media` comes through the message adapter, where main sent the
-  // caption and the media the way the payload owner does: separately, caption first.
+  // `message send --media` keeps main's shape: caption, then media, as two pushes.
   outbound: {
     ...lineOutboundAdapter,
     sendMedia: async (ctx) =>
@@ -654,16 +593,9 @@ export const lineMessageAdapter = defineChannelMessageAdapter({
   ...lineMessageAdapterBase,
   durableFinal: {
     ...lineMessageAdapterBase.durableFinal,
-    // Every queued LINE send records its pushes, so reconciliation is not limited to
-    // callers that ask for it: without this, an ordinary send that crashes mid-flight
-    // is dead-lettered even though the record needed to resolve it is already on disk.
-    // Declaring it here is also why no caller has to require it as a capability, which
-    // would raise durability to `required` and turn a failed queue write from a reply
-    // still delivered live into no reply at all.
+    // Every queued LINE send is recorded, so reconcile without each caller opting in.
     automaticUnknownSendReconciliation: true,
     capabilities: { ...lineMessageAdapterBase.durableFinal?.capabilities, afterCommit: true },
-    // Every platform send inside one payload carries its own durable key, so a
-    // replay resolves each push independently instead of resending the batch.
     reconcileUnknownSendKinds: { text: true, media: true, payload: true },
     reconcileUnknownSend: reconcileLineUnknownSend,
     afterUnknownSendTerminal: async (ctx) => await clearLineDurableSendPlans(ctx.queueId),
@@ -671,8 +603,6 @@ export const lineMessageAdapter = defineChannelMessageAdapter({
   send: {
     ...lineMessageAdapterBase.send,
     lifecycle: {
-      // Recorded requests exist only to answer a replay. Once the delivery is
-      // committed no replay can need them, so the content does not linger.
       afterCommit: async (ctx) => {
         if (ctx.deliveryQueueId) {
           await clearLineDurableSendPlans(ctx.deliveryQueueId);

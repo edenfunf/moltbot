@@ -111,23 +111,9 @@ interface LineSendOpts {
   durationMs?: number;
   trackingId?: string;
   replyToken?: string;
-  /**
-   * The recorded key for this push. The plan owns key derivation so a replay
-   * reissues the exact request that was recorded, rather than one this process
-   * would derive again; an unrecorded send gets a fresh key it cannot reuse. A push
-   * carrying one was quoted and normalized when it was planned, so its messages leave
-   * exactly as given.
-   */
+  /** A recorded push's key; its messages were normalized when recorded and leave as given. */
   durableRetryKey?: string;
-  /**
-   * When LINE stops deduplicating this send's retry key. Checked before every request,
-   * because the backoff between attempts or the unquoted retry inside one can outlive
-   * the window, and a request that lands after it is a second delivery rather than a
-   * deduplicated one. The recorded plan
-   * answers it: the key itself is a timestamp-free hash (`resolveLinePushRetryKey`),
-   * so neither a first send nor a retry can tell from the key alone when LINE first
-   * saw it.
-   */
+  /** When LINE stops deduplicating the key; checked before every request, retries included. */
   retryKeyExpiresAtMs?: number;
   onPlatformSendDispatch?: () => Promise<void>;
   quoteToken?: string;
@@ -439,25 +425,16 @@ async function pushLineMessages(
   }
 
   const { account, token, chatId } = createLinePushContext(to, opts);
-  // A keyed push is a planned request, and a recorded one must leave as the record holds
-  // it: normalizing it again would let a replay after an upgrade send something other
-  // than what the record says LINE was asked to take.
   const quotedMessages = applyLineQuoteToken(messages, opts.quoteToken);
   const wireMessages = opts.durableRetryKey
     ? quotedMessages
     : quotedMessages.map(normalizeLineMessage);
   // One retry key per logical push: every attempt reuses it so LINE deduplicates
-  // an attempt that was accepted before its outcome reached us. A recorded key
-  // stays stable across processes, so recovery replays this exact request instead
-  // of guessing whether it landed; an unrecorded send cannot be replayed at all.
+  // an attempt that was accepted before its outcome reached us.
   const retryKey = opts.durableRetryKey ?? resolveLinePushRetryKey({});
 
-  // The dispatch marker is what tells core a send began. A crash before it looks
-  // like a send that never started; one after it is reconciled, not replayed blind.
   await opts.onPlatformSendDispatch?.();
 
-  // Rides the per-request revalidation so the unquoted retry inside one attempt is
-  // held to the window as well as each attempt after a backoff.
   const { retryKeyExpiresAtMs } = opts;
   const revalidate = () => {
     if (retryKeyExpiresAtMs !== undefined && Date.now() >= retryKeyExpiresAtMs) {
