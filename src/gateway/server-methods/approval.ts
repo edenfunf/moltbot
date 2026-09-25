@@ -194,7 +194,6 @@ export function createApprovalHandlers(
         );
         return;
       }
-      const historyParams = rawParams;
       if (!authority.isCurrent()) {
         respondApprovalNotFound(respond);
         return;
@@ -202,9 +201,9 @@ export function createApprovalHandlers(
       let history: Awaited<ReturnType<typeof listTerminalOperatorApprovals>>;
       try {
         history = await listTerminalOperatorApprovals({
-          cursor: historyParams.cursor,
-          limit: historyParams.limit,
-          kind: historyParams.kind,
+          cursor: rawParams.cursor,
+          limit: rawParams.limit,
+          kind: rawParams.kind,
           databaseOptions: params.databaseOptions,
           guard: authority.guard,
         });
