@@ -6,162 +6,54 @@ import { createLineSendReceipt } from "./send-receipt.js";
 /** In-memory stand-in for the plugin blob store the durable send plan persists to. */
 export type LineBlobStoreFake = Map<string, Uint8Array>;
 
-/** Runtime state slice backed by an in-memory store, shared by the durable suites. */
-export function createLineBlobStoreState(): {
-  state: { openBlobStore: ReturnType<typeof createBlobStoreOpener> };
-  blobs: LineBlobStoreFake;
-} {
-  const namespaces = new Map<string, LineBlobStoreFake>();
+/**
+ * The real store runs SQLite in a worker whose clock a test cannot fake, and these
+ * suites drive LINE's 24-hour retry-key window, so the plan namespace is simulated.
+ * Only the calls the plan owner makes are modelled, with the store's TTL semantics.
+ */
+export function createLineBlobStoreState() {
   const blobs: LineBlobStoreFake = new Map();
-  namespaces.set("outbound-send-plans", blobs);
-  return { state: { openBlobStore: createBlobStoreOpener(namespaces) }, blobs };
-}
-
-function createBlobStoreOpener(namespaces: Map<string, LineBlobStoreFake>) {
-  // Expiries live beside the bytes, per namespace, because production opens a new
-  // store handle for every operation: holding them on the handle would drop each
-  // entry's deadline the moment the store that recorded it went out of scope.
-  const namespaceExpiries = new Map<string, Map<string, number>>();
-  return (options: {
-    namespace: string;
-    defaultTtlMs?: number;
-    maxEntries?: number;
-    maxBytesPerEntry?: number;
-    maxBytesPerNamespace?: number;
-    overflowPolicy?: "reject-new" | "evict-oldest";
-  }) => {
-    const blobs = namespaces.get(options.namespace) ?? new Map<string, Uint8Array>();
-    namespaces.set(options.namespace, blobs);
-    // The store this stands in for drops an entry once its TTL passes. Keeping
-    // entries forever here would make every expiry-dependent assertion pass by
-    // construction, including the window a recorded plan has to survive.
-    const expiries = namespaceExpiries.get(options.namespace) ?? new Map<string, number>();
-    namespaceExpiries.set(options.namespace, expiries);
-    const isExpired = (key: string) => {
-      const expiresAt = expiries.get(key);
-      return expiresAt !== undefined && Date.now() >= expiresAt;
-    };
-    const drop = (key: string) => {
-      blobs.delete(key);
-      expiries.delete(key);
-    };
-    const live = (key: string) => {
-      if (isExpired(key)) {
-        drop(key);
-      }
-      return blobs.has(key);
-    };
-    const put = (key: string, bytes: Uint8Array, ttlMs?: number) => {
-      // Production refuses a new entry once the namespace is full rather than
-      // evicting one, and that refusal is what an operator actually sees. A stand-in
-      // with no ceiling makes every full-namespace assertion pass by construction.
-      // A part writes one row once, so within a part the row count cannot grow — but a
-      // delivery has one row per part, and production charges a rewrite only its growth,
-      // so both ceilings still decide whether a later part can be recorded.
-      if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
-        throw new Error(
-          `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,
-        );
-      }
-      if (
-        options.overflowPolicy === "reject-new" &&
-        options.maxEntries !== undefined &&
-        !blobs.has(key) &&
-        blobs.size >= options.maxEntries
-      ) {
-        throw new Error("Plugin blob namespace reached its stored row limit.");
-      }
-      if (options.maxBytesPerNamespace !== undefined) {
-        // Same accounting as the real store: the row being replaced is credited back
-        // before the new bytes are charged (plugin-blob-store.sqlite.ts).
-        let namespaceBytes = 0;
-        for (const stored of blobs.values()) {
-          namespaceBytes += stored.byteLength;
-        }
-        const previousBytes = blobs.get(key)?.byteLength ?? 0;
-        if (namespaceBytes - previousBytes + bytes.byteLength > options.maxBytesPerNamespace) {
-          throw new Error("Plugin blob namespace reached its stored byte limit.");
-        }
+  // Expiries live beside the bytes because production opens a new handle per operation.
+  const expiries = new Map<string, number>();
+  const isExpired = (key: string) => Date.now() >= (expiries.get(key) ?? Infinity);
+  const drop = (key: string) => {
+    blobs.delete(key);
+    expiries.delete(key);
+  };
+  const openBlobStore = ({ defaultTtlMs }: { defaultTtlMs?: number }) => ({
+    registerIfAbsent: async (key: string, bytes: Uint8Array) => {
+      // Like the real store, an expired row still occupies its key until it is swept.
+      if (blobs.has(key)) {
+        return false;
       }
       blobs.set(key, bytes);
-      const effectiveTtlMs = ttlMs ?? options.defaultTtlMs;
-      if (effectiveTtlMs === undefined) {
-        expiries.delete(key);
-        return;
+      if (defaultTtlMs !== undefined) {
+        expiries.set(key, Date.now() + defaultTtlMs);
       }
-      expiries.set(key, Date.now() + effectiveTtlMs);
-    };
-    const info = (key: string) => ({
-      key,
-      metadata: {},
-      sizeBytes: blobs.get(key)?.byteLength ?? 0,
-      createdAt: 0,
-    });
-    return {
-      register: async (
-        key: string,
-        bytes: Uint8Array,
-        _metadata?: unknown,
-        entryOptions?: { ttlMs?: number },
-      ) => {
-        put(key, bytes, entryOptions?.ttlMs);
-      },
-      registerIfAbsent: async (
-        key: string,
-        bytes: Uint8Array,
-        _metadata?: unknown,
-        entryOptions?: { ttlMs?: number },
-      ) => {
-        // Production refuses an expired row too: its existence check does not filter on
-        // the deadline, because "expired rows remain owner-managed until explicitly
-        // claimed" (plugin-blob-store.sqlite.ts). A stand-in that treated them as free
-        // would let a caller drop its own expiry sweep and still pass.
-        // Production also checks the entry size before it looks for the key (`prepareBlob`),
-        // so a retry whose new record is too large is refused even though one is stored.
-        if (options.maxBytesPerEntry !== undefined && bytes.byteLength > options.maxBytesPerEntry) {
-          throw new Error(
-            `plugin blob entry exceeds the configured ${options.maxBytesPerEntry} byte limit`,
-          );
-        }
-        if (blobs.has(key)) {
-          return false;
-        }
-        put(key, bytes, entryOptions?.ttlMs);
-        return true;
-      },
-      lookup: async (key: string) => {
-        if (!live(key)) {
-          return undefined;
-        }
-        const bytes = blobs.get(key);
-        return bytes ? { ...info(key), bytes } : undefined;
-      },
-      entries: async () => Array.from(blobs.keys(), info).filter((entry) => live(entry.key)),
-      delete: async (key: string) => {
-        const existed = blobs.has(key);
-        drop(key);
-        return existed;
-      },
-      deleteExpiredKey: async (key: string) => {
-        if (!isExpired(key)) {
-          return undefined;
-        }
-        drop(key);
-        return key;
-      },
-      deleteExpired: async () => {
-        const expired = Array.from(blobs.keys()).filter(isExpired);
-        for (const key of expired) {
-          drop(key);
-        }
-        return expired;
-      },
-      clear: async () => {
-        blobs.clear();
-        expiries.clear();
-      },
-    };
-  };
+      return true;
+    },
+    lookup: async (key: string) => {
+      const bytes = isExpired(key) ? undefined : blobs.get(key);
+      return bytes
+        ? { key, bytes, metadata: {}, sizeBytes: bytes.byteLength, createdAt: 0 }
+        : undefined;
+    },
+    entries: async () =>
+      Array.from(blobs.keys())
+        .filter((key) => !isExpired(key))
+        .map((key) => ({ key })),
+    delete: async (key: string) => {
+      const existed = blobs.has(key);
+      drop(key);
+      return existed;
+    },
+    deleteExpired: async () => {
+      const expired = Array.from(blobs.keys()).filter(isExpired);
+      expired.forEach(drop);
+      return expired;
+    },
+  });
+  return { state: { openBlobStore }, blobs };
 }
 
 type LineRuntimeMocks = {

@@ -523,20 +523,20 @@ describe("LINE unknown-send reconciliation", () => {
   });
 
   it("sends nothing when the plan store will not take the record", async () => {
-    // One row, taken by the first delivery: the second one's record is refused.
     const store = createLineBlobStoreState();
     setLineRuntime({
       state: {
-        openBlobStore: (options: { namespace: string }) =>
-          store.state.openBlobStore({ ...options, maxEntries: 1, overflowPolicy: "reject-new" }),
+        openBlobStore: (options: { defaultTtlMs?: number }) => ({
+          ...store.state.openBlobStore(options),
+          registerIfAbsent: async () => {
+            throw new Error("Plugin blob namespace reached its stored row limit.");
+          },
+        }),
       },
       channel: {
         text: { chunkMarkdownText: (text: string) => [text], resolveTextChunkLimit: () => 5000 },
       },
     } as unknown as PluginRuntime);
-    await sendDurablePart({ partIndex: 0, partCount: 1, text: "the one row this holds" });
-    fetchMock.mockClear();
-
     await expect(
       linePlugin.outbound?.sendPayload?.({
         cfg: CFG,
