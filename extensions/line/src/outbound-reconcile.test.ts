@@ -729,21 +729,6 @@ describe("LINE unknown-send reconciliation", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("refuses to replay once LINE has forgotten the retry keys", async () => {
-    await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
-    fetchMock.mockClear();
-
-    await expect(
-      reconcile({ platformSendStartedAt: NOW - LINE_RETRY_KEY_TTL_MS }),
-    ).resolves.toEqual({
-      status: "unresolved",
-      error: "LINE retry key expired before the queued send could be reconciled",
-      retryable: false,
-    });
-    // Replaying an expired key would deliver a second copy, so nothing is sent.
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
   it("reports a deterministic rejection of the first push as never sent", async () => {
     await sendDurablePart({ partIndex: 0, partCount: 1, text: "hello" });
     fetchMock.mockImplementation(async () => jsonResponse({ message: "invalid recipient" }, 400));

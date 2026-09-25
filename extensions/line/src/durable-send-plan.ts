@@ -76,6 +76,12 @@ export class LineDurableSendPlanStoreError extends Error {
   }
 }
 
+const CLAIM_IDENTITY = [
+  ["to", "recipient"],
+  ["partCount", "fan-out"],
+  ["accountId", "account"],
+] as const;
+
 function createPlanStore() {
   return getLineRuntime().state.openBlobStore<Record<string, never>>({
     namespace: PLAN_NAMESPACE,
@@ -237,28 +243,12 @@ export async function recordLineDurableSendPlan(params: {
     );
   }
   const recorded = decodePlan(existing.bytes);
-  if (recorded.to !== recordable.to) {
-    // The keys are derived from the delivery, so a record under this key that names a
-    // different recipient is not this send's record and must not be replayed to it.
+  // The stored content wins over a re-render, but a record for another recipient, part
+  // count or account (LINE deduplicates retry keys per channel) is not this send's record.
+  const conflict = CLAIM_IDENTITY.find(([field]) => recorded[field] !== recordable[field]);
+  if (conflict) {
     throw new LineDurableSendPlanError(
-      `LINE durable send plan part ${params.partIndex} was recorded for a different recipient`,
-    );
-  }
-  if (recorded.partCount !== recordable.partCount) {
-    // Same reasoning one dimension over. A retry that now plans a different number of
-    // parts would pair this stored part with parts the record never described, and the
-    // mismatch only surfaces later as an inconsistent topology that cannot be settled.
-    throw new LineDurableSendPlanError(
-      `LINE durable send plan part ${params.partIndex} was recorded for a different fan-out`,
-    );
-  }
-  if (recorded.accountId !== recordable.accountId) {
-    // The dimension deduplication actually runs on: LINE remembers a retry key per
-    // channel, so a record claimed under one account says nothing about whether the
-    // other account's channel accepted the same key. Replaying it there would deliver
-    // a second copy.
-    throw new LineDurableSendPlanError(
-      `LINE durable send plan part ${params.partIndex} was recorded for a different account`,
+      `LINE durable send plan part ${params.partIndex} was recorded for a different ${conflict[1]}`,
     );
   }
   return recorded;
