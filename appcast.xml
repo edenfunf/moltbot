@@ -4,7 +4,7 @@
         <title>OpenClaw</title>
         <item>
             <title>2026.9.6</title>
-            <pubDate>Wed, 23 Sep 2026 21:54:53 +0000</pubDate>
+            <pubDate>Thu, 24 Sep 2026 09:41:03 +0000</pubDate>
             <link>https://raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml</link>
             <sparkle:version>2609000690</sparkle:version>
             <sparkle:shortVersionString>2026.9.6</sparkle:shortVersionString>
@@ -2880,7 +2880,7 @@ Shipped baseline exclusions: v2026.9.5 (34 PRs: #110565, #114060, #114491, #1219
 </ul>
 <p><a href="https://github.com/openclaw/openclaw/blob/main/CHANGELOG.md">View full changelog</a></p>
 ]]></description>
-            <enclosure url="https://github.com/openclaw/openclaw/releases/download/v2026.9.6/OpenClaw-2026.9.6.zip" length="474901372" type="application/octet-stream" sparkle:edSignature="y+OvOaIcIrJyNuy7EhLWHnCCBDxhSAF1aT/OrqD6U4gJnInqmZLg7JZjIc1utrl1Rzg+kT+lo6NYLkmyJvPMBg=="/>
+            <enclosure url="https://github.com/openclaw/openclaw/releases/download/v2026.9.6/OpenClaw-2026.9.6.zip" length="474880160" type="application/octet-stream" sparkle:edSignature="r2l5Eo+SB3Pqx3Ac38eTXWthk+UnpOd5KQbMJ00RE4P3i2Ahevah4BVcdBVu5BK/0PsXl6SycqV3M5WWcSfBBw=="/>
         </item>
         <item>
             <title>2026.9.5</title>
