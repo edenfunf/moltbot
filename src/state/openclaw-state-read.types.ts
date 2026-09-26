@@ -15,6 +15,10 @@ import type {
   ExecutionIdentityInspectionQuery,
   ExecutionIdentityInspectionOutcome,
 } from "../audit/execution-identity-inspection.types.js";
+import type {
+  ChannelIngressReadCommand,
+  ChannelIngressReadReply,
+} from "../channels/message/ingress-queue-read-contract.js";
 import type { ConfigSnapshotAuditRecord } from "../config/config-journal-snapshot.kernel.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { CronRunReceiptOwnerObservation } from "../cron/store/run-receipt.types.js";
@@ -64,6 +68,7 @@ import type {
 } from "../plugin-state/plugin-blob-worker-contract.js";
 import type { AsyncWorkScope } from "../shared/async-work-scope.js";
 import type { SkillLibraryReadOnlyOperations } from "../skills/library/selection-read.kernel.js";
+import type { TaskRetentionSource } from "../tasks/task-registry-retention-source.js";
 import type {
   TaskRegistryMutationScope,
   TaskRegistryStoreSnapshot,
@@ -86,6 +91,10 @@ import type { ConfigMachineState } from "./openclaw-state-db.generated.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 import type { OpenClawStateWorkerErrorPayload } from "./openclaw-state-worker-error.js";
 import type { SessionRepositoryWorkspaceRecord } from "./session-repository-workspaces.types.js";
+import type {
+  UserProfileAvatarReadCommand,
+  UserProfileAvatarReadReply,
+} from "./user-profiles-avatar.types.js";
 import type {
   UserChannelIdentitySelector,
   UserChannelIdentityLink,
@@ -112,8 +121,10 @@ export type OpenClawStateReadAuthority = {
 };
 
 export type OpenClawStateReadCommand =
+  | ChannelIngressReadCommand
   | { type: "deliveryQueue.outbound"; id?: string; mode: "pending" | "unfinished" }
   | { type: "config.snapshot.read" }
+  | { type: "acpSessions.list" }
   | { type: "acpSessions.metadata"; entries: readonly AcpSessionReadInput[] }
   | {
       [Kind in keyof McpOAuthReadOnlyOperations]: {
@@ -153,10 +164,12 @@ export type OpenClawStateReadCommand =
       type: "tasks.mutationSnapshot";
       input: TaskRegistryMutationScope | readonly TaskRegistryMutationScope[] | undefined;
     }
+  | { type: "tasks.retentionSource"; taskId: string }
   | { type: "sessionGroups.snapshot" }
   | { type: "sessionGroups.members"; cfg: OpenClawConfig }
   | { type: "onboardingRecommendations.read"; configKey: string }
   | { type: "userProfiles.reconcile"; profileId: string }
+  | UserProfileAvatarReadCommand
   | { type: "userProfiles.channelIdentity.list"; profileId: string }
   | { type: "userProfiles.channelIdentity.resolve"; identity: UserChannelIdentitySelector }
   | { type: "userProfiles.authority.resolve"; profileId: string }
@@ -164,6 +177,7 @@ export type OpenClawStateReadCommand =
   | { type: "userProfiles.githubAttribution.resolve"; profileIds: readonly string[] }
   | { type: "userProfiles.email.resolve"; email: string }
   | { type: "userProfiles.catalog" }
+  | { type: "userPreferences.values"; profileIds: readonly string[]; key: string }
   | {
       type: "githubPublication.lifecycle";
       publicationKind: "shared" | "personal";
@@ -210,6 +224,7 @@ export type OpenClawStateReadRequest = {
   command: OpenClawStateReadCommand | { type: "admit" };
 };
 export type OpenClawStateReadReply = (
+  | ChannelIngressReadReply
   | {
       ok: true;
       type: "agentDeletionJournal.status";
@@ -227,6 +242,12 @@ export type OpenClawStateReadReply = (
       type: "config.snapshot.read";
       sourceAdmitted: true;
       snapshot: ConfigSnapshotAuditRecord | null;
+    }
+  | {
+      ok: true;
+      type: "acpSessions.list";
+      sourceAdmitted: true;
+      rows: AcpSessionRow[];
     }
   | {
       ok: true;
@@ -262,6 +283,12 @@ export type OpenClawStateReadReply = (
       type: "tasks.mutationSnapshot";
       sourceAdmitted: true;
       snapshot: TaskRegistryStoreSnapshot;
+    }
+  | {
+      ok: true;
+      type: "tasks.retentionSource";
+      sourceAdmitted: true;
+      source: TaskRetentionSource | undefined;
     }
   | {
       [Kind in keyof SkillLibraryReadOnlyOperations]: {
@@ -389,11 +416,18 @@ export type OpenClawStateReadReply = (
     }
   | {
       ok: true;
+      type: "userPreferences.values";
+      sourceAdmitted: true;
+      values: Map<string, unknown>;
+    }
+  | {
+      ok: true;
       type: "userProfiles.reconcile";
       sourceAdmitted: true;
       profile: ProfileDisplayRow | undefined;
       emailBindings: UserProfileEmailBinding[];
     }
+  | ({ ok: true; sourceAdmitted: true } & UserProfileAvatarReadReply)
   | {
       ok: true;
       type: "userProfiles.channelIdentity.list";

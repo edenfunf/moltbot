@@ -408,8 +408,11 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved canonical resolveConfigPath export for pre-config native browser admission.
       // +1: supported read-only admitted operator scopes for tool presentation.
       // +2: canonical OAuth refresh fence and generation checks for managed runtimes.
+      // +5: approved meeting participation contract: four types and one callable (#152327).
+      // +2: shared workspace context preparation and bounded instruction snapshots.
+      // +1: Gateway-verified legacy webhook endpoint attribution.
       // +3: approval refusal classifier, the kind walker that ranks it, and the operator text.
-      4575,
+      4583,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -570,8 +573,11 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +1: approved canonical resolveConfigPath callable for pre-config native browser admission.
       // +1: supported read-only readGatewayToolOperatorScopes callable.
       // +2: canonical OAuth refresh fence and generation checks for managed runtimes.
+      // +1: approved runMeetingParticipationWithBrowser callable (#152327).
+      // +2: shared workspace context preparation and bounded instruction snapshots.
+      // +1: Gateway-verified legacy webhook endpoint attribution.
       // +2: approval refusal classifier and the kind walker that ranks it.
-      2686,
+      2690,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(

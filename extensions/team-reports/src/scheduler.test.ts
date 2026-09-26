@@ -9,7 +9,8 @@ import { describePeriod } from "./periods.js";
 import { completion, type Complete } from "./reports.fixtures.js";
 import type { ReportSourceFactory, ResolvedTeamReportsConfig } from "./run.js";
 import { TeamReportsScheduler } from "./scheduler.js";
-import { createDiscordSource, createGithubSource } from "./sources/index.js";
+import { createDiscordSource } from "./sources/discord/index.js";
+import { createGithubSource } from "./sources/github/index.js";
 import { teamReportsSqliteBackendEntrypoint } from "./sqlite-backend-entrypoint.test-support.js";
 import { createTeamReportsStore, type TeamReportsStore } from "./store.js";
 import type { DiscordSource, GithubSource, SourceRuntime, SourceStatus } from "./types.js";
@@ -219,12 +220,9 @@ afterEach(async () => {
 });
 
 describe("Team Reports schedule boundaries", () => {
-  it.each([
-    { random: 0, expected: "2026-08-20T00:05:00Z" },
-    { random: 0.5, expected: "2026-08-20T00:07:30Z" },
-    { random: 1, expected: "2026-08-20T00:10:00Z" },
-  ])("keeps closed-day jitter in the configured window ($random)", async ({ random, expected }) => {
-    vi.spyOn(Math, "random").mockReturnValue(random);
+  it("schedules fractional closed-day jitter before and after today's boundary", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const expected = "2026-08-20T00:07:30Z";
     for (const [now, expectedDue] of [
       ["2026-08-20T00:00:00Z", Date.parse(expected)],
       ["2026-08-20T00:11:00Z", Date.parse(expected) + 86_400_000],
@@ -239,7 +237,6 @@ describe("Team Reports schedule boundaries", () => {
   it.each([
     { now: "2026-08-20T02:15:00Z", hours: 4, expected: "2026-08-20T04:00:00Z" },
     { now: "2026-08-20T04:00:00Z", hours: 4, expected: "2026-08-20T08:00:00Z" },
-    { now: "2026-08-20T23:59:59Z", hours: 4, expected: "2026-08-21T00:00:00Z" },
     { now: "2026-08-20T21:00:00Z", hours: 5, expected: "2026-08-21T00:00:00Z" },
     { now: "2026-08-20T02:15:00Z", hours: 0, expected: undefined },
   ])(

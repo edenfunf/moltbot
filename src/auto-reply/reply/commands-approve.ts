@@ -23,7 +23,7 @@ import {
 } from "../../infra/channel-approval-auth.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveChannelAccountId } from "./channel-context.js";
-import { requireGatewayClientScope } from "./command-gates.js";
+import { commandReply, requireGatewayClientScope } from "./command-gates.js";
 import type { CommandHandler } from "./commands-types.js";
 
 const COMMAND_REGEX = /^\/?approve(?:\s|$)/i;
@@ -128,7 +128,7 @@ export async function handleApproveCommandFromContext(
     return null;
   }
   if (!parsed.ok) {
-    return { shouldContinue: false, reply: { text: parsed.error } };
+    return commandReply(parsed.error);
   }
 
   const effectiveAccountId = resolveChannelAccountId({
@@ -194,7 +194,7 @@ export async function handleApproveCommandFromContext(
       (behavior) => behavior?.kind === "reply",
     );
     if (replyBehavior?.kind === "reply") {
-      return { shouldContinue: false, reply: { text: replyBehavior.text } };
+      return commandReply(replyBehavior.text);
     }
     if (Array.from(commandBehaviors.values()).some((behavior) => behavior?.kind === "ignore")) {
       return { shouldContinue: false };
@@ -259,10 +259,9 @@ export async function handleApproveCommandFromContext(
     systemAgentNeedsOwner &&
     !params.command.senderIsOwner &&
     authorizations["system-agent"].authorized;
-  const ownerOnlyResult = {
-    shouldContinue: false,
-    reply: { text: "❌ Only the owner can approve OpenClaw changes in this chat." },
-  };
+  const ownerOnlyResult = commandReply(
+    "❌ Only the owner can approve OpenClaw changes in this chat.",
+  );
   const methods = approvalKinds.filter((approvalKind) => {
     if (approvalKind === "system-agent" && systemAgentRefusedForOwner) {
       return false;
@@ -278,14 +277,10 @@ export async function handleApproveCommandFromContext(
     if (systemAgentRefusedForOwner) {
       return ownerOnlyResult;
     }
-    return {
-      shouldContinue: false,
-      reply: {
-        text:
-          Object.values(authorizations).find((authorization) => authorization.reason)?.reason ??
-          "❌ You are not authorized to approve this request.",
-      },
-    };
+    return commandReply(
+      Object.values(authorizations).find((authorization) => authorization.reason)?.reason ??
+        "❌ You are not authorized to approve this request.",
+    );
   }
 
   try {
@@ -301,17 +296,10 @@ export async function handleApproveCommandFromContext(
         return ownerOnlyResult;
       }
     }
-    return {
-      shouldContinue: false,
-      reply: { text: `❌ Failed to submit approval: ${formatApprovalSubmitError(error)}` },
-    };
+    return commandReply(`❌ Failed to submit approval: ${formatApprovalSubmitError(error)}`);
   }
 
-  return {
-    shouldContinue: false,
-    reply: { text: `✅ Approval ${parsed.decision} submitted for ${parsed.id}.` },
-  };
+  return commandReply(`✅ Approval ${parsed.decision} submitted for ${parsed.id}.`);
 }
 
-export const handleApproveCommand: CommandHandler = async (params, allowTextCommands) =>
-  await handleApproveCommandFromContext(params, allowTextCommands);
+export const handleApproveCommand: CommandHandler = handleApproveCommandFromContext;

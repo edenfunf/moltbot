@@ -197,7 +197,6 @@ export function summarizeAction(action: Record<string, unknown>): SlackActionSum
     actionType === "number_input" && inputValue != null
       ? parseStrictFiniteNumber(inputValue)
       : undefined;
-  const parsedNumber = Number.isFinite(inputNumber) ? inputNumber : undefined;
   const inputEmail =
     actionType === "email_text_input" && inputValue?.includes("@") ? inputValue : undefined;
   let inputUrl: string | undefined;
@@ -237,7 +236,7 @@ export function summarizeAction(action: Record<string, unknown>): SlackActionSum
     selectedDateTime:
       typeof typed.selected_date_time === "number" ? typed.selected_date_time : undefined,
     inputValue,
-    inputNumber: parsedNumber,
+    inputNumber,
     inputEmail,
     inputUrl,
     richTextValue,

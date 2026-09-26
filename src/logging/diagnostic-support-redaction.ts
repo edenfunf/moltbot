@@ -68,21 +68,12 @@ type SupportObjectEntry = {
   value: unknown;
 };
 
-type LimitedSupportArray = {
-  count: number;
-  items: unknown[];
-};
-
 function isPrivateSupportField(key: string): boolean {
   return (
     SECRET_SUPPORT_FIELD_RE.test(key) ||
     PAYLOAD_SUPPORT_FIELD_RE.test(key) ||
     IDENTIFIER_SUPPORT_FIELD_RE.test(key)
   );
-}
-
-function isPrivateConfigField(key: string): boolean {
-  return isPrivateSupportField(key) || CONFIG_PRIVATE_FIELD_RE.test(key);
 }
 
 function sanitizeSecretRefForSupport(value: Record<string, unknown>): Record<string, unknown> {
@@ -134,13 +125,6 @@ function limitedSupportObjectEntries(record: Record<string, unknown>): {
   }
   entries.sort((a, b) => a.key.localeCompare(b.key));
   return { count, entries };
-}
-
-function limitedSupportArray(value: unknown[]): LimitedSupportArray {
-  return {
-    count: value.length,
-    items: value.slice(0, MAX_SUPPORT_ARRAY_ITEMS),
-  };
 }
 
 function addTruncationMetadata(sanitized: Record<string, unknown>, count: number): void {
@@ -461,12 +445,27 @@ export function redactPublicSupportVersion(version: string): string {
     : "[redacted-version]";
 }
 
+/** Validation paths may include operator-defined keys at any depth. */
+export function redactPublicSupportConfigKey(value: string): string {
+  const anchor =
+    /^(mcp\.servers|models\.providers|plugins\.entries|skills\.entries|auth\.profiles|cron\.jobs|agents\.list|hooks\.internal\.entries|engines\.node)(?:\.|$)/u.exec(
+      value,
+    )?.[1] ??
+    /^(agents|auth|channels|commands|cron|engines|gateway|hooks|mcp|messages|models|plugins|session|skills|stateDir|tools)(?:\.|$)/u.exec(
+      value,
+    )?.[1];
+  return anchor ? (value === anchor ? anchor : `${anchor}.*`) : "[redacted-key]";
+}
+
 /** Public diagnostics expose recognized causes, never arbitrary prose or executable arguments. */
 export function redactPublicSupportDiagnosticLine(
   value: string,
   context: SupportRedactionContext,
 ): string {
   const line = redactSupportDiagnosticLine(value, context);
+  if (line === "Invalid configuration field" || line === "Configuration could not be read.") {
+    return line;
+  }
   if (line.startsWith("System-scope Gateway package update cannot write its install root ")) {
     return "System-scope Gateway package update cannot write its install root.";
   }
@@ -523,8 +522,13 @@ export function redactPublicSupportDiagnosticLine(
       /\b(?:[Cc]onnection (?:refused|closed|timed out)|[Pp]ermission denied|[Nn]o space left on device|MCP error -?\d{1,5}|HTTP [1-5]\d{2}|Invalid package dist content inventory|Package rollback (?:launcher backup changed|verification (?:timed out|failed))|managed update handoff (?:exited before (?:responding|signaling readiness)|did not (?:respond|signal readiness)))\b/gu,
     ) ?? []
   ).map((cause) => cause.replace(/^permission denied$/u, "Permission denied"));
+  // Candidate admission's existing text protocol carries only these fixed validation lines.
+  const configFields = value.split(/[\r\n\u2028\u2029]|; /u).flatMap((entry) => {
+    const field = /^(?:- )?(.+): Invalid configuration field$/u.exec(entry)?.[1];
+    return field ? [`${redactPublicSupportConfigKey(field)}: Invalid configuration field`] : [];
+  });
   return truncateUtf16Safe(
-    [...new Set([...codes, ...causes])].join("; ") || "[redacted-diagnostic]",
+    [...new Set([...codes, ...causes, ...configFields])].join("; ") || "[redacted-diagnostic]",
     200,
   );
 }
@@ -580,7 +584,7 @@ function sanitizeSupportValue(
   if (value == null || typeof value === "boolean") {
     return value;
   }
-  const privateField = config ? isPrivateConfigField(key) : isPrivateSupportField(key);
+  const privateField = isPrivateSupportField(key) || (config && CONFIG_PRIVATE_FIELD_RE.test(key));
   if (typeof value === "number") {
     return privateField ? "<redacted>" : value;
   }
@@ -599,7 +603,8 @@ function sanitizeSupportValue(
         count: value.length,
       };
     }
-    const { count, items } = limitedSupportArray(value);
+    const count = value.length;
+    const items = value.slice(0, MAX_SUPPORT_ARRAY_ITEMS);
     return supportArrayResult(
       !config && key === "programArguments"
         ? sanitizeCommandArguments(items, redaction)

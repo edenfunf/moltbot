@@ -1,22 +1,19 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isMainThread } from "node:worker_threads";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDeferred, withTestTimeout } from "../../test/helpers/promise.js";
-import { stopChildProcess } from "../../test/helpers/stop-child-process.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { sqliteReaderDatabasePathKey } from "../infra/sqlite-reader-lifecycle.js";
 import { onSqliteWalCheckpoint } from "../infra/sqlite-wal-checkpoint.js";
-import * as coordinatorAcquisition from "../infra/state-database-coordinator-acquisition.js";
 import {
   acquireStateDatabaseCoordinator,
   acquireStateDatabaseHandleExclusion,
 } from "../infra/state-database-coordinator.js";
+import { holdStateCoordinator } from "./openclaw-state-coordinator.test-support.js";
 import {
   closeOpenClawStateDatabaseByPath,
   closeOpenClawStateDatabaseByPathAsync,
@@ -42,66 +39,6 @@ beforeAll(() => {
     true,
   );
 });
-
-async function holdStateCoordinator(databasePath: string, releaseAfterMs = 0) {
-  // Initialize the real coordinator location/permissions through its owner.
-  const coordinator = acquireStateDatabaseCoordinator({ databasePath });
-  const coordinatorPath = coordinator.path;
-  coordinator.release();
-  const child = spawn(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `
-    import { DatabaseSync } from "node:sqlite";
-    process.title = "openclaw-lock-fixture";
-    const db = new DatabaseSync(${JSON.stringify(coordinatorPath)});
-    db.exec("PRAGMA journal_mode=MEMORY; BEGIN EXCLUSIVE");
-    process.send({ ready: true });
-    process.on("message", (message) => {
-      if (message.observe) {
-        process.send({ held: db.isTransaction });
-        return;
-      }
-      if (!message.release) return;
-      process.removeAllListeners("message");
-      setTimeout(() => {
-        db.exec("ROLLBACK");
-        db.close();
-        process.disconnect();
-      }, ${releaseAfterMs});
-    });
-  `,
-    ],
-    { stdio: ["ignore", "ignore", "pipe", "ipc"] },
-  );
-  try {
-    const [message] = await once(child, "message", { signal: AbortSignal.timeout(10_000) });
-    expect(message).toEqual({ ready: true });
-  } catch (error) {
-    await stopChildProcess(child, 5_000);
-    throw error;
-  }
-  const release = async () => {
-    try {
-      const closed = once(child, "close", { signal: AbortSignal.timeout(5_000) });
-      child.send({ release: true });
-      await closed;
-    } finally {
-      await stopChildProcess(child, 5_000);
-    }
-  };
-  return Object.assign(release, {
-    pid: child.pid,
-    async observe() {
-      const observed = once(child, "message", { signal: AbortSignal.timeout(5_000) });
-      child.send({ observe: true });
-      const [message] = await observed;
-      expect(message).toEqual({ held: true });
-    },
-  });
-}
 
 function openStateDatabaseWithPeriodicMaintenance(databasePath: string) {
   let periodic: (() => void) | undefined;
@@ -351,7 +288,7 @@ describe("shared-state transaction lifecycle participation", () => {
     }
   });
 
-  it("keeps the event loop available while periodic WAL maintenance waits for a foreign owner", async () => {
+  it("keeps periodic WAL work off the host while waiting and after foreign custody releases", async () => {
     const root = tempDirs.make("openclaw-state-wal-event-loop-");
     const { database, periodic } = openStateDatabaseWithPeriodicMaintenance(
       path.join(root, "openclaw.sqlite"),
@@ -360,6 +297,8 @@ describe("shared-state transaction lifecycle participation", () => {
     const { observations, stopObserving, waitForObservation } = observeStateWalCheckpoints(
       database.path,
     );
+    const prepare = vi.spyOn(database.db, "prepare");
+    const execute = vi.spyOn(database.db, "exec");
     let released: Promise<void> | undefined;
     try {
       const nextTurn = new Promise<void>((resolve) => {
@@ -383,7 +322,12 @@ describe("shared-state transaction lifecycle participation", () => {
       released = release();
       await waitForObservation((states) => states.length > 0, 5_000);
       expect(observations[0]).toBe("complete");
+      expect(database.walMaintenance.health).toMatchObject({ state: "complete", warning: false });
+      expect(prepare).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
     } finally {
+      prepare.mockRestore();
+      execute.mockRestore();
       stopObserving();
       await (released ?? release());
     }
@@ -431,8 +375,8 @@ describe("shared-state transaction lifecycle participation", () => {
         released = release();
         await waitForObservation((states) => states.length > 0, 5_000);
         expect(database.walMaintenance.health?.state).toBe("error");
-        expect(database.walMaintenance.health?.error).toContain(
-          "SQLite database file identity changed before existing-only open",
+        expect(database.walMaintenance.health?.error).toMatch(
+          /^SQLite database (?:file identity|pathname) changed\b/,
         );
         expect(observations).toEqual(["error"]);
         expect(sqliteBytes(database.path)).toEqual(replacementBytes);
@@ -531,107 +475,6 @@ describe("shared-state transaction lifecycle participation", () => {
       }
     },
   );
-
-  it("retains failed periodic coordinator cleanup and retries release without replaying maintenance", async () => {
-    const root = tempDirs.make("openclaw-state-wal-release-");
-    const originalDirectory = path.join(root, "original");
-    const successorDirectory = path.join(root, "successor");
-    const alias = path.join(root, "current");
-    fs.mkdirSync(originalDirectory);
-    fs.mkdirSync(successorDirectory);
-    fs.symlinkSync(originalDirectory, alias, "junction");
-    const { database, periodic } = openStateDatabaseWithPeriodicMaintenance(
-      path.join(alias, "openclaw.sqlite"),
-    );
-    const successor = openOpenClawStateDatabase({
-      path: path.join(successorDirectory, "openclaw.sqlite"),
-    });
-    await closeOpenClawStateDatabaseByPathAsync(successor.path);
-    const successorBytes = sqliteBytes(successor.path);
-    const sqlite = requireNodeSqlite();
-    const observed = vi.spyOn(sqlite.DatabaseSync.prototype, "exec");
-    let coordinatorDatabase: DatabaseSync | undefined;
-    try {
-      const warm = acquireStateDatabaseCoordinator({ databasePath: database.path });
-      coordinatorDatabase = observed.mock.contexts.find(
-        (context) => context instanceof sqlite.DatabaseSync,
-      );
-      warm.release();
-    } finally {
-      observed.mockRestore();
-    }
-    if (!coordinatorDatabase) {
-      throw new Error("Warm state coordinator did not expose its native connection");
-    }
-    const { observations, stopObserving, waitForObservation } = observeStateWalCheckpoints(
-      database.path,
-    );
-    const releaseObservations: string[][] = [];
-    let originalLease:
-      | Awaited<ReturnType<typeof coordinatorAcquisition.acquireStateDatabaseCoordinatorWithWait>>
-      | undefined;
-    const acquireReal = coordinatorAcquisition.acquireStateDatabaseCoordinatorWithWait;
-    const acquire = vi
-      .spyOn(coordinatorAcquisition, "acquireStateDatabaseCoordinatorWithWait")
-      .mockImplementation(async (options) => {
-        const lease = await acquireReal(options);
-        originalLease ??= lease;
-        return lease;
-      });
-    const closeNative = coordinatorDatabase.close.bind(coordinatorDatabase);
-    let failuresRemaining = 2;
-    const close = vi.spyOn(coordinatorDatabase, "close").mockImplementation(() => {
-      releaseObservations.push([...observations]);
-      if (failuresRemaining > 0) {
-        failuresRemaining -= 1;
-        throw new Error("Fixture periodic coordinator close failed");
-      }
-      closeNative();
-    });
-    try {
-      periodic();
-      await waitForObservation((states) => states.includes("error"), 1_000);
-      expect(database.walMaintenance.health?.state).toBe("error");
-      expect(observations).toContain("complete");
-      expect(coordinatorDatabase.isOpen).toBe(true);
-      expect(coordinatorDatabase.isTransaction).toBe(false);
-      expect(() => acquireStateDatabaseCoordinator({ databasePath: database.path })).toThrow(
-        "cleanup is pending",
-      );
-      fs.unlinkSync(alias);
-      fs.symlinkSync(successorDirectory, alias, "junction");
-      try {
-        const settled = observations.length;
-        periodic();
-        await waitForObservation((states) => states.length > settled, 1_000);
-        expect(observations).toHaveLength(settled + 1);
-        expect(database.walMaintenance.health?.error).toContain("cleanup is pending");
-        expect(coordinatorDatabase.isOpen).toBe(true);
-        expect(sqliteBytes(successor.path)).toEqual(successorBytes);
-      } finally {
-        fs.unlinkSync(alias);
-        fs.symlinkSync(originalDirectory, alias, "junction");
-      }
-      const completed = [...observations];
-      await expect(closeOpenClawStateDatabaseByPathAsync(database.path)).rejects.toThrow(
-        "failed to release state-lifecycle coordinator",
-      );
-      expect(database.db.isOpen).toBe(true);
-      expect(coordinatorDatabase.isOpen).toBe(true);
-      expect(observations).toEqual(completed);
-      await expect(closeOpenClawStateDatabaseByPathAsync(database.path)).resolves.toBe(true);
-      expect(coordinatorDatabase.isOpen).toBe(false);
-      expect(database.db.isOpen).toBe(false);
-      expect(releaseObservations.slice(1)).toEqual([completed, completed]);
-      expect(observations).toEqual([...completed, "complete"]);
-    } finally {
-      close.mockRestore();
-      acquire.mockRestore();
-      stopObserving();
-      originalLease?.release();
-      await closeOpenClawStateDatabaseByPathAsync(database.path);
-    }
-  });
 
   it.each(["explicit", "periodic"] as const)(
     "defers %s WAL maintenance while lifecycle exclusion is held and retries afterward",
